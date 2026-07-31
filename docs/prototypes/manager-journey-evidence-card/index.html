@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="Throwaway Causal Delay Copilot manager journey prototype" />
+    <title>Causal Delay Copilot — Manager Journey Prototype</title>
+    <link rel="stylesheet" href="prototype.css" />
+  </head>
+  <body>
+    <header class="app-header">
+      <div class="brand-lockup">
+        <span class="brand-mark" aria-hidden="true">C</span>
+        <span>
+          <strong>Causal Delay Copilot</strong>
+          <span class="brand-subtitle">Manager decision workspace</span>
+        </span>
+      </div>
+      <div class="header-actions">
+        <div class="trigger-switcher" aria-label="Investigation trigger">
+          <span class="header-label">Trigger</span>
+          <button class="button button-ghost trigger-button" type="button" data-trigger="reactive" aria-pressed="true">Reactive risk</button>
+          <button class="button button-ghost trigger-button" type="button" data-trigger="proactive" aria-pressed="false">Proactive pre-award</button>
+        </div>
+        <button class="button button-secondary" type="button" data-action="audit" aria-expanded="false">Audit replay</button>
+      </div>
+    </header>
+
+    <div class="prototype-banner">
+      <span class="eyebrow">Throwaway UI prototype · issue #9</span>
+      <p>Compare three visual interaction models for the same decision journey. The bottom control is prototype-only.</p>
+      <a class="banner-link" href="README.md">Run notes</a>
+    </div>
+
+    <main id="app" class="app-main" aria-live="polite"></main>
+
+    <div id="live-region" class="sr-only" aria-live="polite" aria-atomic="true"></div>
+
+    <nav id="prototype-switcher" class="prototype-switcher" aria-label="Prototype variants">
+      <button class="switcher-arrow" type="button" data-action="variant-prev" aria-label="Previous prototype variant">←</button>
+      <span id="variant-label" class="switcher-label">B — Decision brief</span>
+      <button class="switcher-arrow" type="button" data-action="variant-next" aria-label="Next prototype variant">→</button>
+    </nav>
+
+    <script src="prototype.js"></script>
+  </body>
+</html>
