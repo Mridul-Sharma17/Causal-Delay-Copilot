@@ -15,3 +15,11 @@ _Avoid_: Manager Decision, Approval, Recommendation
 **Audit Event**:
 An append-only, timestamped record of one material workflow occurrence, identifying its actor and referenced object versions so the experience can be replayed. It records domain activity without owning the underlying objects.
 _Avoid_: Log Entry, History Row, Mutable Audit Record
+
+**Decision Brief Snapshot**:
+An immutable Governance & Audit record of the exact manager-visible decision brief for one presentation, including its allow-listed evidence, analysis, recommendation, artefact, explicit unavailable states, and presentation contract. It proves delivery or rendering only when the corresponding Audit Event exists; it never proves that the manager read it or changes upstream objects.
+_Avoid_: Current Brief, Live Recommendation, Screenshot, UI State
+
+**Replay**:
+A read-only reconstruction of one Investigation Request's historical manager-visible state at an explicit Audit Event cutoff, using the immutable versions referenced by its events and snapshots. It performs no new analysis, currentness check, selection, or decision; unresolved or incompatible references yield an unavailable result rather than current-state substitution.
+_Avoid_: Re-run, Refresh, Playback

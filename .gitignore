@@ -1,0 +1,41 @@
+# Local secrets
+.env
+.env.*
+!.env.example
+
+# Python environments and generated files
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+build/
+*.egg-info/
+
+# Node and frontend output
+node_modules/
+dist/
+.vite/
+coverage/
+playwright-report/
+test-results/
+
+# Local application state
+*.sqlite
+*.sqlite3
+*.sqlite3-*
+*.log
+
+# Temporary, editor, and operating-system files
+*.tmp
+*.bak
+*.swp
+*~
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
