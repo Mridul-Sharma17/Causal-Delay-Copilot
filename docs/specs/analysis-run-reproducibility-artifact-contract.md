@@ -95,25 +95,28 @@ and a new Analysis Run. It is not part of this Core contract.
     or compute-runtime fingerprint change creates a cache miss.
 15. `fresh_execution`, `existing_run_reuse`, scientific outcome, lifecycle,
     availability, and validation are separate dimensions.
-16. Machine verification permits safe local display but never silently makes a
-    run a Validated Reference.
-17. Only the developer-operated release-validation workflow may issue a
+16. Machine verification permits safe application display but never silently
+    makes a run a Validated Reference.
+17. Only the system-operator-controlled release-validation workflow may issue a
     Validation Attestation or update a validated-reference registry.
 18. Validation and promotion never rewrite, relabel, or copy-edit a bundle.
 19. The reference-validation gate fails closed on any missing check,
     out-of-tolerance replay, unsupported schema, or confidentiality finding.
-20. The single-user Core permits one fresh execution at a time. Sealed-bundle
-    reads remain available while it runs.
+20. Core permits one fresh execution globally at a time across all Demo
+    Workspaces. Sealed-bundle reads remain available while it runs.
 21. Interrupted executions are never resumed. Retry creates a new Analysis Run.
 22. Validated References and runs referenced by an Audit Event or Manager
     Decision are pinned against cleanup.
-23. Core has no automatic expiry. Cleanup is explicit, developer-operated, and
-    must refuse pinned runs.
+23. Analysis Runs and sealed bundles have no automatic expiry. Demo Workspace
+    lifecycle never deletes or unpins them. Cleanup is explicit,
+    system-operator-controlled, and must refuse pinned runs.
 24. SHA-256 hashes and the release allow-list detect corruption and accidental
-    mismatch; they do not claim protection against a malicious local operator.
-25. The OS account and local filesystem are the Core confidentiality and
-    access-control boundary. Artifact signing and application-level encryption
-    at rest are outside Core.
+    mismatch; they do not claim protection against a malicious trusted-runtime,
+    delivery-platform, or system operator.
+25. The trusted application runtime, protected state root, Demo Workspace
+    isolation, and delivery-platform/operator controls are the Core
+    access-control boundary. Core accepts only bundled public-safe data;
+    artifact signing and application-level encryption at rest are outside Core.
 
 ## Closed identifier and version registry
 
@@ -771,11 +774,11 @@ safe expected/observed facts for every check. All must pass for
 
 ## Validation Attestation and reference promotion
 
-Only a developer-operated release-validation command outside the product UI may
-promote a bundle. It accepts a run ID, a reference-slot ID, and a release ID;
-it never accepts a filesystem path. The application must be stopped, and the
-command must hold the exclusive maintenance lease through attestation and
-registry publication.
+Only a system-operator-controlled release-validation command outside the
+product UI may promote a bundle. It accepts a run ID, a reference-slot ID, and
+a release ID; it never accepts a filesystem path. The application must be
+stopped, and the command must hold the exclusive maintenance lease through
+attestation and registry publication.
 
 Promotion requires:
 

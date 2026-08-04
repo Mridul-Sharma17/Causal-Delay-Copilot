@@ -4,6 +4,14 @@ This context exclusively owns and records Manager Decisions and the immutable hi
 
 ## Language
 
+**Demo Workspace**:
+An anonymous isolation boundary for one browser's mutable journey, audit view, and replay. It is not an account, tenant, or authentication boundary.
+_Avoid_: User Session, Account, Tenant, Authenticated Workspace
+
+**Anonymous Demo Manager**:
+The workspace-scoped actor whose explicit disposition may form a prototype Manager Decision without claiming verified organizational identity or real-world execution authority.
+_Avoid_: Authenticated Manager, User Account, Organizational Approver
+
 **Manager Decision**:
 The manager's explicit recorded disposition of an Action Recommendation or Drafted Artefact: approve, edit, reject, or investigate further. An authorizing disposition references Advice Currentness proved for that exact authorization attempt. It records authorization intent, not proof of execution.
 _Avoid_: User Action, Recommendation Outcome, Execution

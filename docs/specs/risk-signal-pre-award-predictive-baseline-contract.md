@@ -603,8 +603,8 @@ eligibility failures or turn them into prediction failures.
 
 ## Confidentiality and service boundary
 
-1. Ingress is local-only, allow-listed, size-bounded, and validated before
-   normalization.
+1. Ingress is application-controlled and server-side, accepts only allow-listed
+   bundled inputs, is size-bounded, and is validated before normalization.
 2. Raw payloads remain in protected source storage. Normalized records retain
    hashes and evidence pointers, not copied free text.
 3. A normalized or derived record inherits the most restrictive data

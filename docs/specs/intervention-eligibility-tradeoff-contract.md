@@ -4326,7 +4326,8 @@ Implementations must pass at least the following cases.
 - Exact UI component geometry and click paths.
 - Evaluation-harness oracle utility and acceptance thresholds.
 - Claiming domain-expert approval before the downstream review occurs.
-- Multi-user authorization, production tenancy, or cloud execution.
+- Authenticated multi-user authorization, production tenancy, or real-world
+  action execution.
 
 ## Domain-language impact
 

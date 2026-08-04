@@ -1629,8 +1629,9 @@ An implementation conforms only when:
   storage paths, and validated-versus-fresh state belong to issue #7.
 - DGP acceptance parameters, repetition counts, scientific power, regret
   policies, and walkthrough acceptance belong to issue #13.
-- Remote training, Google Colab, cloud execution, GPU requirements, and
-  auto-tuning are outside Core. Core training is local CPU execution.
+- Remote training services, Google Colab, GPU requirements, and auto-tuning
+  are outside Core. Core execution is CPU-only inside the same application
+  runtime in hosted and local delivery profiles.
 - Changing learner parameters after observing an effect is prohibited. A
   future learner change requires a new engine configuration, independent
   validation, and a new Analysis Run.

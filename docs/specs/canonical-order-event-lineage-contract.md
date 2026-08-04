@@ -289,7 +289,7 @@ Raw source values are not copied into this record. A value fingerprint is
 permitted only when the manifest's confidentiality and redistribution policy
 allows it. The locator token must never contain a PO number, supplier key,
 contractual identifier, raw JSON key, or other source value. A protected,
-local-only locator map resolves the token to the exact row/key and field path;
+backend-only locator map resolves the token to the exact row/key and field path;
 that map remains part of the protected source package and is not a
 distributable lineage artifact.
 
