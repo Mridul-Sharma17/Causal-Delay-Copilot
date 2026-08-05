@@ -12,6 +12,36 @@ from uuid import uuid4
 from .contracts import AuditOccurrenceRequest
 
 
+AUDIT_EVENTS_TABLE = """
+    CREATE TABLE IF NOT EXISTS audit_events (
+        event_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+        occurrence_id TEXT NOT NULL UNIQUE,
+        idempotency_key TEXT NOT NULL UNIQUE,
+        occurrence_kind TEXT NOT NULL,
+        outcome_code TEXT NOT NULL,
+        content_hash TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    )
+"""
+AUDIT_EVENTS_COLUMNS = [
+    "event_seq",
+    "occurrence_id",
+    "idempotency_key",
+    "occurrence_kind",
+    "outcome_code",
+    "content_hash",
+    "created_at",
+]
+
+
+def ensure_audit_schema(connection: sqlite3.Connection, *, create: bool) -> None:
+    if create:
+        connection.execute(AUDIT_EVENTS_TABLE)
+    columns = connection.execute("PRAGMA table_info(audit_events)").fetchall()
+    if [str(column[1]) for column in columns] != AUDIT_EVENTS_COLUMNS:
+        raise sqlite3.DatabaseError("audit schema is not the locked Core schema")
+
+
 class AuditIdempotencyConflict(Exception):
     """The same logical key was submitted with different safe content."""
 
@@ -36,28 +66,24 @@ class AuditStore:
         self._lock = RLock()
 
     def initialize(self) -> None:
-        self._database_path.parent.mkdir(parents=True, exist_ok=True)
-        connection = sqlite3.connect(
-            self._database_path,
-            timeout=5.0,
-            isolation_level=None,
-            check_same_thread=False,
-        )
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS audit_events (
-                event_seq INTEGER PRIMARY KEY AUTOINCREMENT,
-                occurrence_id TEXT NOT NULL UNIQUE,
-                idempotency_key TEXT NOT NULL UNIQUE,
-                occurrence_kind TEXT NOT NULL,
-                outcome_code TEXT NOT NULL,
-                content_hash TEXT NOT NULL,
-                created_at TEXT NOT NULL
+        if not self._database_path.is_file():
+            raise AuditStoreUnavailable
+        try:
+            connection = sqlite3.connect(
+                self._database_path,
+                timeout=5.0,
+                isolation_level=None,
+                check_same_thread=False,
             )
-            """
-        )
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys = ON")
+        except sqlite3.Error as error:
+            raise AuditStoreUnavailable from error
+        try:
+            ensure_audit_schema(connection, create=False)
+        except sqlite3.Error as error:
+            connection.close()
+            raise AuditStoreUnavailable from error
         self._connection = connection
 
     def close(self) -> None:

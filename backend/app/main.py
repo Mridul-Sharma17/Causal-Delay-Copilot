@@ -22,6 +22,7 @@ from .contracts import (
     HealthResponse,
 )
 from .settings import Settings
+from .state import StateRoot
 
 
 def _error_response(status_code: int, code: str, recovery_action: str) -> JSONResponse:
@@ -36,11 +37,14 @@ def _error_response(status_code: int, code: str, recovery_action: str) -> JSONRe
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     resolved_settings = settings or Settings()
+    state_root = StateRoot(resolved_settings)
     audit_store = AuditStore(resolved_settings.database_path)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        state_layout = state_root.initialize()
         audit_store.initialize()
+        app.state.state_layout = state_layout
         try:
             yield
         finally:

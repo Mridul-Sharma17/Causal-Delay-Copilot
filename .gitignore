@@ -26,6 +26,7 @@ playwright-report/
 test-results/
 
 # Local application state
+state/
 *.sqlite
 *.sqlite3
 *.sqlite3-*
