@@ -26,6 +26,7 @@ class QuotaPolicy(BaseModel):
     max_workspaces: int = Field(default=100, ge=1)
     max_workspace_mutations: int = Field(default=200, ge=1)
     max_workspace_terminal_fresh_bundles: int = Field(default=4, ge=1)
+    workspace_inactive_days: int = Field(default=7, ge=1)
     max_workspace_mutations_per_minute: int = Field(default=30, ge=1)
     max_global_mutations_per_minute: int = Field(default=120, ge=1)
     max_running_operations: int = Field(default=1, ge=1)

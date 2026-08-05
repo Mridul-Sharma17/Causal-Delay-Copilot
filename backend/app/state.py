@@ -10,9 +10,10 @@ from uuid import uuid4
 from .audit import ensure_audit_schema
 from .errors import CoreSafeError, SafeErrorCode
 from .settings import Settings
+from .workspace import DEMO_WORKSPACE_SCHEMA_VERSION, ensure_workspace_schema
 
 
-CORE_STATE_SCHEMA_VERSION = "core-state.v1"
+CORE_STATE_SCHEMA_VERSION = "core-state.v2"
 RELEASE_IDENTITY_SCHEMA_VERSION = "release-identity.v1"
 QUOTA_POLICY_SCHEMA_VERSION = "quota-policy.v1"
 VALIDATED_REFERENCE_PARTITION_SCHEMA_VERSION = "validated-reference-partition.v1"
@@ -208,6 +209,7 @@ class StateRoot:
         with sqlite3.connect(database_path, timeout=5.0) as connection:
             connection.execute("PRAGMA foreign_keys = ON")
             connection.execute("BEGIN IMMEDIATE")
+            ensure_workspace_schema(connection, create=True)
             ensure_audit_schema(connection, create=True)
             _ensure_table(
                 connection,
@@ -308,6 +310,8 @@ class StateRoot:
 
     def _validate_database(self) -> None:
         with sqlite3.connect(self._layout.database_path, timeout=5.0) as connection:
+            connection.execute("PRAGMA foreign_keys = ON")
+            ensure_workspace_schema(connection, create=False)
             ensure_audit_schema(connection, create=False)
             _ensure_table(
                 connection,
@@ -360,6 +364,7 @@ class StateRoot:
             "database": "core.sqlite3",
             "artifact_root": "artifacts",
             "validated_reference_partition": "artifacts/validated-references",
+            "demo_workspace_partition": "demo_workspaces",
             "runtime_root": "runtime",
         }
 
@@ -374,6 +379,7 @@ class StateRoot:
             "validated_reference_partition": _canonical_json(
                 self._validated_reference_partition_payload()
             ),
+            "demo_workspace_schema": DEMO_WORKSPACE_SCHEMA_VERSION,
         }
 
     def _cleanup(
