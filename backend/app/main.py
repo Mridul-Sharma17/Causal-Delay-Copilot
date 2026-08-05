@@ -31,6 +31,7 @@ from .contracts import (
     WorkspaceResultViewResponse,
 )
 from .errors import WorkspaceRequestError
+from .security import apply_public_response_headers
 from .settings import Settings
 from .state import StateRoot
 from .workspace import DEMO_WORKSPACE_COOKIE_NAME, WorkspaceResolution
@@ -138,6 +139,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.middleware("http")
     async def preserve_workspace_cookie(request: Request, call_next):
         response = await call_next(request)
+        apply_public_response_headers(
+            response,
+            path=request.url.path,
+            profile=resolved_settings.profile,
+        )
         resolution = getattr(request.state, "workspace_resolution", None)
         if (
             isinstance(resolution, WorkspaceResolution)

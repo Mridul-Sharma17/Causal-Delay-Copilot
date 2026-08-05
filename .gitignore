@@ -8,6 +8,7 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.tmp-pytest/
 .mypy_cache/
 .ruff_cache/
 .uv-cache/
@@ -24,6 +25,7 @@ dist/
 coverage/
 playwright-report/
 test-results/
+vercel.json
 
 # Local application state
 state/

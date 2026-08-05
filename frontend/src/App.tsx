@@ -2,11 +2,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   getHealth,
+  getWorkspace,
   recordBootOccurrence,
 } from "./api";
 import {
   auditOutcomeCode,
   type AuditOccurrenceResponse,
+  type DemoWorkspace,
   type HealthState,
   type HealthResponse,
 } from "./contracts";
@@ -14,6 +16,7 @@ import "./styles.css";
 
 type JourneyState = "loading" | "healthy" | "unavailable";
 type AuditState = "pending" | "recorded" | "failed";
+type WorkspaceState = "pending" | "created" | "failed";
 
 function createBootKey(outcomeCode: string): string {
   return `core-boot-health-v1:${outcomeCode}`;
@@ -35,6 +38,8 @@ function probeLabel(state: HealthState): string {
 function App() {
   const [journeyState, setJourneyState] = useState<JourneyState>("loading");
   const [health, setHealth] = useState<HealthResponse | null>(null);
+  const [workspaceState, setWorkspaceState] = useState<WorkspaceState>("pending");
+  const [workspace, setWorkspace] = useState<DemoWorkspace | null>(null);
   const [auditState, setAuditState] = useState<AuditState>("pending");
   const [auditOccurrence, setAuditOccurrence] =
     useState<AuditOccurrenceResponse | null>(null);
@@ -46,7 +51,20 @@ function App() {
       const nextHealth = await getHealth();
       setHealth(nextHealth);
       setJourneyState("healthy");
+      setWorkspace(null);
+      setWorkspaceState("pending");
       setAuditState("pending");
+
+      try {
+        const nextWorkspace = await getWorkspace();
+        setWorkspace(nextWorkspace);
+        setWorkspaceState("created");
+      } catch {
+        setWorkspace(null);
+        setWorkspaceState("failed");
+        setAuditState("failed");
+        return;
+      }
 
       try {
         const outcomeCode = auditOutcomeCode(nextHealth);
@@ -65,6 +83,8 @@ function App() {
       }
     } catch {
       setHealth(null);
+      setWorkspace(null);
+      setWorkspaceState("failed");
       setJourneyState("unavailable");
       setAuditState("failed");
     }
@@ -145,6 +165,14 @@ function App() {
                 available.
               </p>
             )}
+
+            <p className="workspace-status" aria-live="polite">
+              {workspaceState === "created" && workspace !== null
+                ? `Demo Workspace active · ${workspace.workspace_id}`
+                : workspaceState === "failed"
+                  ? "Demo Workspace unavailable"
+                  : "Creating Demo Workspace"}
+            </p>
 
             <p className="audit-status" aria-live="polite">
               {auditState === "recorded" && auditOccurrence !== null

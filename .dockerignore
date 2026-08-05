@@ -1,0 +1,17 @@
+.git
+.github
+.agents
+.codex
+.venv
+.uv-cache
+node_modules
+state
+test-results
+playwright-report
+.pytest_cache
+__pycache__
+*.pyc
+docs
+tests
+backend/tests
+frontend/dist

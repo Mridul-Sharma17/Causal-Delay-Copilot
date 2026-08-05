@@ -13,6 +13,17 @@ const healthResponse = {
   observed_at: "2026-08-05T00:00:00Z",
 };
 
+const workspaceResponse = {
+  workspace_id: "demo-workspace-1",
+  status: "ACTIVE",
+  created_at: "2026-08-05T00:00:00Z",
+  last_seen_at: "2026-08-05T00:00:00Z",
+  mutation_count: 0,
+  remaining_mutations: 200,
+  terminal_fresh_bundle_count: 0,
+  remaining_terminal_fresh_bundles: 4,
+};
+
 describe("Core health journey", () => {
   afterEach(cleanup);
 
@@ -25,6 +36,13 @@ describe("Core health journey", () => {
     fetchMock.mockImplementation(async (input, init) => {
       if (input === "/api/health") {
         return new Response(JSON.stringify(healthResponse), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+
+      if (input === "/api/workspace") {
+        return new Response(JSON.stringify(workspaceResponse), {
           status: 200,
           headers: { "content-type": "application/json" },
         });
@@ -59,10 +77,11 @@ describe("Core health journey", () => {
     expect(await screen.findByRole("status")).toHaveTextContent(
       "Core ready with Gemini-only drafting unavailable",
     );
+    expect(screen.getByText(/Demo Workspace active/)).toBeInTheDocument();
     expect(screen.getByText("Process liveness")).toBeInTheDocument();
     expect(screen.getByText("Core readiness")).toBeInTheDocument();
     expect(screen.getByText("Audit occurrence recorded · event 1")).toBeInTheDocument();
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
   });
 
   test("does not expose an internal error when health is unavailable", async () => {
@@ -92,6 +111,12 @@ describe("Core health journey", () => {
           headers: { "content-type": "application/json" },
         });
       }
+      if (input === "/api/workspace") {
+        return new Response(JSON.stringify(workspaceResponse), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
       return new Response(null, { status: 503 });
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -101,6 +126,31 @@ describe("Core health journey", () => {
     expect(await screen.findByRole("status")).toHaveTextContent(
       "Core ready with Gemini-only drafting unavailable",
     );
+    expect(screen.getByText(/Demo Workspace active/)).toBeInTheDocument();
     expect(screen.getByText("Audit occurrence unavailable")).toBeInTheDocument();
+  });
+
+  test("does not write an audit occurrence when workspace creation is unavailable", async () => {
+    const fetchMock = vi.fn<typeof fetch>();
+    fetchMock.mockImplementation(async (input) => {
+      if (input === "/api/health") {
+        return new Response(JSON.stringify(healthResponse), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response(null, { status: 503 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<App />);
+
+    expect(await screen.findByText("Demo Workspace unavailable")).toBeInTheDocument();
+    expect(screen.getByText("Audit occurrence unavailable")).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).not.toHaveBeenCalledWith(
+      "/api/audit/occurrences",
+      expect.anything(),
+    );
   });
 });

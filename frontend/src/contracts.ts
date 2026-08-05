@@ -33,8 +33,23 @@ export type AuditOccurrenceResponse = {
   event_seq: number;
 };
 
+export type DemoWorkspace = {
+  workspace_id: string;
+  status: "ACTIVE";
+  created_at: string;
+  last_seen_at: string;
+  mutation_count: number;
+  remaining_mutations: number;
+  terminal_fresh_bundle_count: number;
+  remaining_terminal_fresh_bundles: number;
+};
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+function isNonNegativeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0;
 }
 
 function isHealthCode(value: unknown): value is HealthCode {
@@ -133,5 +148,31 @@ export function parseAuditOccurrenceResponse(
     result: value.result,
     occurrence_id: value.occurrence_id,
     event_seq: value.event_seq,
+  };
+}
+
+export function parseDemoWorkspaceResponse(value: unknown): DemoWorkspace {
+  if (
+    !isRecord(value) ||
+    typeof value.workspace_id !== "string" ||
+    value.status !== "ACTIVE" ||
+    typeof value.created_at !== "string" ||
+    typeof value.last_seen_at !== "string" ||
+    !isNonNegativeInteger(value.mutation_count) ||
+    !isNonNegativeInteger(value.remaining_mutations) ||
+    !isNonNegativeInteger(value.terminal_fresh_bundle_count) ||
+    !isNonNegativeInteger(value.remaining_terminal_fresh_bundles)
+  ) {
+    throw new Error("invalid workspace response");
+  }
+  return {
+    workspace_id: value.workspace_id,
+    status: "ACTIVE",
+    created_at: value.created_at,
+    last_seen_at: value.last_seen_at,
+    mutation_count: value.mutation_count,
+    remaining_mutations: value.remaining_mutations,
+    terminal_fresh_bundle_count: value.terminal_fresh_bundle_count,
+    remaining_terminal_fresh_bundles: value.remaining_terminal_fresh_bundles,
   };
 }

@@ -147,11 +147,17 @@ code {
 }
 
 .degradation-note,
+.workspace-status,
 .audit-status {
   padding: 16px;
   border-left: 4px solid #f1c21b;
   background: #fff8e1;
   line-height: 1.5;
+}
+
+.workspace-status {
+  border-left-color: #0f62fe;
+  background: #edf5ff;
 }
 
 .audit-status {

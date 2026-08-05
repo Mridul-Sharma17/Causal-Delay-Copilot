@@ -5,7 +5,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from backend.app.main import create_app
-from backend.app.settings import Settings
+from backend.app.settings import DeliveryProfile, Settings
 
 
 def make_client(database_path: Path, *, gemini_enabled: bool = False) -> TestClient:
@@ -127,3 +127,67 @@ def test_invalid_request_returns_registered_redacted_error(tmp_path: Path) -> No
         "code": "REQUEST_SCHEMA_INVALID",
         "recovery_action": "CORRECT_REQUEST_AND_RETRY",
     }
+
+
+def test_public_surface_applies_security_and_cache_headers(tmp_path: Path) -> None:
+    dist = tmp_path / "dist"
+    assets = dist / "assets"
+    assets.mkdir(parents=True)
+    (dist / "index.html").write_text("<!doctype html>", encoding="utf-8")
+    (assets / "app.js").write_text("console.log('ok');", encoding="utf-8")
+    settings = Settings(
+        profile=DeliveryProfile.LOCAL_FALLBACK,
+        state_root=tmp_path / "state",
+        public_origin="http://127.0.0.1:8000",
+        spa_dist_dir=dist,
+    )
+
+    with TestClient(create_app(settings)) as client:
+        api = client.get("/api/health")
+        html = client.get("/")
+        asset = client.get("/assets/app.js")
+
+    expected_security_headers = {
+        "content-security-policy": (
+            "default-src 'self'; base-uri 'none'; connect-src 'self'; "
+            "font-src 'self'; form-action 'none'; frame-ancestors 'none'; "
+            "img-src 'self' data:; manifest-src 'none'; object-src 'none'; "
+            "script-src 'self'; style-src 'self'; worker-src 'none'"
+        ),
+        "referrer-policy": "no-referrer",
+        "permissions-policy": (
+            "camera=(), geolocation=(), microphone=(), payment=(), usb=()"
+        ),
+        "x-content-type-options": "nosniff",
+        "x-frame-options": "DENY",
+        "cross-origin-opener-policy": "same-origin",
+        "cross-origin-resource-policy": "same-origin",
+        "x-permitted-cross-domain-policies": "none",
+    }
+    for name, value in expected_security_headers.items():
+        assert api.headers[name] == value
+        assert html.headers[name] == value
+        assert asset.headers[name] == value
+
+    assert api.headers["cache-control"] == "no-store"
+    assert html.headers["cache-control"] == "no-store"
+    assert asset.headers["cache-control"] == "public, max-age=31536000, immutable"
+
+
+def test_hosted_surface_adds_transport_security_header(tmp_path: Path) -> None:
+    volume = tmp_path / "railway-volume"
+    settings = Settings(
+        profile=DeliveryProfile.HOSTED,
+        state_root=volume / "core",
+        railway_volume_path=volume,
+        public_origin="https://demo.example.com",
+        release_candidate_id="rc-test",
+        build_manifest_id="build-test",
+    )
+
+    with TestClient(create_app(settings)) as client:
+        response = client.get("/api/health")
+
+    assert response.headers["strict-transport-security"] == (
+        "max-age=31536000; includeSubDomains"
+    )

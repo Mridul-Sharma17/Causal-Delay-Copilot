@@ -1,8 +1,10 @@
 import {
+  parseDemoWorkspaceResponse,
   parseAuditOccurrenceResponse,
   parseHealthResponse,
   type AuditOccurrenceRequest,
   type AuditOccurrenceResponse,
+  type DemoWorkspace,
   type HealthResponse,
 } from "./contracts";
 
@@ -51,6 +53,17 @@ export function getHealth(): Promise<HealthResponse> {
   );
 }
 
+export function getWorkspace(): Promise<DemoWorkspace> {
+  return requestJson(
+    "/api/workspace",
+    {
+      headers: { accept: "application/json" },
+      credentials: "same-origin",
+    },
+    parseDemoWorkspaceResponse,
+  );
+}
+
 export async function recordBootOccurrence(
   request: AuditOccurrenceRequest,
 ): Promise<AuditOccurrenceResponse> {
@@ -62,6 +75,7 @@ export async function recordBootOccurrence(
         accept: "application/json",
         "content-type": "application/json",
       },
+      credentials: "same-origin",
       body: JSON.stringify(request),
     },
     parseAuditOccurrenceResponse,
