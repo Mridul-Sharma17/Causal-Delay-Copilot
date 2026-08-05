@@ -1,0 +1,38 @@
+{
+  "name": "causal-delay-copilot",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 5173",
+    "build": "vite build",
+    "typecheck": "tsc -p frontend/tsconfig.json --noEmit",
+    "test": "vitest run --root frontend --config vitest.config.ts",
+    "test:e2e": "playwright test --config playwright.config.ts"
+  },
+  "dependencies": {
+    "@carbon/charts": "1.27.18",
+    "@carbon/charts-react": "1.27.18",
+    "@carbon/icons-react": "11.75.0",
+    "@carbon/react": "1.102.0",
+    "@carbon/styles": "1.102.0",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.58.2",
+    "@testing-library/jest-dom": "6.9.1",
+    "@testing-library/react": "16.3.2",
+    "@types/node": "26.1.2",
+    "@types/react": "19.2.7",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "5.1.4",
+    "jsdom": "26.1.0",
+    "typescript": "5.9.3",
+    "vite": "7.3.1",
+    "vitest": "4.1.0"
+  }
+}
