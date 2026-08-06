@@ -1,4 +1,10 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
+
+const forbiddenLeakage = /\b(?:secret|source rows?|prompts?|provider responses?|notes?|stack traces?|filesystem paths?)\b/i;
+
+async function expectNoPublicLeakage(page: Page) {
+  expect(await page.locator("body").innerText()).not.toMatch(forbiddenLeakage);
+}
 
 test("shows the typed health journey and one audit occurrence", async ({ page }) => {
   await page.goto("/");
@@ -9,6 +15,19 @@ test("shows the typed health journey and one audit occurrence", async ({ page })
   await expect(page.getByText(/Demo Workspace active/)).toBeVisible();
   await expect(page.getByText("Process liveness")).toBeVisible();
   await expect(page.getByText("Core readiness")).toBeVisible();
+  const healthResponse = await page.request.get("/api/health");
+  expect(healthResponse.ok()).toBeTruthy();
+  const health = await healthResponse.json();
+  expect(Object.keys(health).sort()).toEqual([
+    "code",
+    "degraded_capabilities",
+    "liveness",
+    "observed_at",
+    "readiness",
+    "service",
+    "state",
+  ]);
+  await expectNoPublicLeakage(page);
   await expect(page.getByText(/Audit occurrence recorded · event \d+/)).toBeVisible();
 });
 
@@ -73,6 +92,8 @@ test("creates isolated browser workspaces with one idempotent audit row", async 
     expect((await retryResponse.json()).result).toBe("IDEMPOTENT_REPLAY");
     const auditAfterRetry = await pageA.request.get("/api/audit/occurrences");
     expect((await auditAfterRetry.json()).items).toHaveLength(1);
+    await expectNoPublicLeakage(pageA);
+    await expectNoPublicLeakage(pageB);
   } finally {
     await Promise.all([contextA.close(), contextB.close()]);
   }
