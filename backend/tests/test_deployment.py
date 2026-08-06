@@ -38,7 +38,7 @@ def test_hosted_deployment_contract_keeps_api_proxy_and_stateful_runtime_explici
     assert "CORE_RAILWAY_VOLUME_PATH=/data" in dockerfile
     assert "CORE_WEB_WORKER_COUNT=1" in dockerfile
     assert "--workers 1" in dockerfile
-    assert "VOLUME [\"/data\"]" in dockerfile
+    assert "VOLUME [\"/data\"]" not in dockerfile
 
 
 def test_public_frontend_uses_only_relative_api_requests() -> None:
