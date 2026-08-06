@@ -38,6 +38,7 @@ def test_hosted_deployment_contract_keeps_api_proxy_and_stateful_runtime_explici
     assert "CORE_RAILWAY_VOLUME_PATH=/data" in dockerfile
     assert "CORE_WEB_WORKER_COUNT=1" in dockerfile
     assert "--workers 1" in dockerfile
+    assert "os.environ.get('PORT', '8000')" in dockerfile
     assert "VOLUME [\"/data\"]" not in dockerfile
 
 
