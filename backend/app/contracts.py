@@ -670,10 +670,20 @@ class RiskSignalFixtureResponse(BaseModel):
     signal: RiskSignalPreviewResponse
 
 
+class PredictiveRiskStatus(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    state: Literal["verified", "unavailable"]
+    code: str
+    message: str
+    manual_investigation_available: bool
+
+
 class RiskSignalListResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     items: list[RiskSignalFixtureResponse]
+    predictive_status: PredictiveRiskStatus | None = None
 
 
 class ReactiveFixtureRequest(BaseModel):

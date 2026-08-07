@@ -141,6 +141,13 @@ export type RiskSignalFixture = {
   signal: RiskSignal;
 };
 
+export type PredictiveRiskStatus = {
+  state: "verified" | "unavailable";
+  code: string;
+  message: string;
+  manual_investigation_available: boolean;
+};
+
 export type IngressFinding = {
   finding_id: string;
   code: string;
@@ -249,7 +256,10 @@ export type ReactiveIngressAttempt = {
   audit: { occurrence_id: string; event_seq: number };
 };
 
-export type RiskSignalListResponse = { items: RiskSignalFixture[] };
+export type RiskSignalListResponse = {
+  items: RiskSignalFixture[];
+  predictive_status?: PredictiveRiskStatus;
+};
 
 export type ReactiveInvestigationResponse = {
   result: "CREATED" | "IDEMPOTENT_REPLAY";
@@ -637,6 +647,18 @@ export function parseRiskSignalListResponse(value: unknown): RiskSignalListRespo
   if (!isRecord(value) || !Array.isArray(value.items)) {
     throw new Error("invalid reactive response");
   }
+  const predictiveStatus = value.predictive_status;
+  if (predictiveStatus !== undefined) {
+    if (
+      !isRecord(predictiveStatus) ||
+      (predictiveStatus.state !== "verified" && predictiveStatus.state !== "unavailable") ||
+      typeof predictiveStatus.code !== "string" ||
+      typeof predictiveStatus.message !== "string" ||
+      typeof predictiveStatus.manual_investigation_available !== "boolean"
+    ) {
+      throw new Error("invalid predictive status");
+    }
+  }
   return {
     items: value.items.map((item) => {
       if (!isRecord(item) || typeof item.fixture_id !== "string" || typeof item.label !== "string") {
@@ -648,6 +670,10 @@ export function parseRiskSignalListResponse(value: unknown): RiskSignalListRespo
         signal: parseRiskSignal(item.signal),
       };
     }),
+    predictive_status:
+      predictiveStatus === undefined
+        ? undefined
+        : (predictiveStatus as PredictiveRiskStatus),
   };
 }
 

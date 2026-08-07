@@ -633,7 +633,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     async def list_risk_signals(dataset_version_id: str) -> JSONResponse:
         items = core_store.list_risk_signal_fixtures(dataset_version_id)
-        response = RiskSignalListResponse(items=items)
+        response = RiskSignalListResponse(
+            items=items,
+            predictive_status=core_store.predictive_risk_status(),
+        )
         return JSONResponse(status_code=200, content=response.model_dump(mode="json"))
 
     @app.post(

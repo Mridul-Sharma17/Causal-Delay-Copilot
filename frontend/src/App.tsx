@@ -17,6 +17,7 @@ import {
   type HealthResponse,
   type LineageRecord,
   type LineageSnapshot,
+  type PredictiveRiskStatus,
   type ReactiveIngressAttempt,
   type RiskSignalFixture,
 } from "./contracts";
@@ -79,6 +80,22 @@ function formatValue(value: unknown): string {
   } catch {
     return "Unavailable";
   }
+}
+
+function preferredRiskFixture(items: RiskSignalFixture[]): RiskSignalFixture | undefined {
+  return (
+    items.find((item) => item.fixture_id === "hero-reactive-risk-predictive-baseline-v1") ??
+    items.find((item) => item.fixture_id === "hero-reactive-risk-metadata-unavailable-v1") ??
+    items[0]
+  );
+}
+
+function hasVerifiedPredictiveArtifacts(fixture: RiskSignalFixture | undefined): boolean {
+  return (
+    fixture?.fixture_id === "hero-reactive-risk-predictive-baseline-v1" &&
+    fixture.signal.predictor_artifact_ref.state === "present" &&
+    fixture.signal.predictive_attribution_ref.state === "present"
+  );
 }
 
 function fieldState(value: LineageRecord): string {
@@ -175,6 +192,7 @@ function App() {
   const [lineage, setLineage] = useState<LineageSnapshot | null>(null);
   const [riskState, setRiskState] = useState<RiskState>("pending");
   const [riskFixtures, setRiskFixtures] = useState<RiskSignalFixture[]>([]);
+  const [predictiveStatus, setPredictiveStatus] = useState<PredictiveRiskStatus | null>(null);
   const [riskAttempt, setRiskAttempt] = useState<ReactiveIngressAttempt | null>(null);
   const [riskFailureAttempt, setRiskFailureAttempt] =
     useState<ReactiveIngressAttempt | null>(null);
@@ -193,6 +211,7 @@ function App() {
       setLineage(null);
       setLineageState("pending");
       setRiskState("pending");
+      setPredictiveStatus(null);
       setRiskFixtures([]);
       setRiskAttempt(null);
       setRiskFailureAttempt(null);
@@ -236,13 +255,15 @@ function App() {
         try {
           const availableSignals = await getRiskSignals(imported.dataset_version_id);
           setRiskFixtures(availableSignals.items);
+          setPredictiveStatus(availableSignals.predictive_status ?? null);
           if (availableSignals.items.length === 0) {
             setRiskState("failed");
           } else {
-            const validFixture =
-              availableSignals.items.find(
-                (item) => item.fixture_id === "hero-reactive-risk-v1",
-              ) ?? availableSignals.items[0];
+            const validFixture = preferredRiskFixture(availableSignals.items);
+            if (validFixture === undefined) {
+              setRiskState("failed");
+              return;
+            }
             const attempt = await submitReactiveInvestigation(
               imported.dataset_version_id,
               validFixture.fixture_id,
@@ -306,9 +327,8 @@ function App() {
         : health?.readiness.state === "degraded"
           ? "Core ready with Gemini-only drafting unavailable"
           : "Core ready";
-  const acceptedRiskFixture =
-    riskFixtures.find((item) => item.fixture_id === "hero-reactive-risk-v1") ??
-    riskFixtures[0];
+  const acceptedRiskFixture = preferredRiskFixture(riskFixtures);
+  const predictiveArtifactsVerified = hasVerifiedPredictiveArtifacts(acceptedRiskFixture);
 
   return (
     <main className="core-shell">
@@ -412,7 +432,7 @@ function App() {
 
           {riskState === "loading" && (
             <p className="supporting-copy" role="status">
-              Normalizing the bundled reactive Risk Signal.
+              Loading the verified calibrated predictive Risk Signal.
             </p>
           )}
           {riskState === "failed" && (
@@ -439,16 +459,28 @@ function App() {
               <dl className="risk-facts">
                 <div>
                   <dt>Prediction score</dt>
-                  <dd>{acceptedRiskFixture?.signal.score_value ?? "Unavailable"}</dd>
+                  <dd>
+                    {predictiveArtifactsVerified
+                      ? acceptedRiskFixture?.signal.score_value
+                      : "Unavailable — manual investigation remains available"}
+                  </dd>
                 </div>
                 <div>
                   <dt>Prediction role</dt>
                   <dd>Trigger only; excluded from the scientific digest</dd>
                 </div>
                 <div>
+                  <dt>Predictive attribution</dt>
+                  <dd>
+                    {predictiveArtifactsVerified && acceptedRiskFixture
+                      ? formatValue(acceptedRiskFixture.signal.predictive_attribution_ref)
+                      : "Unavailable"}
+                  </dd>
+                </div>
+                <div>
                   <dt>Explanation metadata</dt>
                   <dd>
-                    {acceptedRiskFixture
+                    {predictiveArtifactsVerified && acceptedRiskFixture
                       ? formatValue(acceptedRiskFixture.signal.prediction_explanation_ref)
                       : "Unavailable"}
                   </dd>
@@ -456,7 +488,7 @@ function App() {
                 <div>
                   <dt>Calibration metadata</dt>
                   <dd>
-                    {acceptedRiskFixture
+                    {predictiveArtifactsVerified && acceptedRiskFixture
                       ? formatValue(acceptedRiskFixture.signal.prediction_calibration_ref)
                       : "Unavailable"}
                   </dd>
@@ -464,7 +496,7 @@ function App() {
                 <div>
                   <dt>Ranking metadata</dt>
                   <dd>
-                    {acceptedRiskFixture
+                    {predictiveArtifactsVerified && acceptedRiskFixture
                       ? formatValue(acceptedRiskFixture.signal.prediction_ranking_ref)
                       : "Unavailable"}
                   </dd>
@@ -472,7 +504,7 @@ function App() {
                 <div>
                   <dt>Delivery metadata</dt>
                   <dd>
-                    {acceptedRiskFixture
+                    {predictiveArtifactsVerified && acceptedRiskFixture
                       ? formatValue(acceptedRiskFixture.signal.prediction_delivery_metadata)
                       : "Unavailable"}
                   </dd>
@@ -504,6 +536,22 @@ function App() {
                   </dd>
                 </div>
               </dl>
+              <p className="supporting-copy">
+                Predictive attribution - not causal evidence. Manual investigation remains
+                available when predictive artifacts are unavailable.
+              </p>
+              {predictiveStatus?.state === "unavailable" && (
+                <p className="lineage-warning" role="status">
+                  {predictiveStatus.code}: {predictiveStatus.message}
+                </p>
+              )}
+              {riskAttempt.findings
+                .filter((finding) => finding.severity === "warning")
+                .map((finding) => (
+                  <p className="lineage-warning" key={finding.finding_id}>
+                    {finding.code}: {finding.message}
+                  </p>
+                ))}
 
               <p className="risk-note">
                 Prediction score, threshold, flagged state, attribution, and advisory context

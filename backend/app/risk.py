@@ -46,6 +46,25 @@ SOURCE_NAMESPACE = "semi-synthetic-hero"
 SOURCE_SYSTEM = "bundled-predictive-stub"
 FIXTURE_FILE = Path(__file__).with_name("data") / "risk_signal_fixtures.json"
 PROTECTED_SOURCE_FILE = Path(__file__).with_name("data") / "risk_signal_protected_sources.json"
+PREDICTIVE_FIXTURE_FILE = (
+    Path(__file__).with_name("data") / "predictive_risk_signal_fixture.json"
+)
+PREDICTIVE_PROTECTED_SOURCE_FILE = (
+    Path(__file__).with_name("data") / "predictive_protected_sources.json"
+)
+PREDICTIVE_ATTRIBUTION_FILE = (
+    Path(__file__).with_name("data") / "predictive_attributions.json"
+)
+PREDICTIVE_RECORD_FILE = (
+    Path(__file__).with_name("data") / "predictive_prediction_records.json"
+)
+PREDICTIVE_ARTIFACT_FILE = (
+    Path(__file__).with_name("data") / "predictive_baseline.joblib"
+)
+PREDICTIVE_REPORT_FILE = (
+    Path(__file__).with_name("data") / "predictive_baseline_report.json"
+)
+PREDICTIVE_FIXTURE_ID = "hero-reactive-risk-predictive-baseline-v1"
 TEMPORAL_ELIGIBILITY_RELEASE_FILE = (
     Path(__file__).with_name("data") / "temporal_eligibility_release.json"
 )
@@ -288,28 +307,29 @@ def _protected_signal_payload(signal_payload: Mapping[str, Any]) -> dict[str, An
 
 def _protected_source_bytes(locator: str) -> bytes | None:
     """Resolve a bundled protected locator to its frozen source bytes."""
-    try:
-        with PROTECTED_SOURCE_FILE.open("r", encoding="utf-8") as handle:
-            raw = json.load(handle)
-    except (OSError, TypeError, ValueError):
-        return None
-    if not isinstance(raw, Mapping) or raw.get("schema_version") != (
-        "risk-signal-protected-source-bytes.v1"
-    ):
-        return None
-    items = raw.get("items")
-    if not isinstance(items, list):
-        return None
-    for item in items:
-        if not isinstance(item, Mapping) or item.get("locator") != locator:
-            continue
-        encoded = item.get("bytes_base64")
-        if not isinstance(encoded, str) or not encoded:
-            return None
+    for source_file in (PROTECTED_SOURCE_FILE, PREDICTIVE_PROTECTED_SOURCE_FILE):
         try:
-            return base64.b64decode(encoded, validate=True)
-        except (ValueError, base64.binascii.Error):
-            return None
+            with source_file.open("r", encoding="utf-8") as handle:
+                raw = json.load(handle)
+        except (OSError, TypeError, ValueError):
+            continue
+        if not isinstance(raw, Mapping) or raw.get("schema_version") != (
+            "risk-signal-protected-source-bytes.v1"
+        ):
+            continue
+        items = raw.get("items")
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, Mapping) or item.get("locator") != locator:
+                continue
+            encoded = item.get("bytes_base64")
+            if not isinstance(encoded, str) or not encoded:
+                continue
+            try:
+                return base64.b64decode(encoded, validate=True)
+            except (ValueError, base64.binascii.Error):
+                continue
     return None
 
 
@@ -1128,9 +1148,177 @@ def _fixture_signal_payloads(dataset_version_id: str) -> list[dict[str, Any]]:
     return fixtures
 
 
-def _fixture_payloads(dataset_version_id: str) -> list[dict[str, Any]]:
-    fixtures: list[dict[str, Any]] = []
-    for fixture in _fixture_signal_payloads(dataset_version_id):
+def _predictive_risk_status() -> dict[str, Any]:
+    """Expose a safe predictive-artifact status without leaking internals."""
+    try:
+        from .predictive import (
+            load_predictive_attribution_bundle,
+            load_predictive_baseline,
+            load_prediction_record_bundle,
+        )
+
+        baseline = load_predictive_baseline(
+            PREDICTIVE_ARTIFACT_FILE,
+            PREDICTIVE_REPORT_FILE,
+        )
+        load_predictive_attribution_bundle(
+            PREDICTIVE_ATTRIBUTION_FILE,
+            expected_model_artifact_ref=baseline.artifact_ref,
+        )
+        load_prediction_record_bundle(
+            PREDICTIVE_RECORD_FILE,
+            expected_model_artifact_ref=baseline.artifact_ref,
+        )
+    except Exception as error:
+        code = getattr(error, "code", "PREDICTIVE_STUB_ARTIFACT_UNAVAILABLE")
+        return {
+            "state": "unavailable",
+            "code": str(code),
+            "message": "Verified predictive artifacts are unavailable; no generated Risk Signal was emitted.",
+            "manual_investigation_available": True,
+        }
+    return {
+        "state": "verified",
+        "code": "PREDICTIVE_ARTIFACTS_VERIFIED",
+        "message": "The bundled predictive artifact, attribution bundle, and prediction records passed integrity checks.",
+        "manual_investigation_available": True,
+    }
+
+
+def _predictive_fixture_signal_payloads(dataset_version_id: str) -> list[dict[str, Any]]:
+    """Return generated signals only while all local predictive artifacts verify."""
+    try:
+        from .predictive import (
+            PredictiveSubject,
+            load_predictive_attribution_bundle,
+            load_predictive_baseline,
+            load_prediction_record_bundle,
+            score_predictive_subject,
+            validate_predictive_attribution,
+        )
+
+        baseline = load_predictive_baseline(
+            PREDICTIVE_ARTIFACT_FILE,
+            PREDICTIVE_REPORT_FILE,
+        )
+        attributions = load_predictive_attribution_bundle(
+            PREDICTIVE_ATTRIBUTION_FILE,
+            expected_model_artifact_ref=baseline.artifact_ref,
+        )
+        prediction_records = load_prediction_record_bundle(
+            PREDICTIVE_RECORD_FILE,
+            expected_model_artifact_ref=baseline.artifact_ref,
+        )
+        with PREDICTIVE_FIXTURE_FILE.open("r", encoding="utf-8") as handle:
+            raw = json.load(handle)
+        if not isinstance(raw, Mapping) or not isinstance(raw.get("items"), list):
+            return []
+        fixtures: list[dict[str, Any]] = []
+        for item in raw["items"]:
+            if not isinstance(item, Mapping) or item.get("fixture_id") != PREDICTIVE_FIXTURE_ID:
+                continue
+            signal_payload = deepcopy(item.get("signal"))
+            if not isinstance(signal_payload, Mapping):
+                continue
+            signal = RiskSignalRequest.model_validate(signal_payload)
+            if signal.scored_dataset_version_ref != dataset_version_id:
+                continue
+            if signal.predictor_artifact_ref.value != baseline.artifact_ref:
+                continue
+            attribution_ref = signal.predictive_attribution_ref.value
+            score_value = signal.score_value
+            if not isinstance(attribution_ref, str) or attribution_ref not in attributions:
+                continue
+            source_keys = _source_key(signal.source_order_line_ref.key)
+            expected_order_line_id = (
+                _canonical_id(SOURCE_NAMESPACE, "order-line", source_keys[0])
+                if len(source_keys) == 1
+                else None
+            )
+            delivery_metadata = signal.prediction_delivery_metadata.value
+            expected_prediction_record_id = (
+                delivery_metadata.get("prediction_record_id")
+                if isinstance(delivery_metadata, Mapping)
+                else None
+            )
+            if not isinstance(expected_prediction_record_id, str):
+                continue
+            attribution = attributions[attribution_ref]
+            prediction_record = prediction_records.get(expected_prediction_record_id)
+            if prediction_record is None:
+                continue
+            validate_predictive_attribution(
+                attribution,
+                expected_score=score_value,
+                expected_model_artifact_ref=baseline.artifact_ref,
+                expected_prediction_record_id=expected_prediction_record_id,
+                expected_dataset_version_id=signal.scored_dataset_version_ref,
+                expected_order_line_id=expected_order_line_id,
+                expected_background_identity_hash=baseline.report[
+                    "background_selector"
+                ]["identity_hash"],
+            )
+            feature_values = attribution.get("feature_values")
+            generated_at = attribution.get("generated_at")
+            if not isinstance(feature_values, list) or not isinstance(generated_at, str):
+                continue
+            features = {
+                item["name"]: item["value"]
+                for item in feature_values
+                if isinstance(item, Mapping)
+                and isinstance(item.get("name"), str)
+                and isinstance(item.get("value"), (int, float))
+            }
+            if len(features) != len(feature_values):
+                continue
+            recomputed = score_predictive_subject(
+                baseline,
+                PredictiveSubject(
+                    prediction_record_id=str(attribution["prediction_record_id"]),
+                    dataset_version_id=str(attribution["dataset_version_id"]),
+                    order_line_id=str(attribution["order_line_id"]),
+                    generated_at=datetime.fromisoformat(generated_at),
+                    features=features,
+                ),
+            )
+            if (
+                recomputed.prediction_record != prediction_record
+                or prediction_record["dataset_version_id"]
+                != signal.scored_dataset_version_ref
+                or prediction_record["order_line_id"] != expected_order_line_id
+                or recomputed.prediction_record["score_value"] != score_value
+                or recomputed.attribution["artifact_ref"] != attribution_ref
+            ):
+                continue
+            if signal.source.source_payload_sha256 != _fixture_protected_source_digest(signal):
+                continue
+            protected_bytes = _protected_source_bytes(
+                signal.source.protected_source_locator
+            )
+            if protected_bytes is None or protected_bytes != _canonical_json(
+                _protected_signal_payload(signal.model_dump(mode="json"))
+            ).encode("utf-8"):
+                continue
+            expected_source_signal_id = _source_signal_identity(
+                signal.model_dump(mode="json")
+            )
+            if signal.source_signal_id != expected_source_signal_id:
+                continue
+            fixtures.append(
+                {
+                    "fixture_id": str(item.get("fixture_id", "")),
+                    "label": str(item.get("label", "")),
+                    "signal": signal.model_dump(mode="json"),
+                }
+            )
+        return fixtures
+    except Exception:
+        return []
+
+
+def _fixture_preview_payloads(fixtures: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    payloads: list[dict[str, Any]] = []
+    for fixture in fixtures:
         preview_payload = deepcopy(fixture["signal"])
         source = preview_payload.get("source")
         if isinstance(source, dict):
@@ -1138,14 +1326,18 @@ def _fixture_payloads(dataset_version_id: str) -> list[dict[str, Any]]:
                 key: source[key]
                 for key in ("schema_version", "source_system", "data_classification")
             }
-        fixtures.append(
+        payloads.append(
             RiskSignalFixtureResponse(
                 fixture_id=fixture["fixture_id"],
                 label=fixture["label"],
                 signal=RiskSignalPreviewResponse.model_validate(preview_payload),
             ).model_dump(mode="json")
         )
-    return fixtures
+    return payloads
+
+
+def _fixture_payloads(dataset_version_id: str) -> list[dict[str, Any]]:
+    return _fixture_preview_payloads(_fixture_signal_payloads(dataset_version_id))
 
 
 def _matches_bundled_fixture_payload(signal: RiskSignalRequest) -> bool:
@@ -1245,7 +1437,11 @@ class ReactiveInvestigationMixin:
         self.get_lineage(dataset_version_id)
         if not self._is_bundled_dataset_version(dataset_version_id):
             return []
-        return _fixture_payloads(dataset_version_id)
+        generated = _predictive_fixture_signal_payloads(dataset_version_id)
+        return _fixture_preview_payloads(generated) + _fixture_payloads(dataset_version_id)
+
+    def predictive_risk_status(self) -> dict[str, Any]:
+        return _predictive_risk_status()
 
     def get_risk_signal_fixture(
         self,
@@ -1254,7 +1450,11 @@ class ReactiveInvestigationMixin:
     ) -> RiskSignalRequest:
         if not self._is_bundled_dataset_version(dataset_version_id):
             raise RiskSignalFixtureUnavailable
-        for fixture in _fixture_signal_payloads(dataset_version_id):
+        fixtures = [
+            *_predictive_fixture_signal_payloads(dataset_version_id),
+            *_fixture_signal_payloads(dataset_version_id),
+        ]
+        for fixture in fixtures:
             if fixture["fixture_id"] == fixture_id:
                 return RiskSignalRequest.model_validate(fixture["signal"])
         raise RiskSignalFixtureUnavailable
