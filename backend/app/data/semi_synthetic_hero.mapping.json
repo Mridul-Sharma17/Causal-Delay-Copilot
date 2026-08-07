@@ -50,6 +50,15 @@
     "reason": "reason",
     "revises_promise_source_event_key": "revises_promise_source_event_key"
   },
+  "advisory_context_mappings": {
+    "material_or_equipment": {
+      "rule_id": "source-material-key-to-material-class.v1",
+      "rule_version": "1",
+      "source_namespace": "semi-synthetic-hero",
+      "target_field": "fields.material_class",
+      "resolution_kind": "canonical_field_value"
+    }
+  },
   "entries": [
     {"canonical": "order_line_id", "source": "source_key", "rule_id": "uuid5.dataset.order-line.v1", "rule_version": "1"},
     {"canonical": "order_group_id", "source": "group_key", "rule_id": "uuid5.dataset.order-group.v1", "rule_version": "1"},

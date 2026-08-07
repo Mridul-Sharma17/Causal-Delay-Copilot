@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import App from "./App";
@@ -122,6 +122,219 @@ const lineageResponse = {
   },
 };
 
+const riskSignal = {
+  schema_version: "risk-signal.v1",
+  trigger_mode: "reactive",
+  source: {
+    schema_version: "trigger-source-envelope.v1",
+    source_system: "bundled-predictive-stub",
+    source_payload_sha256: "sha256:risk-signal",
+    protected_source_locator: "bundled://risk-signal/hero-reactive-risk-v1",
+    data_classification: "generated",
+  },
+  source_signal_id: "hero-reactive-risk-001",
+  source_revision: "v1",
+  scored_dataset_version_ref: "sha256:hero-v1",
+  source_order_line_ref: { namespace: "semi-synthetic-hero", key: "hero-line-001" },
+  predictor_id: "predictive-stub",
+  predictor_version: "predictive-stub.v1",
+  feature_contract_version: "predictive-features.v1",
+  target_definition_id: "supplier_milestone_miss.v1",
+  target_milestone_kind: "supplier_handoff",
+  score_semantic: "probability_supplier_milestone_miss",
+  score_value: 0.78,
+  alert_threshold: 0.5,
+  flagged: true,
+  generated_at: {
+    value: "2026-01-10T09:00:00+05:30",
+    kind: "instant",
+    precision: "minute",
+    timezone_status: "known",
+    source_timezone: "Asia/Kolkata",
+  },
+  known_at: {
+    value: "2026-01-10T09:05:00+05:30",
+    kind: "instant",
+    precision: "minute",
+    timezone_status: "known",
+    source_timezone: "Asia/Kolkata",
+  },
+  predictor_artifact_ref: { state: "present", value: "bundled://score" },
+  predictive_attribution_ref: { state: "present", value: "bundled://attribution" },
+  prediction_explanation_ref: { state: "missing" },
+  prediction_calibration_ref: { state: "missing" },
+  prediction_ranking_ref: { state: "missing" },
+  prediction_delivery_metadata: {
+    state: "present",
+    value: { mode: "bundled_fixture", source_system: "bundled-predictive-stub" },
+  },
+  advisory_context: null,
+};
+
+const reactiveAttemptResponse = {
+  result: "CREATED",
+  attempt: {
+    attempt_id: "attempt-1",
+    status: "accepted",
+    scope: "reactive_ingress",
+    source_system: "bundled-predictive-stub",
+    source_signal_id: "hero-reactive-risk-001",
+    source_revision: "v1",
+    source_payload_sha256: "sha256:risk-signal",
+    primary_code: "RISK_SIGNAL_ACCEPTED",
+    findings: [],
+    evidence_refs: ["risk-signal:bundled-predictive-stub:hero-reactive-risk-001:v1"],
+    retryable: false,
+    recovery_action: "CONTINUE_TO_ELIGIBILITY_REVIEW",
+    received_at: "2026-08-05T00:00:02Z",
+    investigation_request_id: "ir-1",
+    investigation_request: {
+      investigation_request_id: "ir-1",
+      schema_version: "investigation-request.v1",
+      trigger_mode: "reactive",
+      ingress_ref: {
+        kind: "RiskSignal",
+        source_system: "bundled-predictive-stub",
+        source_signal_id: "hero-reactive-risk-001",
+        source_revision: "v1",
+        source_payload_sha256: "sha256:risk-signal",
+        source_order_line_ref: {
+          namespace: "semi-synthetic-hero",
+          key: "hero-line-001",
+        },
+      },
+      rerun_of_request_id: { state: "missing" },
+      dataset_version_id: "sha256:hero-v1",
+      subject: { order_line_id: "line-1" },
+      decision_cutoff: {
+        state: "present",
+        value: {
+          kind: "instant",
+          source_value: "2026-01-05T09:30:00+05:30",
+          normalized_value: "2026-01-05T04:00:00+00:00",
+          precision: "minute",
+          timezone_status: "known",
+          source_timezone: { state: "present", value: "Asia/Kolkata" },
+        },
+      },
+      decision_cutoff_source: "canonical_commitment",
+      observation_cutoff: {
+        state: "present",
+        value: {
+          kind: "instant",
+          source_value: "2026-01-10T09:05:00+05:30",
+          normalized_value: "2026-01-10T03:35:00+00:00",
+          precision: "minute",
+          timezone_status: "known",
+          source_timezone: { state: "present", value: "Asia/Kolkata" },
+        },
+      },
+      target_milestone_kind: { state: "present", value: "supplier_handoff" },
+      causal_question_version: "supplier-load-slippage.v1",
+      engine_configuration_ref: "causal-engine-config.v1",
+      ingress_validation_refs: [],
+      provenance_refs: ["risk-signal:bundled-predictive-stub:hero-reactive-risk-001:v1"],
+      prediction_metadata: { state: "present", value: { score_value: 0.78 } },
+      accepted_at: "2026-08-05T00:00:02Z",
+      causal_engine_input: {
+        causal_input_schema_version: "causal-input-projection.v2",
+        dataset_version_id: "sha256:hero-v1",
+        subject_analytical_values: {
+          supplier_id: { state: "present", value: "supplier-1" },
+          original_promise: { state: "unresolved" },
+          adjustment_inputs: {},
+          subject_exclusion_identity: "line-1",
+        },
+        decision_cutoff: {
+          state: "present",
+          value: {
+            kind: "instant",
+            source_value: "2026-01-05T09:30:00+05:30",
+            normalized_value: "2026-01-05T04:00:00+00:00",
+            precision: "minute",
+            timezone_status: "known",
+            source_timezone: { state: "present", value: "Asia/Kolkata" },
+          },
+        },
+        observation_cutoff: {
+          state: "present",
+          value: {
+            kind: "instant",
+            source_value: "2026-01-10T09:05:00+05:30",
+            normalized_value: "2026-01-10T03:35:00+00:00",
+            precision: "minute",
+            timezone_status: "known",
+            source_timezone: { state: "present", value: "Asia/Kolkata" },
+          },
+        },
+        target_milestone_kind: { state: "present", value: "supplier_handoff" },
+        canonical_slippage_duration_basis: "CALENDAR_DAY",
+        causal_question_version: "supplier-load-slippage.v1",
+        engine_configuration_ref: "causal-engine-config.v1",
+        estimator_window_ref: {
+          selector_version: "estimator-window.v1",
+          bounds: {
+            known_at_lower: "unbounded",
+            known_at_upper: { state: "unresolved" },
+          },
+          selected_identity_hash: "sha256:window",
+          selected_count: 1,
+          subject_removal: {
+            subject_identity: "line-1",
+            removed: true,
+            post_subject_identity_hash: "sha256:empty",
+          },
+        },
+        history_lookback_ref: {
+          selector_version: "history-lookback.v1",
+          bounds: {
+            known_at_lower: "unbounded",
+            known_at_upper: { state: "unresolved" },
+          },
+          selected_identity_hash: "sha256:window",
+          selected_count: 1,
+          subject_removal: {
+            subject_identity: "line-1",
+            removed: false,
+            post_subject_identity_hash: "sha256:window",
+          },
+        },
+        historical_population_digest: "sha256:population",
+        analytical_fact_lineage_refs: [],
+      },
+      causal_input_digest: "sha256:causal-input",
+      content_hash: "sha256:request",
+    },
+    audit: { occurrence_id: "occurrence-risk-1", event_seq: 2 },
+  },
+};
+
+const rejectedRiskSignal = {
+  ...riskSignal,
+  source: {
+    ...riskSignal.source,
+    protected_source_locator:
+      "bundled://risk-signal/hero-reactive-risk-target-mismatch-v1",
+  },
+  source_signal_id: "hero-reactive-risk-002",
+  target_milestone_kind: "supplier_completion",
+};
+
+const rejectedReactiveAttemptResponse = {
+  result: "CREATED",
+  attempt: {
+    ...reactiveAttemptResponse.attempt,
+    attempt_id: "attempt-2",
+    status: "rejected",
+    source_signal_id: "hero-reactive-risk-002",
+    primary_code: "RISK_SIGNAL_TARGET_MISMATCH",
+    recovery_action: "USE_CONFIGURED_SUPPLIER_MILESTONE_TARGET",
+    investigation_request_id: null,
+    investigation_request: null,
+    audit: { occurrence_id: "occurrence-risk-2", event_seq: 3 },
+  },
+};
+
 describe("Core health journey", () => {
   afterEach(cleanup);
 
@@ -171,6 +384,43 @@ describe("Core health journey", () => {
         });
       }
 
+      if (typeof input === "string" && input.startsWith("/api/risk-signals")) {
+        return new Response(
+          JSON.stringify({
+            items: [
+              {
+                fixture_id: "hero-reactive-risk-v1",
+                label: "Bundled reactive risk signal",
+                signal: riskSignal,
+              },
+              {
+                fixture_id: "hero-reactive-risk-target-mismatch-v1",
+                label: "Conformance failure: target mismatch",
+                signal: rejectedRiskSignal,
+              },
+            ],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+
+      if (input === "/api/investigations/reactive/fixtures") {
+        expect(init?.method).toBe("POST");
+        const submitted = JSON.parse(String(init?.body));
+        expect(submitted.dataset_version_id).toBe("sha256:hero-v1");
+        if (submitted.fixture_id === "hero-reactive-risk-target-mismatch-v1") {
+          return new Response(JSON.stringify(rejectedReactiveAttemptResponse), {
+            status: 201,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        expect(submitted.fixture_id).toBe("hero-reactive-risk-v1");
+        return new Response(JSON.stringify(reactiveAttemptResponse), {
+          status: 201,
+          headers: { "content-type": "application/json" },
+        });
+      }
+
       expect(input).toBe("/api/audit/occurrences");
       expect(init?.method).toBe("POST");
       const request = JSON.parse(String(init?.body)) as {
@@ -205,6 +455,15 @@ describe("Core health journey", () => {
     expect(screen.getByText("Core readiness")).toBeInTheDocument();
     expect(screen.getByText("Audit occurrence recorded · event 1")).toBeInTheDocument();
     expect(await screen.findByText("Canonical lineage")).toBeInTheDocument();
+    expect(await screen.findByText("Investigation request accepted")).toBeInTheDocument();
+    expect(screen.getByText("Prediction score")).toBeInTheDocument();
+    expect(screen.getByText("Trigger only; excluded from the scientific digest")).toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Try the rejected conformance fixture" }),
+    );
+    expect(
+      await screen.findByText("Fail-closed path: RISK_SIGNAL_TARGET_MISMATCH"),
+    ).toBeInTheDocument();
     expect(await screen.findByText("3 order lines")).toBeInTheDocument();
     expect(await screen.findByText("Canonical fields")).toBeInTheDocument();
     expect(await screen.findByText("committed")).toBeInTheDocument();
@@ -212,7 +471,7 @@ describe("Core health journey", () => {
       await screen.findByText("Source observation register (3)"),
     ).toBeInTheDocument();
     expect(screen.getAllByText("SOURCE_DUPLICATE_DEDUPED").length).toBeGreaterThan(0);
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(5));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(8));
   });
 
   test("does not expose an internal error when health is unavailable", async () => {

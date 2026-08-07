@@ -8,13 +8,15 @@ import sqlite3
 from uuid import uuid4
 
 from .audit import ensure_audit_schema
+from .canonical import canonical_json as _canonical_json
 from .errors import CoreSafeError, SafeErrorCode
 from .ingestion import INGESTION_SCHEMA_VERSION, ensure_ingestion_schema
+from .risk import ensure_risk_schema
 from .settings import Settings
 from .workspace import DEMO_WORKSPACE_SCHEMA_VERSION, ensure_workspace_schema
 
 
-CORE_STATE_SCHEMA_VERSION = "core-state.v3"
+CORE_STATE_SCHEMA_VERSION = "core-state.v5"
 RELEASE_IDENTITY_SCHEMA_VERSION = "release-identity.v1"
 QUOTA_POLICY_SCHEMA_VERSION = "quota-policy.v1"
 VALIDATED_REFERENCE_PARTITION_SCHEMA_VERSION = "validated-reference-partition.v1"
@@ -55,10 +57,6 @@ class StateLayout:
     runtime_fingerprint_path: Path
     validated_reference_manifest_path: Path
     state_manifest_path: Path
-
-
-def _canonical_json(value: object) -> str:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
 def _ensure_table(
@@ -213,6 +211,7 @@ class StateRoot:
             ensure_workspace_schema(connection, create=True)
             ensure_audit_schema(connection, create=True)
             ensure_ingestion_schema(connection, create=True)
+            ensure_risk_schema(connection, create=True)
             _ensure_table(
                 connection,
                 "core_state_metadata",
@@ -316,6 +315,7 @@ class StateRoot:
             ensure_workspace_schema(connection, create=False)
             ensure_audit_schema(connection, create=False)
             ensure_ingestion_schema(connection, create=False)
+            ensure_risk_schema(connection, create=False)
             _ensure_table(
                 connection,
                 "core_state_metadata",

@@ -3,9 +3,11 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   getDatasetLineage,
   getHealth,
+  getRiskSignals,
   getWorkspace,
   importHeroDataset,
   recordBootOccurrence,
+  submitReactiveInvestigation,
 } from "./api";
 import {
   auditOutcomeCode,
@@ -15,6 +17,8 @@ import {
   type HealthResponse,
   type LineageRecord,
   type LineageSnapshot,
+  type ReactiveIngressAttempt,
+  type RiskSignalFixture,
 } from "./contracts";
 import "./styles.css";
 
@@ -22,6 +26,7 @@ type JourneyState = "loading" | "healthy" | "unavailable";
 type AuditState = "pending" | "recorded" | "failed";
 type WorkspaceState = "pending" | "created" | "failed";
 type LineageState = "pending" | "loading" | "ready" | "failed";
+type RiskState = "pending" | "loading" | "ready" | "failed";
 
 function createBootKey(outcomeCode: string): string {
   return `core-boot-health-v1:${outcomeCode}`;
@@ -78,10 +83,6 @@ function formatValue(value: unknown): string {
 
 function fieldState(value: LineageRecord): string {
   return typeof value.state === "string" ? value.state : "unresolved";
-}
-
-function fieldValue(value: LineageRecord): unknown {
-  return value.value;
 }
 
 function temporalSummary(value: LineageRecord): string {
@@ -172,6 +173,12 @@ function App() {
     useState<AuditOccurrenceResponse | null>(null);
   const [lineageState, setLineageState] = useState<LineageState>("pending");
   const [lineage, setLineage] = useState<LineageSnapshot | null>(null);
+  const [riskState, setRiskState] = useState<RiskState>("pending");
+  const [riskFixtures, setRiskFixtures] = useState<RiskSignalFixture[]>([]);
+  const [riskAttempt, setRiskAttempt] = useState<ReactiveIngressAttempt | null>(null);
+  const [riskFailureAttempt, setRiskFailureAttempt] =
+    useState<ReactiveIngressAttempt | null>(null);
+  const [riskFailureState, setRiskFailureState] = useState<RiskState>("pending");
   const bootKey = useRef<string | null>(null);
 
   const loadHealth = useCallback(async () => {
@@ -185,6 +192,11 @@ function App() {
       setAuditState("pending");
       setLineage(null);
       setLineageState("pending");
+      setRiskState("pending");
+      setRiskFixtures([]);
+      setRiskAttempt(null);
+      setRiskFailureAttempt(null);
+      setRiskFailureState("pending");
 
       try {
         const nextWorkspace = await getWorkspace();
@@ -220,9 +232,31 @@ function App() {
         const snapshot = await getDatasetLineage(imported.dataset_version_id);
         setLineage(snapshot);
         setLineageState("ready");
+        setRiskState("loading");
+        try {
+          const availableSignals = await getRiskSignals(imported.dataset_version_id);
+          setRiskFixtures(availableSignals.items);
+          if (availableSignals.items.length === 0) {
+            setRiskState("failed");
+          } else {
+            const validFixture =
+              availableSignals.items.find(
+                (item) => item.fixture_id === "hero-reactive-risk-v1",
+              ) ?? availableSignals.items[0];
+            const attempt = await submitReactiveInvestigation(
+              imported.dataset_version_id,
+              validFixture.fixture_id,
+            );
+            setRiskAttempt(attempt.attempt);
+            setRiskState("ready");
+          }
+        } catch {
+          setRiskState("failed");
+        }
       } catch {
         setLineage(null);
         setLineageState("failed");
+        setRiskState("failed");
       }
     } catch {
       setHealth(null);
@@ -233,6 +267,32 @@ function App() {
       setLineageState("failed");
     }
   }, []);
+
+  const openFailureFixture = useCallback(async () => {
+    const fixture =
+      riskFixtures.find(
+        (item) => item.fixture_id === "hero-reactive-risk-target-mismatch-v1",
+      ) ?? riskFixtures[1];
+    if (fixture === undefined) {
+      return;
+    }
+    const datasetVersionId = lineage?.dataset_version.dataset_version_id;
+    if (datasetVersionId === undefined) {
+      setRiskFailureState("failed");
+      return;
+    }
+    setRiskFailureState("loading");
+    try {
+      const attempt = await submitReactiveInvestigation(
+        datasetVersionId,
+        fixture.fixture_id,
+      );
+      setRiskFailureAttempt(attempt.attempt);
+      setRiskFailureState("ready");
+    } catch {
+      setRiskFailureState("failed");
+    }
+  }, [lineage, riskFixtures]);
 
   useEffect(() => {
     void loadHealth();
@@ -246,6 +306,9 @@ function App() {
         : health?.readiness.state === "degraded"
           ? "Core ready with Gemini-only drafting unavailable"
           : "Core ready";
+  const acceptedRiskFixture =
+    riskFixtures.find((item) => item.fixture_id === "hero-reactive-risk-v1") ??
+    riskFixtures[0];
 
   return (
     <main className="core-shell">
@@ -328,6 +391,154 @@ function App() {
           </>
         )}
       </section>
+
+      {health !== null && (
+        <section className="risk-panel" aria-labelledby="risk-heading">
+          <div className="panel-heading">
+            <div>
+              <p className="eyebrow">Risk intake</p>
+              <h2 id="risk-heading">Open a reactive investigation</h2>
+            </div>
+            <span
+              className={`state-mark state-${riskState === "ready" ? "healthy" : riskState === "failed" ? "unavailable" : "pending"}`}
+              aria-hidden="true"
+            />
+          </div>
+
+          <p className="supporting-copy">
+            A prediction can initiate an investigation, but it is not causal evidence.
+            Canonical facts stay bound to one frozen Order Line and Dataset Version.
+          </p>
+
+          {riskState === "loading" && (
+            <p className="supporting-copy" role="status">
+              Normalizing the bundled reactive Risk Signal.
+            </p>
+          )}
+          {riskState === "failed" && (
+            <p className="lineage-warning" role="status">
+              Reactive Risk intake is unavailable. No signal or cached result was substituted.
+            </p>
+          )}
+          {riskState === "ready" && riskAttempt !== null && (
+            <article className="risk-attempt">
+              <div className="record-heading">
+                <div>
+                  <p className="eyebrow">{acceptedRiskFixture?.label ?? "Reactive signal"}</p>
+                  <h3>
+                    {riskAttempt.status === "rejected"
+                      ? "Investigation request rejected"
+                      : riskAttempt.status === "duplicate"
+                      ? "Existing investigation request reused"
+                      : "Investigation request accepted"}
+                  </h3>
+                </div>
+                <span>{riskAttempt.primary_code}</span>
+              </div>
+
+              <dl className="risk-facts">
+                <div>
+                  <dt>Prediction score</dt>
+                  <dd>{acceptedRiskFixture?.signal.score_value ?? "Unavailable"}</dd>
+                </div>
+                <div>
+                  <dt>Prediction role</dt>
+                  <dd>Trigger only; excluded from the scientific digest</dd>
+                </div>
+                <div>
+                  <dt>Explanation metadata</dt>
+                  <dd>
+                    {acceptedRiskFixture
+                      ? formatValue(acceptedRiskFixture.signal.prediction_explanation_ref)
+                      : "Unavailable"}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Calibration metadata</dt>
+                  <dd>
+                    {acceptedRiskFixture
+                      ? formatValue(acceptedRiskFixture.signal.prediction_calibration_ref)
+                      : "Unavailable"}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Ranking metadata</dt>
+                  <dd>
+                    {acceptedRiskFixture
+                      ? formatValue(acceptedRiskFixture.signal.prediction_ranking_ref)
+                      : "Unavailable"}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Delivery metadata</dt>
+                  <dd>
+                    {acceptedRiskFixture
+                      ? formatValue(acceptedRiskFixture.signal.prediction_delivery_metadata)
+                      : "Unavailable"}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Reactive subject</dt>
+                  <dd>{riskAttempt.investigation_request?.subject.order_line_id ?? "Unavailable"}</dd>
+                </div>
+                <div>
+                  <dt>Causal decision cutoff</dt>
+                  <dd>
+                    {riskAttempt.investigation_request
+                      ? temporalSummary(riskAttempt.investigation_request.decision_cutoff)
+                      : "Unavailable"}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Observation cutoff</dt>
+                  <dd>
+                    {riskAttempt.investigation_request
+                      ? temporalSummary(riskAttempt.investigation_request.observation_cutoff)
+                      : "Unavailable"}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Scientific input digest</dt>
+                  <dd>
+                    <code>{riskAttempt.investigation_request?.causal_input_digest ?? "Unavailable"}</code>
+                  </dd>
+                </div>
+              </dl>
+
+              <p className="risk-note">
+                Prediction score, threshold, flagged state, attribution, and advisory context
+                remain inspectable metadata outside the causal-engine projection.
+              </p>
+
+              {riskFixtures.length > 1 && (
+                <button
+                  className="retry-button"
+                  type="button"
+                  onClick={() => void openFailureFixture()}
+                  disabled={riskFailureState === "loading"}
+                >
+                  {riskFailureState === "loading"
+                    ? "Checking rejected fixture"
+                    : "Try the rejected conformance fixture"}
+                </button>
+              )}
+
+              {riskFailureState === "failed" && (
+                <p className="lineage-warning" role="status">
+                  The rejected conformance path could not be recorded.
+                </p>
+              )}
+              {riskFailureState === "ready" && riskFailureAttempt !== null && (
+                <div className="risk-failure" role="status">
+                  <strong>Fail-closed path: {riskFailureAttempt.primary_code}</strong>
+                  <span>{riskFailureAttempt.recovery_action}</span>
+                  <span>No Investigation Request was created.</span>
+                </div>
+              )}
+            </article>
+          )}
+        </section>
+      )}
 
       {health !== null && (
         <section className="lineage-panel" aria-labelledby="lineage-heading">
@@ -423,7 +634,7 @@ function App() {
                                 <dt>{fieldName}</dt>
                                 <dd>
                                   <span>State: {fieldState(value)}</span>
-                                  <span>Value: {formatValue(fieldValue(value))}</span>
+                                  <span>Value: {formatValue(value.value)}</span>
                                   <span>Source value: {formatValue(value.source_value)}</span>
                                   <Trace
                                     observationIds={sourceObservationIds(
@@ -515,7 +726,7 @@ function App() {
                                       const fieldPath = fieldName;
                                       const value = fieldName === "promised_for"
                                         ? temporalSummary(field)
-                                        : `State: ${fieldState(field)} · Value: ${formatValue(fieldValue(field))}`;
+                                        : `State: ${fieldState(field)} · Value: ${formatValue(field.value)}`;
                                       return (
                                         <div key={fieldPath}>
                                           <dt>{fieldName}</dt>

@@ -73,11 +73,35 @@ class AuditOccurrenceViewResponse(BaseModel):
 
     occurrence_id: str
     event_seq: int = Field(gt=0)
-    occurrence_kind: Literal["BOOT_HEALTH_CHECK", "LINEAGE_SNAPSHOT_VIEW"]
+    occurrence_kind: Literal[
+        "BOOT_HEALTH_CHECK",
+        "LINEAGE_SNAPSHOT_VIEW",
+        "REACTIVE_INGRESS",
+    ]
     outcome_code: Literal[
         "CORE_READY",
         "CORE_READY_GEMINI_DEGRADED",
         "LINEAGE_SNAPSHOT_BOUND",
+        "RISK_SIGNAL_ACCEPTED",
+        "RISK_SIGNAL_SCHEMA_UNSUPPORTED",
+        "RISK_SIGNAL_INTEGRITY_FAILED",
+        "RISK_SIGNAL_REVISION_CONFLICT",
+        "RISK_SIGNAL_CLOCK_UNUSABLE",
+        "RISK_SIGNAL_SUBJECT_UNRESOLVED",
+        "RISK_SIGNAL_SUBJECT_AMBIGUOUS",
+        "RISK_SIGNAL_SUBJECT_NOT_OPEN",
+        "COMMITMENT_CUTOFF_UNUSABLE",
+        "RISK_SIGNAL_TARGET_MISMATCH",
+        "RISK_SIGNAL_SCORE_UNUSABLE",
+        "RISK_SIGNAL_CONTEXT_CONFLICT",
+        "RISK_SIGNAL_CONTEXT_UNVERIFIABLE",
+        "RISK_SIGNAL_MODE_MISMATCH",
+        "CAUSAL_QUESTION_VERSION_UNAVAILABLE",
+        "ENGINE_CONFIGURATION_UNAVAILABLE",
+        "SLIPPAGE_DURATION_BASIS_MIXED",
+        "FROZEN_PROMISE_UNAVAILABLE",
+        "FROZEN_PROMISE_CONFLICT",
+        "FROZEN_PROMISE_TEMPORALLY_INVALID",
     ]
     created_at: datetime
 
@@ -209,6 +233,16 @@ class EventMappingResponse(BaseModel):
     revises_promise_source_event_key: str
 
 
+class AdvisoryContextMappingResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    rule_id: str
+    rule_version: str
+    source_namespace: str
+    target_field: str
+    resolution_kind: str
+
+
 class MappingManifestResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -231,6 +265,7 @@ class MappingManifestResponse(BaseModel):
     identity_mappings: dict[str, IdentityMappingResponse]
     field_mappings: dict[str, FieldMappingResponse]
     event_mappings: EventMappingResponse
+    advisory_context_mappings: dict[str, AdvisoryContextMappingResponse]
     entries: list[MappingEntryResponse]
 
 
@@ -497,3 +532,296 @@ class ErrorResponse(BaseModel):
 
     code: str
     recovery_action: str
+
+
+class RiskSignalFieldValueRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    state: ValueState
+    value: Any | None = None
+
+
+class SourceEntityReferenceRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    namespace: str = Field(min_length=1, max_length=128)
+    key: str | list[str]
+
+
+class TriggerSourceEnvelopeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: str = Field(min_length=1, max_length=64)
+    source_system: str = Field(min_length=1, max_length=128)
+    source_payload_sha256: str = Field(min_length=1, max_length=80)
+    protected_source_locator: str = Field(min_length=1, max_length=256)
+    data_classification: Literal[
+        "generated",
+        "public",
+        "restricted",
+        "confidential",
+    ]
+
+
+class TemporalValueRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    value: str = Field(min_length=1, max_length=128)
+    kind: TemporalKind
+    precision: str = Field(min_length=1, max_length=32)
+    timezone_status: TimezoneStatus
+    source_timezone: str | None = None
+
+
+class RiskSignalAdvisoryContextRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_supplier_ref: RiskSignalFieldValueRequest | None = None
+    source_material_or_equipment_ref: RiskSignalFieldValueRequest | None = None
+    source_target_milestone_kind: RiskSignalFieldValueRequest | None = None
+    source_original_promise: RiskSignalFieldValueRequest | None = None
+    timeline_snapshot_as_of: RiskSignalFieldValueRequest | None = None
+
+
+class RiskSignalRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: str = Field(min_length=1, max_length=64)
+    trigger_mode: Literal["reactive", "proactive"] = "reactive"
+    source: TriggerSourceEnvelopeRequest
+    source_signal_id: str = Field(min_length=1, max_length=128)
+    source_revision: str = Field(min_length=1, max_length=128)
+    scored_dataset_version_ref: str = Field(min_length=1, max_length=256)
+    source_order_line_ref: SourceEntityReferenceRequest
+    predictor_id: str = Field(min_length=1, max_length=128)
+    predictor_version: str = Field(min_length=1, max_length=128)
+    feature_contract_version: str = Field(min_length=1, max_length=128)
+    target_definition_id: str = Field(min_length=1, max_length=128)
+    target_milestone_kind: Literal[
+        "supplier_completion",
+        "supplier_handoff",
+    ]
+    score_semantic: str = Field(min_length=1, max_length=128)
+    score_value: float
+    alert_threshold: float
+    flagged: bool
+    generated_at: TemporalValueRequest
+    known_at: TemporalValueRequest
+    predictor_artifact_ref: RiskSignalFieldValueRequest
+    predictive_attribution_ref: RiskSignalFieldValueRequest
+    prediction_explanation_ref: RiskSignalFieldValueRequest = Field(
+        default_factory=lambda: RiskSignalFieldValueRequest(state="missing")
+    )
+    prediction_calibration_ref: RiskSignalFieldValueRequest = Field(
+        default_factory=lambda: RiskSignalFieldValueRequest(state="missing")
+    )
+    prediction_ranking_ref: RiskSignalFieldValueRequest = Field(
+        default_factory=lambda: RiskSignalFieldValueRequest(state="missing")
+    )
+    prediction_delivery_metadata: RiskSignalFieldValueRequest = Field(
+        default_factory=lambda: RiskSignalFieldValueRequest(state="missing")
+    )
+    advisory_context: RiskSignalFieldValueRequest | None = None
+
+
+class RiskSignalSourcePreviewResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["trigger-source-envelope.v1"]
+    source_system: Literal["bundled-predictive-stub"]
+    data_classification: Literal["generated"]
+
+
+class RiskSignalPreviewResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["risk-signal.v1"]
+    trigger_mode: Literal["reactive"]
+    source: RiskSignalSourcePreviewResponse
+    source_signal_id: str
+    source_revision: str
+    scored_dataset_version_ref: str
+    source_order_line_ref: SourceEntityReferenceRequest
+    predictor_id: str
+    predictor_version: str
+    feature_contract_version: str
+    target_definition_id: str
+    target_milestone_kind: Literal["supplier_completion", "supplier_handoff"]
+    score_semantic: str
+    score_value: float
+    alert_threshold: float
+    flagged: bool
+    generated_at: TemporalValueRequest
+    known_at: TemporalValueRequest
+    predictor_artifact_ref: RiskSignalFieldValueRequest
+    predictive_attribution_ref: RiskSignalFieldValueRequest
+    prediction_explanation_ref: RiskSignalFieldValueRequest
+    prediction_calibration_ref: RiskSignalFieldValueRequest
+    prediction_ranking_ref: RiskSignalFieldValueRequest
+    prediction_delivery_metadata: RiskSignalFieldValueRequest
+    advisory_context: RiskSignalFieldValueRequest | None = None
+
+
+class RiskSignalFixtureResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    fixture_id: str
+    label: str
+    signal: RiskSignalPreviewResponse
+
+
+class RiskSignalListResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[RiskSignalFixtureResponse]
+
+
+class ReactiveFixtureRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    dataset_version_id: str = Field(min_length=1, max_length=256)
+    fixture_id: str = Field(min_length=1, max_length=128)
+
+
+class IngressFindingResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    finding_id: str
+    code: str
+    severity: Literal["info", "warning", "error"]
+    disposition: Literal["advisory", "reject"]
+    affected_refs: list[str]
+    message: str
+    remediation: str
+
+
+class IngressAuditBindingResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    occurrence_id: str
+    event_seq: int = Field(gt=0)
+
+
+class RiskSignalIngressReferenceResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["RiskSignal"]
+    source_system: str
+    source_signal_id: str
+    source_revision: str
+    source_payload_sha256: str
+    source_order_line_ref: SourceEntityReferenceRequest
+
+
+class InvestigationSubjectResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    order_line_id: str
+
+
+class CausalWindowBoundsResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    known_at_lower: str
+    known_at_upper: TemporalFieldResponse
+
+
+class CausalSubjectRemovalResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    subject_identity: str
+    removed: bool
+    post_subject_identity_hash: str
+
+
+class CausalWindowResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    selector_version: str
+    bounds: CausalWindowBoundsResponse
+    selected_identity_hash: str
+    selected_count: int = Field(ge=0)
+    subject_removal: CausalSubjectRemovalResponse
+
+
+class CausalSubjectAnalyticalValuesResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    supplier_id: FieldValueResponse
+    original_promise: TemporalFieldResponse
+    adjustment_inputs: dict[str, FieldValueResponse]
+    subject_exclusion_identity: str
+
+
+class CausalEngineInputResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    causal_input_schema_version: Literal["causal-input-projection.v2"]
+    dataset_version_id: str
+    subject_analytical_values: CausalSubjectAnalyticalValuesResponse
+    decision_cutoff: TemporalFieldResponse
+    observation_cutoff: TemporalFieldResponse
+    target_milestone_kind: FieldValueResponse
+    canonical_slippage_duration_basis: Literal[
+        "CALENDAR_DAY",
+        "ELAPSED_86400_SECOND_DAY",
+    ]
+    causal_question_version: str
+    engine_configuration_ref: str
+    estimator_window_ref: CausalWindowResponse
+    history_lookback_ref: CausalWindowResponse
+    historical_population_digest: str
+    analytical_fact_lineage_refs: list[str]
+
+
+class InvestigationRequestResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    investigation_request_id: str
+    schema_version: Literal["investigation-request.v1"]
+    trigger_mode: Literal["reactive", "proactive"]
+    ingress_ref: RiskSignalIngressReferenceResponse
+    rerun_of_request_id: FieldValueResponse
+    dataset_version_id: str
+    subject: InvestigationSubjectResponse
+    decision_cutoff: TemporalFieldResponse
+    decision_cutoff_source: Literal["canonical_commitment", "proactive_decision"]
+    observation_cutoff: TemporalFieldResponse
+    target_milestone_kind: FieldValueResponse
+    causal_question_version: str
+    engine_configuration_ref: str
+    ingress_validation_refs: list[str]
+    provenance_refs: list[str]
+    prediction_metadata: FieldValueResponse
+    accepted_at: datetime
+    causal_engine_input: CausalEngineInputResponse
+    causal_input_digest: str
+    content_hash: str
+
+
+class ReactiveIngressAttemptResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    attempt_id: str
+    status: Literal["accepted", "duplicate", "rejected", "accepted_with_warning"]
+    scope: Literal["reactive_ingress"]
+    source_system: str
+    source_signal_id: str
+    source_revision: str
+    source_payload_sha256: str
+    primary_code: str
+    findings: list[IngressFindingResponse]
+    evidence_refs: list[str]
+    retryable: bool
+    recovery_action: str
+    received_at: datetime
+    investigation_request_id: str | None
+    investigation_request: InvestigationRequestResponse | None
+    audit: IngressAuditBindingResponse
+
+
+class ReactiveInvestigationResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    result: Literal["CREATED", "IDEMPOTENT_REPLAY"]
+    attempt: ReactiveIngressAttemptResponse

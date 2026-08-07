@@ -16,6 +16,10 @@ test("shows the typed health and canonical lineage journey", async ({ page }) =>
   await expect(page.getByText("Process liveness")).toBeVisible();
   await expect(page.getByText("Core readiness")).toBeVisible();
   await expect(page.getByText("Canonical lineage")).toBeVisible();
+  await expect(page.getByText("Investigation request accepted")).toBeVisible();
+  await expect(
+    page.getByText("Trigger only; excluded from the scientific digest"),
+  ).toBeVisible();
   await expect(page.getByText("3 order lines")).toBeVisible();
   await expect(
     page.getByRole("heading", { name: "Canonical fields" }).first(),
@@ -59,6 +63,8 @@ test("creates isolated browser workspaces with idempotent boot and lineage audit
     await expect(pageB.getByText(/Demo Workspace active/)).toBeVisible();
     await expect(pageA.getByText(/Audit occurrence recorded/)).toBeVisible();
     await expect(pageB.getByText(/Audit occurrence recorded/)).toBeVisible();
+    await expect(pageA.getByText("Investigation request accepted")).toBeVisible();
+    await expect(pageB.getByText("Investigation request accepted")).toBeVisible();
 
     const workspaceAResponse = await pageA.request.get("/api/workspace");
     const workspaceBResponse = await pageB.request.get("/api/workspace");
@@ -84,11 +90,12 @@ test("creates isolated browser workspaces with idempotent boot and lineage audit
     expect(auditBResponse.ok()).toBeTruthy();
     const auditA = await auditAResponse.json();
     const auditB = await auditBResponse.json();
-    expect(auditA.items).toHaveLength(2);
-    expect(auditB.items).toHaveLength(2);
+    expect(auditA.items).toHaveLength(3);
+    expect(auditB.items).toHaveLength(3);
     expect(auditA.items.map((item: { occurrence_kind: string }) => item.occurrence_kind).sort()).toEqual([
       "BOOT_HEALTH_CHECK",
       "LINEAGE_SNAPSHOT_VIEW",
+      "REACTIVE_INGRESS",
     ]);
     expect(Object.keys(auditA.items[0]).sort()).toEqual([
       "created_at",
@@ -108,7 +115,7 @@ test("creates isolated browser workspaces with idempotent boot and lineage audit
     expect(retryResponse.status()).toBe(200);
     expect((await retryResponse.json()).result).toBe("IDEMPOTENT_REPLAY");
     const auditAfterRetry = await pageA.request.get("/api/audit/occurrences");
-    expect((await auditAfterRetry.json()).items).toHaveLength(2);
+    expect((await auditAfterRetry.json()).items).toHaveLength(3);
     await expectNoPublicLeakage(pageA);
     await expectNoPublicLeakage(pageB);
   } finally {

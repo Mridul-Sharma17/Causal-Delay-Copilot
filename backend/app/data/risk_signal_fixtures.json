@@ -1,0 +1,608 @@
+{
+  "schema_version": "risk-signal-fixtures.v1",
+  "items": [
+    {
+      "fixture_id": "hero-reactive-risk-revision-conflict-v1",
+      "label": "Conformance failure: conflicting source revision",
+      "signal": {
+        "schema_version": "risk-signal.v1",
+        "trigger_mode": "reactive",
+        "source": {
+          "schema_version": "trigger-source-envelope.v1",
+          "source_system": "bundled-predictive-stub",
+          "source_payload_sha256": "sha256:ad651bfd6779aa76fab0b31d8fc4ea58b631b237d91e99a06e45be6a743aee33",
+          "protected_source_locator": "bundled://risk-signal/hero-reactive-risk-revision-conflict-v1",
+          "data_classification": "generated"
+        },
+        "source_signal_id": "bundled-risk-5defb6c1239487b160e5e1da51ab64dc6681b9d303f6f041b4977cada08614eb",
+        "source_revision": "v1",
+        "scored_dataset_version_ref": "sha256:be91f3984717cd591d404926881a56d5e42b0f85bc0a56116d2899568a17e598",
+        "source_order_line_ref": {
+          "namespace": "semi-synthetic-hero",
+          "key": "hero-line-001"
+        },
+        "predictor_id": "predictive-stub",
+        "predictor_version": "predictive-stub.v1",
+        "feature_contract_version": "predictive-features.v1",
+        "target_definition_id": "supplier_milestone_miss.v1",
+        "target_milestone_kind": "supplier_handoff",
+        "score_semantic": "probability_supplier_milestone_miss",
+        "score_value": 0.79,
+        "alert_threshold": 0.5,
+        "flagged": true,
+        "generated_at": {
+          "value": "2026-01-10T09:00:00+05:30",
+          "kind": "instant",
+          "precision": "minute",
+          "timezone_status": "known",
+          "source_timezone": "Asia/Kolkata"
+        },
+        "known_at": {
+          "value": "2026-01-10T09:05:00+05:30",
+          "kind": "instant",
+          "precision": "minute",
+          "timezone_status": "known",
+          "source_timezone": "Asia/Kolkata"
+        },
+        "predictor_artifact_ref": {
+          "state": "present",
+          "value": "bundled://predictive-stub/fixture-score-v1"
+        },
+        "predictive_attribution_ref": {
+          "state": "present",
+          "value": "bundled://predictive-stub/fixture-attribution-v1"
+        },
+        "advisory_context": {
+          "state": "present",
+          "value": {
+            "source_supplier_ref": {
+              "state": "present",
+              "value": {
+                "namespace": "semi-synthetic-hero",
+                "key": "hero-supplier-001"
+              }
+            },
+            "source_target_milestone_kind": {
+              "state": "present",
+              "value": "supplier_handoff"
+            },
+            "source_original_promise": {
+              "state": "present",
+              "value": {
+                "value": "2026-02-15",
+                "kind": "date",
+                "precision": "date",
+                "timezone_status": "not_applicable",
+                "source_timezone": null
+              }
+            },
+            "timeline_snapshot_as_of": {
+              "state": "present",
+              "value": {
+                "value": "2026-01-10T09:00:00+05:30",
+                "kind": "instant",
+                "precision": "minute",
+                "timezone_status": "known",
+                "source_timezone": "Asia/Kolkata"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "fixture_id": "hero-reactive-risk-v1",
+      "label": "Bundled reactive risk signal",
+      "signal": {
+        "schema_version": "risk-signal.v1",
+        "trigger_mode": "reactive",
+        "source": {
+          "schema_version": "trigger-source-envelope.v1",
+          "source_system": "bundled-predictive-stub",
+          "source_payload_sha256": "sha256:7cc7b4410551d5b91e877532683fb02640407abb88670dbae8e458b3c8228dce",
+          "protected_source_locator": "bundled://risk-signal/hero-reactive-risk-v1",
+          "data_classification": "generated"
+        },
+        "source_signal_id": "bundled-risk-5defb6c1239487b160e5e1da51ab64dc6681b9d303f6f041b4977cada08614eb",
+        "source_revision": "v1",
+        "scored_dataset_version_ref": "sha256:be91f3984717cd591d404926881a56d5e42b0f85bc0a56116d2899568a17e598",
+        "source_order_line_ref": {
+          "namespace": "semi-synthetic-hero",
+          "key": "hero-line-001"
+        },
+        "predictor_id": "predictive-stub",
+        "predictor_version": "predictive-stub.v1",
+        "feature_contract_version": "predictive-features.v1",
+        "target_definition_id": "supplier_milestone_miss.v1",
+        "target_milestone_kind": "supplier_handoff",
+        "score_semantic": "probability_supplier_milestone_miss",
+        "score_value": 0.78,
+        "alert_threshold": 0.5,
+        "flagged": true,
+        "generated_at": {
+          "value": "2026-01-10T09:00:00+05:30",
+          "kind": "instant",
+          "precision": "minute",
+          "timezone_status": "known",
+          "source_timezone": "Asia/Kolkata"
+        },
+        "known_at": {
+          "value": "2026-01-10T09:05:00+05:30",
+          "kind": "instant",
+          "precision": "minute",
+          "timezone_status": "known",
+          "source_timezone": "Asia/Kolkata"
+        },
+        "predictor_artifact_ref": {
+          "state": "present",
+          "value": "bundled://predictive-stub/fixture-score-v1"
+        },
+        "predictive_attribution_ref": {
+          "state": "present",
+          "value": "bundled://predictive-stub/fixture-attribution-v1"
+        },
+        "advisory_context": {
+          "state": "present",
+          "value": {
+            "source_supplier_ref": {
+              "state": "present",
+              "value": {
+                "namespace": "semi-synthetic-hero",
+                "key": "hero-supplier-001"
+              }
+            },
+            "source_target_milestone_kind": {
+              "state": "present",
+              "value": "supplier_handoff"
+            },
+            "source_original_promise": {
+              "state": "present",
+              "value": {
+                "value": "2026-02-15",
+                "kind": "date",
+                "precision": "date",
+                "timezone_status": "not_applicable",
+                "source_timezone": null
+              }
+            },
+            "timeline_snapshot_as_of": {
+              "state": "present",
+              "value": {
+                "value": "2026-01-10T09:00:00+05:30",
+                "kind": "instant",
+                "precision": "minute",
+                "timezone_status": "known",
+                "source_timezone": "Asia/Kolkata"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "fixture_id": "hero-reactive-risk-target-mismatch-v1",
+      "label": "Conformance failure: target mismatch",
+      "signal": {
+        "schema_version": "risk-signal.v1",
+        "trigger_mode": "reactive",
+        "source": {
+          "schema_version": "trigger-source-envelope.v1",
+          "source_system": "bundled-predictive-stub",
+          "source_payload_sha256": "sha256:99867c823c6762930d76061da737ba084addde8a00543be6cb1879e342bd63ff",
+          "protected_source_locator": "bundled://risk-signal/hero-reactive-risk-target-mismatch-v1",
+          "data_classification": "generated"
+        },
+        "source_signal_id": "bundled-risk-e3c595bbb4d29b6091abd68d3b1e045fc1a80ff570513524022a4b72e1530100",
+        "source_revision": "v1",
+        "scored_dataset_version_ref": "sha256:be91f3984717cd591d404926881a56d5e42b0f85bc0a56116d2899568a17e598",
+        "source_order_line_ref": {
+          "namespace": "semi-synthetic-hero",
+          "key": "hero-line-001"
+        },
+        "predictor_id": "predictive-stub",
+        "predictor_version": "predictive-stub.v1",
+        "feature_contract_version": "predictive-features.v1",
+        "target_definition_id": "supplier_milestone_miss.v1",
+        "target_milestone_kind": "supplier_completion",
+        "score_semantic": "probability_supplier_milestone_miss",
+        "score_value": 0.78,
+        "alert_threshold": 0.5,
+        "flagged": true,
+        "generated_at": {
+          "value": "2026-01-10T09:00:00+05:30",
+          "kind": "instant",
+          "precision": "minute",
+          "timezone_status": "known",
+          "source_timezone": "Asia/Kolkata"
+        },
+        "known_at": {
+          "value": "2026-01-10T09:05:00+05:30",
+          "kind": "instant",
+          "precision": "minute",
+          "timezone_status": "known",
+          "source_timezone": "Asia/Kolkata"
+        },
+        "predictor_artifact_ref": {
+          "state": "present",
+          "value": "bundled://predictive-stub/fixture-score-v1"
+        },
+        "predictive_attribution_ref": {
+          "state": "present",
+          "value": "bundled://predictive-stub/fixture-attribution-v1"
+        },
+        "advisory_context": {
+          "state": "present",
+          "value": {
+            "source_supplier_ref": {
+              "state": "present",
+              "value": {
+                "namespace": "semi-synthetic-hero",
+                "key": "hero-supplier-001"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "fixture_id": "hero-reactive-risk-context-conflict-v1",
+      "label": "Conformance failure: advisory supplier conflict",
+      "signal": {
+        "schema_version": "risk-signal.v1",
+        "trigger_mode": "reactive",
+        "source": {
+          "schema_version": "trigger-source-envelope.v1",
+          "source_system": "bundled-predictive-stub",
+          "source_payload_sha256": "sha256:0a7bec217cacb80fc8bec0b751a2324c689244ba2e3c7e2d8fa4aec47d5e4273",
+          "protected_source_locator": "bundled://risk-signal/hero-reactive-risk-context-conflict-v1",
+          "data_classification": "generated"
+        },
+        "source_signal_id": "bundled-risk-5defb6c1239487b160e5e1da51ab64dc6681b9d303f6f041b4977cada08614eb",
+        "source_revision": "v1",
+        "scored_dataset_version_ref": "sha256:be91f3984717cd591d404926881a56d5e42b0f85bc0a56116d2899568a17e598",
+        "source_order_line_ref": {
+          "namespace": "semi-synthetic-hero",
+          "key": "hero-line-001"
+        },
+        "predictor_id": "predictive-stub",
+        "predictor_version": "predictive-stub.v1",
+        "feature_contract_version": "predictive-features.v1",
+        "target_definition_id": "supplier_milestone_miss.v1",
+        "target_milestone_kind": "supplier_handoff",
+        "score_semantic": "probability_supplier_milestone_miss",
+        "score_value": 0.78,
+        "alert_threshold": 0.5,
+        "flagged": true,
+        "generated_at": {
+          "value": "2026-01-10T09:00:00+05:30",
+          "kind": "instant",
+          "precision": "minute",
+          "timezone_status": "known",
+          "source_timezone": "Asia/Kolkata"
+        },
+        "known_at": {
+          "value": "2026-01-10T09:05:00+05:30",
+          "kind": "instant",
+          "precision": "minute",
+          "timezone_status": "known",
+          "source_timezone": "Asia/Kolkata"
+        },
+        "predictor_artifact_ref": {
+          "state": "present",
+          "value": "bundled://predictive-stub/fixture-score-v1"
+        },
+        "predictive_attribution_ref": {
+          "state": "present",
+          "value": "bundled://predictive-stub/fixture-attribution-v1"
+        },
+        "advisory_context": {
+          "state": "present",
+          "value": {
+            "source_supplier_ref": {
+              "state": "present",
+              "value": {
+                "namespace": "semi-synthetic-hero",
+                "key": "hero-supplier-002"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "fixture_id": "hero-reactive-risk-context-unverifiable-v1",
+      "label": "Conformance warning: advisory context unavailable",
+      "signal": {
+        "schema_version": "risk-signal.v1",
+        "trigger_mode": "reactive",
+        "source": {
+          "schema_version": "trigger-source-envelope.v1",
+          "source_system": "bundled-predictive-stub",
+          "source_payload_sha256": "sha256:99aa6138c13838b9cfc0ac61e4bc987a1a434b53123fd9623d9de3a9a040f664",
+          "protected_source_locator": "bundled://risk-signal/hero-reactive-risk-context-unverifiable-v1",
+          "data_classification": "generated"
+        },
+        "source_signal_id": "bundled-risk-5defb6c1239487b160e5e1da51ab64dc6681b9d303f6f041b4977cada08614eb",
+        "source_revision": "v1",
+        "scored_dataset_version_ref": "sha256:be91f3984717cd591d404926881a56d5e42b0f85bc0a56116d2899568a17e598",
+        "source_order_line_ref": {
+          "namespace": "semi-synthetic-hero",
+          "key": "hero-line-001"
+        },
+        "predictor_id": "predictive-stub",
+        "predictor_version": "predictive-stub.v1",
+        "feature_contract_version": "predictive-features.v1",
+        "target_definition_id": "supplier_milestone_miss.v1",
+        "target_milestone_kind": "supplier_handoff",
+        "score_semantic": "probability_supplier_milestone_miss",
+        "score_value": 0.78,
+        "alert_threshold": 0.5,
+        "flagged": true,
+        "generated_at": {
+          "value": "2026-01-10T09:00:00+05:30",
+          "kind": "instant",
+          "precision": "minute",
+          "timezone_status": "known",
+          "source_timezone": "Asia/Kolkata"
+        },
+        "known_at": {
+          "value": "2026-01-10T09:05:00+05:30",
+          "kind": "instant",
+          "precision": "minute",
+          "timezone_status": "known",
+          "source_timezone": "Asia/Kolkata"
+        },
+        "predictor_artifact_ref": {
+          "state": "present",
+          "value": "bundled://predictive-stub/fixture-score-v1"
+        },
+        "predictive_attribution_ref": {
+          "state": "present",
+          "value": "bundled://predictive-stub/fixture-attribution-v1"
+        },
+        "advisory_context": {
+          "state": "missing",
+          "value": null
+        }
+      }
+    },
+    {
+      "fixture_id": "hero-reactive-risk-clock-invalid-v1",
+      "label": "Conformance failure: unusable known clock",
+      "signal": {
+        "schema_version": "risk-signal.v1",
+        "trigger_mode": "reactive",
+        "source": {
+          "schema_version": "trigger-source-envelope.v1",
+          "source_system": "bundled-predictive-stub",
+          "source_payload_sha256": "sha256:03da854e0cfebb61bdaaaca5db134880e60192c76f6a237daa96bcbe7518af43",
+          "protected_source_locator": "bundled://risk-signal/hero-reactive-risk-clock-invalid-v1",
+          "data_classification": "generated"
+        },
+        "source_signal_id": "bundled-risk-5defb6c1239487b160e5e1da51ab64dc6681b9d303f6f041b4977cada08614eb",
+        "source_revision": "v1",
+        "scored_dataset_version_ref": "sha256:be91f3984717cd591d404926881a56d5e42b0f85bc0a56116d2899568a17e598",
+        "source_order_line_ref": {
+          "namespace": "semi-synthetic-hero",
+          "key": "hero-line-001"
+        },
+        "predictor_id": "predictive-stub",
+        "predictor_version": "predictive-stub.v1",
+        "feature_contract_version": "predictive-features.v1",
+        "target_definition_id": "supplier_milestone_miss.v1",
+        "target_milestone_kind": "supplier_handoff",
+        "score_semantic": "probability_supplier_milestone_miss",
+        "score_value": 0.78,
+        "alert_threshold": 0.5,
+        "flagged": true,
+        "generated_at": {
+          "value": "2026-01-10T09:00:00+05:30",
+          "kind": "instant",
+          "precision": "minute",
+          "timezone_status": "known",
+          "source_timezone": "Asia/Kolkata"
+        },
+        "known_at": {
+          "value": "2026-01-10T09:05:00+05:30",
+          "kind": "instant",
+          "precision": "minute",
+          "timezone_status": "unknown",
+          "source_timezone": null
+        },
+        "predictor_artifact_ref": {
+          "state": "present",
+          "value": "bundled://predictive-stub/fixture-score-v1"
+        },
+        "predictive_attribution_ref": {
+          "state": "present",
+          "value": "bundled://predictive-stub/fixture-attribution-v1"
+        },
+        "advisory_context": {
+          "state": "present",
+          "value": {
+            "source_supplier_ref": {
+              "state": "present",
+              "value": {
+                "namespace": "semi-synthetic-hero",
+                "key": "hero-supplier-001"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "fixture_id": "hero-reactive-risk-metadata-unavailable-v1",
+      "label": "Conformance warning: predictive metadata unavailable",
+      "signal": {
+        "schema_version": "risk-signal.v1",
+        "trigger_mode": "reactive",
+        "source": {
+          "schema_version": "trigger-source-envelope.v1",
+          "source_system": "bundled-predictive-stub",
+          "source_payload_sha256": "sha256:fb856ffa19e51ac3c93d64e1ee9a896e14b175bd35c73818f6c6c9ae8298f64b",
+          "protected_source_locator": "bundled://risk-signal/hero-reactive-risk-metadata-unavailable-v1",
+          "data_classification": "generated"
+        },
+        "source_signal_id": "bundled-risk-5defb6c1239487b160e5e1da51ab64dc6681b9d303f6f041b4977cada08614eb",
+        "source_revision": "v1",
+        "scored_dataset_version_ref": "sha256:be91f3984717cd591d404926881a56d5e42b0f85bc0a56116d2899568a17e598",
+        "source_order_line_ref": {
+          "namespace": "semi-synthetic-hero",
+          "key": "hero-line-001"
+        },
+        "predictor_id": "predictive-stub",
+        "predictor_version": "predictive-stub.v1",
+        "feature_contract_version": "predictive-features.v1",
+        "target_definition_id": "supplier_milestone_miss.v1",
+        "target_milestone_kind": "supplier_handoff",
+        "score_semantic": "probability_supplier_milestone_miss",
+        "score_value": 0.78,
+        "alert_threshold": 0.5,
+        "flagged": true,
+        "generated_at": {
+          "value": "2026-01-10T09:00:00+05:30",
+          "kind": "instant",
+          "precision": "minute",
+          "timezone_status": "known",
+          "source_timezone": "Asia/Kolkata"
+        },
+        "known_at": {
+          "value": "2026-01-10T09:05:00+05:30",
+          "kind": "instant",
+          "precision": "minute",
+          "timezone_status": "known",
+          "source_timezone": "Asia/Kolkata"
+        },
+        "predictor_artifact_ref": {
+          "state": "missing",
+          "value": null
+        },
+        "predictive_attribution_ref": {
+          "state": "missing",
+          "value": null
+        },
+        "advisory_context": {
+          "state": "present",
+          "value": {
+            "source_supplier_ref": {
+              "state": "present",
+              "value": {
+                "namespace": "semi-synthetic-hero",
+                "key": "hero-supplier-001"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "fixture_id": "hero-reactive-risk-firewall-variant-v1",
+      "label": "Conformance: prediction metadata mutation",
+      "signal": {
+        "schema_version": "risk-signal.v1",
+        "trigger_mode": "reactive",
+        "source": {
+          "schema_version": "trigger-source-envelope.v1",
+          "source_system": "bundled-predictive-stub",
+          "source_payload_sha256": "sha256:349ff05d885475e071a0d58ac6cf3a29098e35096d969049f5ababe426479fc3",
+          "protected_source_locator": "bundled://risk-signal/hero-reactive-risk-firewall-variant-v1",
+          "data_classification": "generated"
+        },
+        "source_signal_id": "bundled-risk-5defb6c1239487b160e5e1da51ab64dc6681b9d303f6f041b4977cada08614eb",
+        "source_revision": "v2",
+        "scored_dataset_version_ref": "sha256:be91f3984717cd591d404926881a56d5e42b0f85bc0a56116d2899568a17e598",
+        "source_order_line_ref": {
+          "namespace": "semi-synthetic-hero",
+          "key": "hero-line-001"
+        },
+        "predictor_id": "predictive-stub",
+        "predictor_version": "predictive-stub.v1",
+        "feature_contract_version": "predictive-features.v1",
+        "target_definition_id": "supplier_milestone_miss.v1",
+        "target_milestone_kind": "supplier_handoff",
+        "score_semantic": "probability_supplier_milestone_miss",
+        "score_value": 0.61,
+        "alert_threshold": 0.6,
+        "flagged": true,
+        "generated_at": {
+          "value": "2026-01-10T09:00:00+05:30",
+          "kind": "instant",
+          "precision": "minute",
+          "timezone_status": "known",
+          "source_timezone": "Asia/Kolkata"
+        },
+        "known_at": {
+          "value": "2026-01-10T09:05:00+05:30",
+          "kind": "instant",
+          "precision": "minute",
+          "timezone_status": "known",
+          "source_timezone": "Asia/Kolkata"
+        },
+        "predictor_artifact_ref": {
+          "state": "present",
+          "value": "bundled://predictive-stub/fixture-score-v1"
+        },
+        "predictive_attribution_ref": {
+          "state": "present",
+          "value": "bundled://predictive-stub/fixture-attribution-v1"
+        },
+        "advisory_context": {
+          "state": "present",
+          "value": {
+            "source_supplier_ref": {
+              "state": "present",
+              "value": {
+                "namespace": "semi-synthetic-hero",
+                "key": "hero-supplier-001"
+              }
+            },
+            "source_target_milestone_kind": {
+              "state": "present",
+              "value": "supplier_handoff"
+            },
+            "source_original_promise": {
+              "state": "present",
+              "value": {
+                "value": "2026-02-15",
+                "kind": "date",
+                "precision": "date",
+                "timezone_status": "not_applicable",
+                "source_timezone": null
+              }
+            },
+            "timeline_snapshot_as_of": {
+              "state": "present",
+              "value": {
+                "value": "2026-01-10T09:00:00+05:30",
+                "kind": "instant",
+                "precision": "minute",
+                "timezone_status": "known",
+                "source_timezone": "Asia/Kolkata"
+              }
+            }
+          }
+        },
+        "prediction_explanation_ref": {
+          "state": "present",
+          "value": "bundled://predictive-stub/fixture-explanation-v2"
+        },
+        "prediction_calibration_ref": {
+          "state": "present",
+          "value": "bundled://predictive-stub/fixture-calibration-v2"
+        },
+        "prediction_ranking_ref": {
+          "state": "present",
+          "value": "bundled://predictive-stub/fixture-ranking-v2"
+        },
+        "prediction_delivery_metadata": {
+          "state": "present",
+          "value": {
+            "channel": "bundled-fixture-v2",
+            "rank": 2
+          }
+        }
+      }
+    }
+  ]
+}

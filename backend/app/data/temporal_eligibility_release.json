@@ -1,0 +1,31 @@
+{
+  "schema_version": "temporal-eligibility-release-manifest.v1",
+  "release_ref": "temporal-eligibility-release.v1",
+  "dataset_version_ref": "sha256:be91f3984717cd591d404926881a56d5e42b0f85bc0a56116d2899568a17e598",
+  "variants": [
+    {
+      "variant_ref": "primary",
+      "release_state": "releasable",
+      "released_s8_rows": [
+        {
+          "release_ref": "temporal-eligibility-release.v1",
+          "release_state": "releasable",
+          "row_identity": "s8:semi-synthetic-hero:primary:v1",
+          "supplier_milestone_slippage_duration_basis": "CALENDAR_DAY"
+        }
+      ]
+    },
+    {
+      "variant_ref": "continuous-sensitivity",
+      "release_state": "releasable",
+      "released_s8_rows": [
+        {
+          "release_ref": "temporal-eligibility-release.v1",
+          "release_state": "releasable",
+          "row_identity": "s8:semi-synthetic-hero:continuous-sensitivity:v1",
+          "supplier_milestone_slippage_duration_basis": "CALENDAR_DAY"
+        }
+      ]
+    }
+  ]
+}

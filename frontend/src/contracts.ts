@@ -83,6 +83,179 @@ export type LineageSnapshot = {
   };
 };
 
+export type RiskSignalFieldValue = {
+  state: "present" | "missing" | "not_applicable" | "invalid" | "unresolved";
+  value?: unknown;
+};
+
+export type RiskSignal = {
+  schema_version: "risk-signal.v1";
+  trigger_mode: "reactive";
+  source: {
+    schema_version: "trigger-source-envelope.v1";
+    source_system: "bundled-predictive-stub";
+    data_classification: "generated";
+  };
+  source_signal_id: string;
+  source_revision: string;
+  scored_dataset_version_ref: string;
+  source_order_line_ref: {
+    namespace: string;
+    key: string | string[];
+  };
+  predictor_id: string;
+  predictor_version: string;
+  feature_contract_version: string;
+  target_definition_id: string;
+  target_milestone_kind: "supplier_completion" | "supplier_handoff";
+  score_semantic: string;
+  score_value: number;
+  alert_threshold: number;
+  flagged: boolean;
+  generated_at: {
+    value: string;
+    kind: "date" | "local_datetime" | "instant";
+    precision: string;
+    timezone_status: "known" | "assumed" | "unknown" | "not_applicable";
+    source_timezone: string | null;
+  };
+  known_at: {
+    value: string;
+    kind: "date" | "local_datetime" | "instant";
+    precision: string;
+    timezone_status: "known" | "assumed" | "unknown" | "not_applicable";
+    source_timezone: string | null;
+  };
+  predictor_artifact_ref: RiskSignalFieldValue;
+  predictive_attribution_ref: RiskSignalFieldValue;
+  prediction_explanation_ref: RiskSignalFieldValue;
+  prediction_calibration_ref: RiskSignalFieldValue;
+  prediction_ranking_ref: RiskSignalFieldValue;
+  prediction_delivery_metadata: RiskSignalFieldValue;
+  advisory_context: RiskSignalFieldValue | null;
+};
+
+export type RiskSignalFixture = {
+  fixture_id: string;
+  label: string;
+  signal: RiskSignal;
+};
+
+export type IngressFinding = {
+  finding_id: string;
+  code: string;
+  severity: "info" | "warning" | "error";
+  disposition: "advisory" | "reject";
+  affected_refs: string[];
+  message: string;
+  remediation: string;
+};
+
+export type CausalTemporalValue = {
+  kind: "date" | "local_datetime" | "instant";
+  source_value: string;
+  normalized_value: string;
+  precision: string;
+  timezone_status: "known" | "assumed" | "unknown" | "not_applicable";
+  source_timezone: RiskSignalFieldValue;
+};
+
+export type CausalTemporalField = {
+  state: RiskSignalFieldValue["state"];
+  value?: CausalTemporalValue;
+};
+
+export type CausalWindow = {
+  selector_version: string;
+  bounds: { known_at_lower: string; known_at_upper: CausalTemporalField };
+  selected_identity_hash: string;
+  selected_count: number;
+  subject_removal: {
+    subject_identity: string;
+    removed: boolean;
+    post_subject_identity_hash: string;
+  };
+};
+
+export type CausalEngineInput = {
+  causal_input_schema_version: "causal-input-projection.v2";
+  dataset_version_id: string;
+  subject_analytical_values: {
+    supplier_id: RiskSignalFieldValue;
+    original_promise: CausalTemporalField;
+    adjustment_inputs: Record<string, RiskSignalFieldValue>;
+    subject_exclusion_identity: string;
+  };
+  decision_cutoff: CausalTemporalField;
+  observation_cutoff: CausalTemporalField;
+  target_milestone_kind: RiskSignalFieldValue;
+  canonical_slippage_duration_basis:
+    | "CALENDAR_DAY"
+    | "ELAPSED_86400_SECOND_DAY";
+  causal_question_version: string;
+  engine_configuration_ref: string;
+  estimator_window_ref: CausalWindow;
+  history_lookback_ref: CausalWindow;
+  historical_population_digest: string;
+  analytical_fact_lineage_refs: string[];
+};
+
+export type InvestigationRequest = {
+  investigation_request_id: string;
+  schema_version: "investigation-request.v1";
+  trigger_mode: "reactive" | "proactive";
+  ingress_ref: {
+    kind: "RiskSignal";
+    source_system: string;
+    source_signal_id: string;
+    source_revision: string;
+    source_payload_sha256: string;
+    source_order_line_ref: { namespace: string; key: string | string[] };
+  };
+  rerun_of_request_id: RiskSignalFieldValue;
+  dataset_version_id: string;
+  subject: { order_line_id: string };
+  decision_cutoff: CausalTemporalField;
+  decision_cutoff_source: "canonical_commitment" | "proactive_decision";
+  observation_cutoff: CausalTemporalField;
+  target_milestone_kind: RiskSignalFieldValue;
+  causal_question_version: string;
+  engine_configuration_ref: string;
+  ingress_validation_refs: string[];
+  provenance_refs: string[];
+  prediction_metadata: RiskSignalFieldValue;
+  accepted_at: string;
+  causal_engine_input: CausalEngineInput;
+  causal_input_digest: string;
+  content_hash: string;
+};
+
+export type ReactiveIngressAttempt = {
+  attempt_id: string;
+  status: "accepted" | "duplicate" | "rejected" | "accepted_with_warning";
+  scope: "reactive_ingress";
+  source_system: string;
+  source_signal_id: string;
+  source_revision: string;
+  source_payload_sha256: string;
+  primary_code: string;
+  findings: IngressFinding[];
+  evidence_refs: string[];
+  retryable: boolean;
+  recovery_action: string;
+  received_at: string;
+  investigation_request_id: string | null;
+  investigation_request: InvestigationRequest | null;
+  audit: { occurrence_id: string; event_seq: number };
+};
+
+export type RiskSignalListResponse = { items: RiskSignalFixture[] };
+
+export type ReactiveInvestigationResponse = {
+  result: "CREATED" | "IDEMPOTENT_REPLAY";
+  attempt: ReactiveIngressAttempt;
+};
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
@@ -323,5 +496,453 @@ export function parseLineageSnapshot(value: unknown): LineageSnapshot {
       content_hash: auditBinding.content_hash,
       created_at: auditBinding.created_at,
     },
+  };
+}
+
+function parseStringArray(value: unknown): string[] {
+  if (!Array.isArray(value) || !value.every((item) => typeof item === "string")) {
+    throw new Error("invalid reactive response");
+  }
+  return value;
+}
+
+function parseRiskSignalFieldValue(value: unknown): RiskSignalFieldValue {
+  if (!isRecord(value)) {
+    throw new Error("invalid reactive response");
+  }
+  const state = value.state;
+  if (
+    state !== "present" &&
+    state !== "missing" &&
+    state !== "not_applicable" &&
+    state !== "invalid" &&
+    state !== "unresolved"
+  ) {
+    throw new Error("invalid reactive response");
+  }
+  return { state, value: value.value };
+}
+
+function parseSignalTemporal(value: unknown): RiskSignal["generated_at"] {
+  if (
+    !isRecord(value) ||
+    typeof value.value !== "string" ||
+    typeof value.precision !== "string" ||
+    (value.kind !== "date" &&
+      value.kind !== "local_datetime" &&
+      value.kind !== "instant") ||
+    (value.timezone_status !== "known" &&
+      value.timezone_status !== "assumed" &&
+      value.timezone_status !== "unknown" &&
+      value.timezone_status !== "not_applicable") ||
+    (value.source_timezone !== null && typeof value.source_timezone !== "string")
+  ) {
+    throw new Error("invalid reactive response");
+  }
+  return {
+    value: value.value,
+    kind: value.kind,
+    precision: value.precision,
+    timezone_status: value.timezone_status,
+    source_timezone: value.source_timezone,
+  };
+}
+
+function parseRiskSignal(value: unknown): RiskSignal {
+  if (!isRecord(value) || !isRecord(value.source) || !isRecord(value.source_order_line_ref)) {
+    throw new Error("invalid reactive response");
+  }
+  const source = value.source;
+  const sourceRef = value.source_order_line_ref;
+  if (
+    value.schema_version !== "risk-signal.v1" ||
+    value.trigger_mode !== "reactive" ||
+    source.schema_version !== "trigger-source-envelope.v1" ||
+    source.source_system !== "bundled-predictive-stub" ||
+    source.data_classification !== "generated" ||
+    typeof value.source_signal_id !== "string" ||
+    typeof value.source_revision !== "string" ||
+    typeof value.scored_dataset_version_ref !== "string" ||
+    typeof sourceRef.namespace !== "string" ||
+    (typeof sourceRef.key !== "string" &&
+      (!Array.isArray(sourceRef.key) ||
+        !sourceRef.key.every((item) => typeof item === "string"))) ||
+    typeof value.predictor_id !== "string" ||
+    typeof value.predictor_version !== "string" ||
+    typeof value.feature_contract_version !== "string" ||
+    typeof value.target_definition_id !== "string" ||
+    (value.target_milestone_kind !== "supplier_completion" &&
+      value.target_milestone_kind !== "supplier_handoff") ||
+    typeof value.score_semantic !== "string" ||
+    typeof value.score_value !== "number" ||
+    !Number.isFinite(value.score_value) ||
+    typeof value.alert_threshold !== "number" ||
+    !Number.isFinite(value.alert_threshold) ||
+    typeof value.flagged !== "boolean" ||
+    !isRecord(value.generated_at) ||
+    !isRecord(value.known_at)
+  ) {
+    throw new Error("invalid reactive response");
+  }
+  return {
+    schema_version: value.schema_version,
+    trigger_mode: value.trigger_mode,
+    source: {
+      schema_version: source.schema_version,
+      source_system: source.source_system,
+      data_classification: source.data_classification,
+    },
+    source_signal_id: value.source_signal_id,
+    source_revision: value.source_revision,
+    scored_dataset_version_ref: value.scored_dataset_version_ref,
+    source_order_line_ref: {
+      namespace: sourceRef.namespace,
+      key: sourceRef.key,
+    },
+    predictor_id: value.predictor_id,
+    predictor_version: value.predictor_version,
+    feature_contract_version: value.feature_contract_version,
+    target_definition_id: value.target_definition_id,
+    target_milestone_kind: value.target_milestone_kind,
+    score_semantic: value.score_semantic,
+    score_value: value.score_value,
+    alert_threshold: value.alert_threshold,
+    flagged: value.flagged,
+    generated_at: parseSignalTemporal(value.generated_at),
+    known_at: parseSignalTemporal(value.known_at),
+    predictor_artifact_ref: parseRiskSignalFieldValue(value.predictor_artifact_ref),
+    predictive_attribution_ref: parseRiskSignalFieldValue(
+      value.predictive_attribution_ref,
+    ),
+    prediction_explanation_ref: parseRiskSignalFieldValue(
+      value.prediction_explanation_ref,
+    ),
+    prediction_calibration_ref: parseRiskSignalFieldValue(
+      value.prediction_calibration_ref,
+    ),
+    prediction_ranking_ref: parseRiskSignalFieldValue(
+      value.prediction_ranking_ref,
+    ),
+    prediction_delivery_metadata: parseRiskSignalFieldValue(
+      value.prediction_delivery_metadata,
+    ),
+    advisory_context:
+      value.advisory_context === null
+        ? null
+        : parseRiskSignalFieldValue(value.advisory_context),
+  };
+}
+
+export function parseRiskSignalListResponse(value: unknown): RiskSignalListResponse {
+  if (!isRecord(value) || !Array.isArray(value.items)) {
+    throw new Error("invalid reactive response");
+  }
+  return {
+    items: value.items.map((item) => {
+      if (!isRecord(item) || typeof item.fixture_id !== "string" || typeof item.label !== "string") {
+        throw new Error("invalid reactive response");
+      }
+      return {
+        fixture_id: item.fixture_id,
+        label: item.label,
+        signal: parseRiskSignal(item.signal),
+      };
+    }),
+  };
+}
+
+function parseCausalTemporalField(value: unknown): CausalTemporalField {
+  if (!isRecord(value)) {
+    throw new Error("invalid reactive response");
+  }
+  const state = value.state;
+  if (
+    state !== "present" &&
+    state !== "missing" &&
+    state !== "not_applicable" &&
+    state !== "invalid" &&
+    state !== "unresolved"
+  ) {
+    throw new Error("invalid reactive response");
+  }
+  if (state !== "present") {
+    return { state };
+  }
+  if (!isRecord(value.value) || !isRecord(value.value.source_timezone)) {
+    throw new Error("invalid reactive response");
+  }
+  const temporal = value.value;
+  if (
+    typeof temporal.source_value !== "string" ||
+    typeof temporal.normalized_value !== "string" ||
+    typeof temporal.precision !== "string" ||
+    (temporal.kind !== "date" &&
+      temporal.kind !== "local_datetime" &&
+      temporal.kind !== "instant") ||
+    (temporal.timezone_status !== "known" &&
+      temporal.timezone_status !== "assumed" &&
+      temporal.timezone_status !== "unknown" &&
+      temporal.timezone_status !== "not_applicable")
+  ) {
+    throw new Error("invalid reactive response");
+  }
+  return {
+    state: "present",
+    value: {
+      kind: temporal.kind,
+      source_value: temporal.source_value,
+      normalized_value: temporal.normalized_value,
+      precision: temporal.precision,
+      timezone_status: temporal.timezone_status,
+      source_timezone: parseRiskSignalFieldValue(temporal.source_timezone),
+    },
+  };
+}
+
+function parseCausalWindow(value: unknown): CausalWindow {
+  if (
+    !isRecord(value) ||
+    typeof value.selector_version !== "string" ||
+    !isRecord(value.bounds) ||
+    typeof value.bounds.known_at_lower !== "string" ||
+    !isRecord(value.bounds.known_at_upper) ||
+    typeof value.selected_identity_hash !== "string" ||
+    typeof value.selected_count !== "number" ||
+    !Number.isInteger(value.selected_count) ||
+    value.selected_count < 0 ||
+    !isRecord(value.subject_removal) ||
+    typeof value.subject_removal.subject_identity !== "string" ||
+    typeof value.subject_removal.removed !== "boolean" ||
+    typeof value.subject_removal.post_subject_identity_hash !== "string"
+  ) {
+    throw new Error("invalid reactive response");
+  }
+  return {
+    selector_version: value.selector_version,
+    bounds: {
+      known_at_lower: value.bounds.known_at_lower,
+      known_at_upper: parseCausalTemporalField(value.bounds.known_at_upper),
+    },
+    selected_identity_hash: value.selected_identity_hash,
+    selected_count: value.selected_count,
+    subject_removal: {
+      subject_identity: value.subject_removal.subject_identity,
+      removed: value.subject_removal.removed,
+      post_subject_identity_hash: value.subject_removal.post_subject_identity_hash,
+    },
+  };
+}
+
+function parseCausalEngineInput(value: unknown): CausalEngineInput {
+  if (!isRecord(value) || !isRecord(value.subject_analytical_values)) {
+    throw new Error("invalid reactive response");
+  }
+  const subject = value.subject_analytical_values;
+  if (
+    !isRecord(subject.adjustment_inputs) ||
+    !isRecord(subject.original_promise) ||
+    typeof subject.subject_exclusion_identity !== "string" ||
+    value.causal_input_schema_version !== "causal-input-projection.v2" ||
+    typeof value.dataset_version_id !== "string" ||
+    !isRecord(value.decision_cutoff) ||
+    !isRecord(value.observation_cutoff) ||
+    !isRecord(value.target_milestone_kind) ||
+    (value.canonical_slippage_duration_basis !== "CALENDAR_DAY" &&
+      value.canonical_slippage_duration_basis !== "ELAPSED_86400_SECOND_DAY") ||
+    typeof value.causal_question_version !== "string" ||
+    typeof value.engine_configuration_ref !== "string" ||
+    typeof value.historical_population_digest !== "string" ||
+    !Array.isArray(value.analytical_fact_lineage_refs) ||
+    !value.analytical_fact_lineage_refs.every((item) => typeof item === "string")
+  ) {
+    throw new Error("invalid reactive response");
+  }
+  return {
+    causal_input_schema_version: value.causal_input_schema_version,
+    dataset_version_id: value.dataset_version_id,
+    subject_analytical_values: {
+      supplier_id: parseRiskSignalFieldValue(subject.supplier_id),
+      original_promise: parseCausalTemporalField(subject.original_promise),
+      adjustment_inputs: Object.fromEntries(
+        Object.entries(subject.adjustment_inputs).map(([key, item]) => [
+          key,
+          parseRiskSignalFieldValue(item),
+        ]),
+      ),
+      subject_exclusion_identity: subject.subject_exclusion_identity,
+    },
+    decision_cutoff: parseCausalTemporalField(value.decision_cutoff),
+    observation_cutoff: parseCausalTemporalField(value.observation_cutoff),
+    target_milestone_kind: parseRiskSignalFieldValue(value.target_milestone_kind),
+    canonical_slippage_duration_basis: value.canonical_slippage_duration_basis,
+    causal_question_version: value.causal_question_version,
+    engine_configuration_ref: value.engine_configuration_ref,
+    estimator_window_ref: parseCausalWindow(value.estimator_window_ref),
+    history_lookback_ref: parseCausalWindow(value.history_lookback_ref),
+    historical_population_digest: value.historical_population_digest,
+    analytical_fact_lineage_refs: value.analytical_fact_lineage_refs,
+  };
+}
+
+function parseInvestigationRequest(value: unknown): InvestigationRequest {
+  if (
+    !isRecord(value) ||
+    typeof value.investigation_request_id !== "string" ||
+    value.schema_version !== "investigation-request.v1" ||
+    (value.trigger_mode !== "reactive" && value.trigger_mode !== "proactive") ||
+    !isRecord(value.ingress_ref) ||
+    value.ingress_ref.kind !== "RiskSignal" ||
+    typeof value.ingress_ref.source_system !== "string" ||
+    typeof value.ingress_ref.source_signal_id !== "string" ||
+    typeof value.ingress_ref.source_revision !== "string" ||
+    typeof value.ingress_ref.source_payload_sha256 !== "string" ||
+    !isRecord(value.ingress_ref.source_order_line_ref) ||
+    typeof value.ingress_ref.source_order_line_ref.namespace !== "string" ||
+    (typeof value.ingress_ref.source_order_line_ref.key !== "string" &&
+      (!Array.isArray(value.ingress_ref.source_order_line_ref.key) ||
+        !value.ingress_ref.source_order_line_ref.key.every(
+          (item) => typeof item === "string",
+        ))) ||
+    !isRecord(value.subject) ||
+    typeof value.subject.order_line_id !== "string" ||
+    !isRecord(value.decision_cutoff) ||
+    !isRecord(value.observation_cutoff) ||
+    (value.decision_cutoff_source !== "canonical_commitment" &&
+      value.decision_cutoff_source !== "proactive_decision") ||
+    typeof value.dataset_version_id !== "string" ||
+    !isRecord(value.target_milestone_kind) ||
+    typeof value.causal_question_version !== "string" ||
+    typeof value.engine_configuration_ref !== "string" ||
+    !Array.isArray(value.ingress_validation_refs) ||
+    !value.ingress_validation_refs.every((item) => typeof item === "string") ||
+    !Array.isArray(value.provenance_refs) ||
+    !value.provenance_refs.every((item) => typeof item === "string") ||
+    typeof value.accepted_at !== "string" ||
+    !isRecord(value.causal_engine_input) ||
+    typeof value.causal_input_digest !== "string" ||
+    typeof value.content_hash !== "string"
+  ) {
+    throw new Error("invalid reactive response");
+  }
+  return {
+    investigation_request_id: value.investigation_request_id,
+    schema_version: value.schema_version,
+    trigger_mode: value.trigger_mode,
+    ingress_ref: {
+      kind: "RiskSignal",
+      source_system: value.ingress_ref.source_system,
+      source_signal_id: value.ingress_ref.source_signal_id,
+      source_revision: value.ingress_ref.source_revision,
+      source_payload_sha256: value.ingress_ref.source_payload_sha256,
+      source_order_line_ref: {
+        namespace: value.ingress_ref.source_order_line_ref.namespace,
+        key: value.ingress_ref.source_order_line_ref.key,
+      },
+    },
+    rerun_of_request_id: parseRiskSignalFieldValue(value.rerun_of_request_id),
+    dataset_version_id: value.dataset_version_id,
+    subject: { order_line_id: value.subject.order_line_id },
+    decision_cutoff: parseCausalTemporalField(value.decision_cutoff),
+    decision_cutoff_source: value.decision_cutoff_source,
+    observation_cutoff: parseCausalTemporalField(value.observation_cutoff),
+    target_milestone_kind: parseRiskSignalFieldValue(value.target_milestone_kind),
+    causal_question_version: value.causal_question_version,
+    engine_configuration_ref: value.engine_configuration_ref,
+    ingress_validation_refs: parseStringArray(value.ingress_validation_refs),
+    provenance_refs: parseStringArray(value.provenance_refs),
+    prediction_metadata: parseRiskSignalFieldValue(value.prediction_metadata),
+    accepted_at: value.accepted_at,
+    causal_engine_input: parseCausalEngineInput(value.causal_engine_input),
+    causal_input_digest: value.causal_input_digest,
+    content_hash: value.content_hash,
+  };
+}
+
+function parseReactiveIngressAttempt(value: unknown): ReactiveIngressAttempt {
+  if (!isRecord(value) || !isRecord(value.audit)) {
+    throw new Error("invalid reactive response");
+  }
+  if (
+    typeof value.attempt_id !== "string" ||
+    (value.status !== "accepted" &&
+      value.status !== "duplicate" &&
+      value.status !== "rejected" &&
+      value.status !== "accepted_with_warning") ||
+    value.scope !== "reactive_ingress" ||
+    typeof value.source_system !== "string" ||
+    typeof value.source_signal_id !== "string" ||
+    typeof value.source_revision !== "string" ||
+    typeof value.source_payload_sha256 !== "string" ||
+    typeof value.primary_code !== "string" ||
+    !Array.isArray(value.findings) ||
+    !value.findings.every((finding) => {
+      if (!isRecord(finding)) return false;
+      return (
+        typeof finding.finding_id === "string" &&
+        typeof finding.code === "string" &&
+        (finding.severity === "info" ||
+          finding.severity === "warning" ||
+          finding.severity === "error") &&
+        (finding.disposition === "advisory" || finding.disposition === "reject") &&
+        Array.isArray(finding.affected_refs) &&
+        finding.affected_refs.every((item) => typeof item === "string") &&
+        typeof finding.message === "string" &&
+        typeof finding.remediation === "string"
+      );
+    }) ||
+    !Array.isArray(value.evidence_refs) ||
+    !value.evidence_refs.every((item) => typeof item === "string") ||
+    typeof value.retryable !== "boolean" ||
+    typeof value.recovery_action !== "string" ||
+    typeof value.received_at !== "string" ||
+    (value.investigation_request_id !== null &&
+      typeof value.investigation_request_id !== "string") ||
+    (value.investigation_request !== null &&
+      !isRecord(value.investigation_request)) ||
+    typeof value.audit.occurrence_id !== "string" ||
+    typeof value.audit.event_seq !== "number" ||
+    !Number.isInteger(value.audit.event_seq) ||
+    value.audit.event_seq < 1
+  ) {
+    throw new Error("invalid reactive response");
+  }
+  return {
+    attempt_id: value.attempt_id,
+    status: value.status,
+    scope: "reactive_ingress",
+    source_system: value.source_system,
+    source_signal_id: value.source_signal_id,
+    source_revision: value.source_revision,
+    source_payload_sha256: value.source_payload_sha256,
+    primary_code: value.primary_code,
+    findings: value.findings as IngressFinding[],
+    evidence_refs: value.evidence_refs,
+    retryable: value.retryable,
+    recovery_action: value.recovery_action,
+    received_at: value.received_at,
+    investigation_request_id: value.investigation_request_id,
+    investigation_request:
+      value.investigation_request === null
+        ? null
+        : parseInvestigationRequest(value.investigation_request),
+    audit: {
+      occurrence_id: value.audit.occurrence_id,
+      event_seq: value.audit.event_seq,
+    },
+  };
+}
+
+export function parseReactiveInvestigationResponse(
+  value: unknown,
+): ReactiveInvestigationResponse {
+  if (
+    !isRecord(value) ||
+    (value.result !== "CREATED" && value.result !== "IDEMPOTENT_REPLAY")
+  ) {
+    throw new Error("invalid reactive response");
+  }
+  return {
+    result: value.result,
+    attempt: parseReactiveIngressAttempt(value.attempt),
   };
 }

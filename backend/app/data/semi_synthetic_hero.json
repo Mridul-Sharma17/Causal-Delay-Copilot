@@ -23,15 +23,15 @@
           "source_event_key": "hero-line-001-committed",
           "kind": "committed",
           "occurred_at": {"value": "2026-01-05T09:30:00+05:30", "kind": "instant", "precision": "minute", "timezone_status": "known", "source_timezone": "Asia/Kolkata"},
-          "known_at": {"value": "2026-01-05T09:31:00+05:30", "kind": "instant", "precision": "minute", "timezone_status": "known", "source_timezone": "Asia/Kolkata"},
+          "known_at": {"value": "2026-01-05T09:29:00+05:30", "kind": "instant", "precision": "minute", "timezone_status": "known", "source_timezone": "Asia/Kolkata"},
           "available_at": {"value": "2026-01-05T09:32:00+05:30", "kind": "instant", "precision": "minute", "timezone_status": "known", "source_timezone": "Asia/Kolkata"}
         },
         {
           "source_event_key": "hero-line-001-promise-001",
           "kind": "promise_recorded",
           "milestone_kind": "supplier_handoff",
-          "occurred_at": {"value": "2026-01-05", "kind": "date", "precision": "date", "timezone_status": "not_applicable", "source_timezone": null},
-          "known_at": {"value": "2026-01-05T09:31:00+05:30", "kind": "instant", "precision": "minute", "timezone_status": "known", "source_timezone": "Asia/Kolkata"},
+          "occurred_at": {"value": "2026-01-05T09:29:00+05:30", "kind": "instant", "precision": "minute", "timezone_status": "known", "source_timezone": "Asia/Kolkata"},
+          "known_at": {"value": "2026-01-05T09:29:00+05:30", "kind": "instant", "precision": "minute", "timezone_status": "known", "source_timezone": "Asia/Kolkata"},
           "available_at": {"value": "2026-01-05T09:32:00+05:30", "kind": "instant", "precision": "minute", "timezone_status": "known", "source_timezone": "Asia/Kolkata"},
           "promised_for": {"value": "2026-02-15", "kind": "date", "precision": "date", "timezone_status": "not_applicable", "source_timezone": null}
         },
@@ -76,7 +76,7 @@
           "source_event_key": "hero-line-002-committed",
           "kind": "committed",
           "occurred_at": {"value": "2026-01-08T11:00:00+05:30", "kind": "instant", "precision": "minute", "timezone_status": "known", "source_timezone": "Asia/Kolkata"},
-          "known_at": {"value": "2026-01-08T11:02:00+05:30", "kind": "instant", "precision": "minute", "timezone_status": "known", "source_timezone": "Asia/Kolkata"},
+          "known_at": {"value": "2026-01-08T10:59:00+05:30", "kind": "instant", "precision": "minute", "timezone_status": "known", "source_timezone": "Asia/Kolkata"},
           "available_at": {"value": "2026-01-08T11:03:00+05:30", "kind": "instant", "precision": "minute", "timezone_status": "known", "source_timezone": "Asia/Kolkata"}
         },
         {
@@ -118,7 +118,7 @@
           "source_event_key": "hero-line-003-committed",
           "kind": "committed",
           "occurred_at": {"value": "2026-01-12T14:00:00+05:30", "kind": "instant", "precision": "minute", "timezone_status": "known", "source_timezone": "Asia/Kolkata"},
-          "known_at": {"value": "2026-01-12T14:01:00+05:30", "kind": "instant", "precision": "minute", "timezone_status": "known", "source_timezone": "Asia/Kolkata"},
+          "known_at": {"value": "2026-01-12T13:59:00+05:30", "kind": "instant", "precision": "minute", "timezone_status": "known", "source_timezone": "Asia/Kolkata"},
           "available_at": {"value": "2026-01-12T14:02:00+05:30", "kind": "instant", "precision": "minute", "timezone_status": "known", "source_timezone": "Asia/Kolkata"}
         },
         {
@@ -126,7 +126,7 @@
           "kind": "promise_recorded",
           "milestone_kind": "supplier_handoff",
           "occurred_at": {"value": "2026-01-12", "kind": "date", "precision": "date", "timezone_status": "not_applicable", "source_timezone": null},
-          "known_at": {"value": "2026-01-12T14:01:00+05:30", "kind": "instant", "precision": "minute", "timezone_status": "known", "source_timezone": "Asia/Kolkata"},
+          "known_at": {"value": "2026-01-12T13:59:00+05:30", "kind": "instant", "precision": "minute", "timezone_status": "known", "source_timezone": "Asia/Kolkata"},
           "available_at": {"value": "2026-01-12T14:02:00+05:30", "kind": "instant", "precision": "minute", "timezone_status": "known", "source_timezone": "Asia/Kolkata"},
           "promised_for": {"value": "2026-02-10", "kind": "date", "precision": "date", "timezone_status": "not_applicable", "source_timezone": null}
         },

@@ -4,12 +4,16 @@ import {
   parseDemoWorkspaceResponse,
   parseAuditOccurrenceResponse,
   parseHealthResponse,
+  parseReactiveInvestigationResponse,
+  parseRiskSignalListResponse,
   type AuditOccurrenceRequest,
   type AuditOccurrenceResponse,
   type DemoWorkspace,
   type HealthResponse,
   type IngestionRunResponse,
   type LineageSnapshot,
+  type ReactiveInvestigationResponse,
+  type RiskSignalListResponse,
 } from "./contracts";
 
 export class SafeApiError extends Error {
@@ -113,5 +117,40 @@ export function getDatasetLineage(datasetVersionId: string): Promise<LineageSnap
       credentials: "same-origin",
     },
     parseLineageSnapshot,
+  );
+}
+
+export function getRiskSignals(
+  datasetVersionId: string,
+): Promise<RiskSignalListResponse> {
+  return requestJson(
+    `/api/risk-signals?dataset_version_id=${encodeURIComponent(datasetVersionId)}`,
+    {
+      headers: { accept: "application/json" },
+      credentials: "same-origin",
+    },
+    parseRiskSignalListResponse,
+  );
+}
+
+export function submitReactiveInvestigation(
+  datasetVersionId: string,
+  fixtureId: string,
+): Promise<ReactiveInvestigationResponse> {
+  return requestJson(
+    "/api/investigations/reactive/fixtures",
+    {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        "content-type": "application/json",
+      },
+      credentials: "same-origin",
+      body: JSON.stringify({
+        dataset_version_id: datasetVersionId,
+        fixture_id: fixtureId,
+      }),
+    },
+    parseReactiveInvestigationResponse,
   );
 }

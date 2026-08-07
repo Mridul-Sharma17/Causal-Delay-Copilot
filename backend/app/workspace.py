@@ -11,6 +11,7 @@ import sqlite3
 from threading import RLock
 from uuid import uuid4
 
+from .canonical import timestamp as _timestamp
 from .errors import SafeErrorCode, WorkspaceRequestError
 from .settings import QuotaPolicy
 
@@ -243,10 +244,6 @@ def _as_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
-
-
-def _timestamp(value: datetime) -> str:
-    return _as_utc(value).isoformat()
 
 
 def _parse_timestamp(value: str) -> datetime:

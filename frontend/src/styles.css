@@ -27,6 +27,7 @@ button {
 
 .core-header,
 .health-panel,
+.risk-panel,
 .lineage-panel {
   width: min(100%, 960px);
   margin: 0 auto;
@@ -86,6 +87,13 @@ h2 {
   padding: 32px;
   background: #ffffff;
   border-left: 4px solid #8a3ffc;
+}
+
+.risk-panel {
+  margin-top: 24px;
+  padding: 32px;
+  background: #ffffff;
+  border-left: 4px solid #0f62fe;
 }
 
 .panel-heading {
@@ -180,6 +188,46 @@ code {
   border-left: 4px solid #da1e28;
   background: #fff1f1;
   line-height: 1.5;
+}
+
+.risk-attempt {
+  margin-top: 24px;
+  padding: 24px;
+  background: #f4f4f4;
+  border-top: 4px solid #198038;
+}
+
+.risk-facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  margin: 24px 0;
+  background: #c6c6c6;
+}
+
+.risk-facts > div {
+  padding: 16px;
+  background: #ffffff;
+}
+
+.risk-facts dd {
+  overflow-wrap: anywhere;
+}
+
+.risk-note,
+.risk-failure {
+  display: grid;
+  gap: 8px;
+  margin: 24px 0 0;
+  padding: 16px;
+  border-left: 4px solid #0f62fe;
+  background: #edf5ff;
+  line-height: 1.5;
+}
+
+.risk-failure {
+  border-left-color: #da1e28;
+  background: #fff1f1;
 }
 
 .lineage-counts {
@@ -378,11 +426,16 @@ code {
   }
 
   .health-panel,
+  .risk-panel,
   .lineage-panel {
     padding: 24px 20px;
   }
 
   .probe-list {
+    grid-template-columns: 1fr;
+  }
+
+  .risk-facts {
     grid-template-columns: 1fr;
   }
 

@@ -10,6 +10,10 @@ from typing import Any, Mapping
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from .audit import AuditStore
+from .canonical import canonical_json as _canonical_json
+from .canonical import field as _canonical_field
+from .canonical import sha256 as _sha256
+from .risk import ReactiveInvestigationMixin, ensure_risk_schema
 
 
 INGESTION_SCHEMA_VERSION = "intake-lineage.v1"
@@ -223,25 +227,6 @@ class LineageSnapshotBinding:
     created_at: str
 
 
-def _canonical_json(value: object) -> str:
-    return json.dumps(
-        value,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-    )
-
-
-def _sha256(value: object) -> str:
-    if isinstance(value, bytes):
-        payload = value
-    elif isinstance(value, str):
-        payload = value.encode("utf-8")
-    else:
-        payload = _canonical_json(value).encode("utf-8")
-    return f"sha256:{hashlib.sha256(payload).hexdigest()}"
-
-
 def _json_load(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as handle:
         value = json.load(handle)
@@ -264,10 +249,7 @@ def _read_bundle() -> tuple[dict[str, Any], dict[str, Any], str, str]:
 def _field(state: str, value: object = None) -> dict[str, Any]:
     if state not in _VALUE_STATES:
         raise IngestionRejected({"status": "FAILED"})
-    result: dict[str, Any] = {"state": state}
-    if state == "present":
-        result["value"] = value
-    return result
+    return _canonical_field(state, value)
 
 
 def _temporal(raw: object) -> dict[str, Any]:
@@ -421,7 +403,10 @@ def _source_observation(
         )
         if transformation_rule_id != "direct"
         else _field("not_applicable"),
-        "evidence_refs": [],
+        "evidence_refs": [
+            f"source-locator:{locator}",
+            f"mapping-rule:{transformation_rule_id}:{transformation_rule_version}",
+        ],
         "source_value_fingerprint": _field("present", _sha256(source_value)),
     }
 
@@ -1153,7 +1138,7 @@ def _insert_ingestion_run(
     )
 
 
-class LineageStore(AuditStore):
+class LineageStore(ReactiveInvestigationMixin, AuditStore):
     """The single SQLite writer for audit events and immutable intake records."""
 
     def initialize(self) -> None:
@@ -1161,6 +1146,7 @@ class LineageStore(AuditStore):
         try:
             connection = self._connection_or_raise()
             ensure_ingestion_schema(connection, create=False)
+            ensure_risk_schema(connection, create=False)
         except sqlite3.Error:
             self.close()
             raise

@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import AsyncIterator
+from typing import AsyncIterator, Awaitable, Callable
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.types import Message, Receive, Scope, Send
 
 from .audit import (
     AuditIdempotencyConflict,
@@ -26,6 +27,10 @@ from .contracts import (
     IngestionRunRequest,
     IngestionRunResponse,
     LineageSnapshotResponse,
+    ReactiveInvestigationResponse,
+    ReactiveFixtureRequest,
+    RiskSignalListResponse,
+    RiskSignalRequest,
     ValidatedReferenceListResponse,
     ValidatedReferenceResponse,
     WorkspaceSelectionRequest,
@@ -40,10 +45,20 @@ from .ingestion import (
     IngestionRejected,
     LineageStore,
 )
+from .risk import RiskSignalFixtureUnavailable
 from .security import apply_public_response_headers
 from .settings import Settings
 from .state import StateRoot
 from .workspace import DEMO_WORKSPACE_COOKIE_NAME, WorkspaceResolution
+
+MAX_REACTIVE_REQUEST_BYTES = 64 * 1024
+MAX_REACTIVE_REQUEST_MESSAGES = 4096
+
+
+class ReactiveRequestTooLarge(Exception):
+    def __init__(self, observed_bytes: int) -> None:
+        self.observed_bytes = observed_bytes
+        super().__init__("reactive request body exceeds the bounded ingress limit")
 
 
 def _error_response(status_code: int, code: str, recovery_action: str) -> JSONResponse:
@@ -54,6 +69,160 @@ def _error_response(status_code: int, code: str, recovery_action: str) -> JSONRe
             recovery_action=recovery_action,
         ).model_dump(),
     )
+
+
+def _attach_workspace_cookie(
+    response: JSONResponse,
+    resolution: WorkspaceResolution,
+    *,
+    secure: bool,
+) -> JSONResponse:
+    if resolution.new_capability is not None:
+        response.set_cookie(
+            key=DEMO_WORKSPACE_COOKIE_NAME,
+            value=resolution.new_capability,
+            httponly=True,
+            secure=secure,
+            samesite="lax",
+            path="/",
+        )
+    return response
+
+
+class ReactiveBodyLimitMiddleware:
+    """Bound reactive body reads at the ASGI receive boundary."""
+
+    def __init__(
+        self,
+        app: Callable[[Scope, Receive, Send], Awaitable[None]],
+        *,
+        core_store: LineageStore,
+        secure_cookie: bool,
+    ) -> None:
+        self.app = app
+        self.core_store = core_store
+        self.secure_cookie = secure_cookie
+
+    async def _reject(
+        self,
+        scope: Scope,
+        receive: Receive,
+        send: Send,
+        error: ReactiveRequestTooLarge,
+    ) -> None:
+        request = Request(scope, receive)
+        try:
+            resolution = self.core_store.resolve_workspace(
+                request.cookies.get(DEMO_WORKSPACE_COOKIE_NAME)
+            )
+            self.core_store.record_reactive_schema_failure(
+                resolution.snapshot.workspace_id,
+                request_body=f"reactive-body-too-large:{error.observed_bytes}".encode(
+                    "ascii"
+                ),
+            )
+            response = _attach_workspace_cookie(
+                _error_response(
+                    413,
+                    "RISK_SIGNAL_SCHEMA_UNSUPPORTED",
+                    "USE_SUPPORTED_RISK_SIGNAL_SCHEMA",
+                ),
+                resolution,
+                secure=self.secure_cookie,
+            )
+        except WorkspaceRequestError as workspace_error:
+            response = _error_response(
+                workspace_error.status_code,
+                workspace_error.code.value,
+                workspace_error.recovery_action,
+            )
+        except AuditStoreUnavailable:
+            response = _error_response(
+                503,
+                "CORE_STORE_UNAVAILABLE",
+                "RESTORE_CORE_STATE_AND_RETRY",
+            )
+        await response(scope, receive, send)
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope.get("type") != "http" or scope.get("path") != (
+            "/api/investigations/reactive"
+        ):
+            await self.app(scope, receive, send)
+            return
+
+        content_length = next(
+            (
+                value
+                for key, value in scope.get("headers", [])
+                if key.lower() == b"content-length"
+            ),
+            None,
+        )
+        if content_length is not None:
+            try:
+                declared_length = int(content_length)
+            except (TypeError, ValueError):
+                declared_length = 0
+            if declared_length > MAX_REACTIVE_REQUEST_BYTES:
+                await self._reject(
+                    scope,
+                    receive,
+                    send,
+                    ReactiveRequestTooLarge(declared_length),
+                )
+                return
+
+        observed_bytes = 0
+        received_messages = 0
+        buffered_body = bytearray()
+        disconnected = False
+        while True:
+            message = await receive()
+            received_messages += 1
+            if received_messages > MAX_REACTIVE_REQUEST_MESSAGES:
+                await self._reject(
+                    scope,
+                    receive,
+                    send,
+                    ReactiveRequestTooLarge(
+                        max(observed_bytes, MAX_REACTIVE_REQUEST_BYTES + 1)
+                    ),
+                )
+                return
+            if message.get("type") == "http.request":
+                body = message.get("body", b"")
+                observed_bytes += len(body) if isinstance(body, bytes) else 0
+                if observed_bytes > MAX_REACTIVE_REQUEST_BYTES:
+                    await self._reject(
+                        scope,
+                        receive,
+                        send,
+                        ReactiveRequestTooLarge(observed_bytes),
+                    )
+                    return
+                if isinstance(body, bytes):
+                    buffered_body.extend(body)
+                if not message.get("more_body", False):
+                    break
+            else:
+                disconnected = True
+                break
+
+        replayed = False
+
+        async def replay_receive() -> Message:
+            nonlocal replayed
+            if not replayed and not disconnected:
+                replayed = True
+                return {
+                    "type": "http.request",
+                    "body": bytes(buffered_body),
+                    "more_body": False,
+                }
+            return {"type": "http.disconnect"}
+
+        await self.app(scope, replay_receive, send)
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -85,9 +254,41 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.exception_handler(RequestValidationError)
     async def handle_request_validation(
-        _: Request,
+        request: Request,
         __: RequestValidationError,
     ) -> JSONResponse:
+        if request.url.path == "/api/investigations/reactive":
+            try:
+                resolution = resolve_workspace(request)
+                core_store.record_reactive_schema_failure(
+                    resolution.snapshot.workspace_id,
+                    request_body=await request.body(),
+                )
+                return attach_workspace_cookie(
+                    _error_response(
+                        422,
+                        "RISK_SIGNAL_SCHEMA_UNSUPPORTED",
+                        "USE_SUPPORTED_RISK_SIGNAL_SCHEMA",
+                    ),
+                    resolution,
+                )
+            except WorkspaceRequestError as error:
+                return _error_response(
+                    error.status_code,
+                    error.code.value,
+                    error.recovery_action,
+                )
+            except AuditStoreUnavailable:
+                return _error_response(
+                    503,
+                    "CORE_STORE_UNAVAILABLE",
+                    "RESTORE_CORE_STATE_AND_RETRY",
+                )
+            return _error_response(
+                422,
+                "RISK_SIGNAL_SCHEMA_UNSUPPORTED",
+                "USE_SUPPORTED_RISK_SIGNAL_SCHEMA",
+            )
         return _error_response(
             422,
             "REQUEST_SCHEMA_INVALID",
@@ -145,6 +346,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "SELECT_A_PUBLISHED_DATASET_VERSION_AND_RETRY",
         )
 
+    @app.exception_handler(RiskSignalFixtureUnavailable)
+    async def handle_risk_signal_fixture_unavailable(
+        _: Request,
+        __: RiskSignalFixtureUnavailable,
+    ) -> JSONResponse:
+        return _error_response(
+            404,
+            "DATASET_VERSION_UNAVAILABLE",
+            "SELECT_A_PUBLISHED_DATASET_VERSION_AND_RETRY",
+        )
+
     @app.exception_handler(IngestionRejected)
     async def handle_ingestion_rejected(
         _: Request,
@@ -167,16 +379,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         response: JSONResponse,
         resolution: WorkspaceResolution,
     ) -> JSONResponse:
-        if resolution.new_capability is not None:
-            response.set_cookie(
-                key=DEMO_WORKSPACE_COOKIE_NAME,
-                value=resolution.new_capability,
-                httponly=True,
-                secure=resolved_settings.profile.value == "HOSTED",
-                samesite="lax",
-                path="/",
-            )
-        return response
+        return _attach_workspace_cookie(
+            response,
+            resolution,
+            secure=resolved_settings.profile.value == "HOSTED",
+        )
+
+    app.add_middleware(
+        ReactiveBodyLimitMiddleware,
+        core_store=core_store,
+        secure_cookie=resolved_settings.profile.value == "HOSTED",
+    )
 
     @app.middleware("http")
     async def preserve_workspace_cookie(request: Request, call_next):
@@ -411,6 +624,68 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         return attach_workspace_cookie(
             JSONResponse(status_code=200, content=response.model_dump(mode="json")),
+            resolution,
+        )
+
+    @app.get(
+        "/api/risk-signals",
+        response_model=RiskSignalListResponse,
+    )
+    async def list_risk_signals(dataset_version_id: str) -> JSONResponse:
+        items = core_store.list_risk_signal_fixtures(dataset_version_id)
+        response = RiskSignalListResponse(items=items)
+        return JSONResponse(status_code=200, content=response.model_dump(mode="json"))
+
+    @app.post(
+        "/api/investigations/reactive/fixtures",
+        response_model=ReactiveInvestigationResponse,
+        status_code=201,
+    )
+    async def create_reactive_fixture_investigation(
+        request_context: Request,
+        request: ReactiveFixtureRequest,
+    ) -> JSONResponse:
+        resolution = resolve_workspace(request_context)
+        stored = core_store.create_reactive_fixture_investigation(
+            request.fixture_id,
+            request.dataset_version_id,
+            resolution.snapshot.workspace_id,
+        )
+        response = ReactiveInvestigationResponse(
+            result=stored.result,
+            attempt=stored.attempt,
+        )
+        return attach_workspace_cookie(
+            JSONResponse(
+                status_code=200 if stored.result == "IDEMPOTENT_REPLAY" else 201,
+                content=response.model_dump(mode="json"),
+            ),
+            resolution,
+        )
+
+    @app.post(
+        "/api/investigations/reactive",
+        response_model=ReactiveInvestigationResponse,
+        status_code=201,
+    )
+    async def create_reactive_investigation(
+        request_context: Request,
+        request: RiskSignalRequest,
+    ) -> JSONResponse:
+        resolution = resolve_workspace(request_context)
+        stored = core_store.create_reactive_investigation(
+            request,
+            resolution.snapshot.workspace_id,
+        )
+        response = ReactiveInvestigationResponse(
+            result=stored.result,
+            attempt=stored.attempt,
+        )
+        return attach_workspace_cookie(
+            JSONResponse(
+                status_code=200 if stored.result == "IDEMPOTENT_REPLAY" else 201,
+                content=response.model_dump(mode="json"),
+            ),
             resolution,
         )
 
