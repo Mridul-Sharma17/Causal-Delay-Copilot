@@ -10,6 +10,8 @@ from backend.app.predictive import (
     build_global_predictive_attribution,
     PredictiveTrainingRow,
     fit_predictive_baseline,
+    predictive_attribution_bundle_hash,
+    prediction_record_bundle_hash,
     score_predictive_subject,
     predictive_prediction_record_id,
     write_predictive_baseline,
@@ -270,6 +272,10 @@ def main() -> None:
         json.dumps(
             {
                 "schema_version": "predictive-attribution-bundle.v1",
+                "bundle_sha256": predictive_attribution_bundle_hash(
+                    [attribution, *evaluation_attributions],
+                    global_attribution,
+                ),
                 "items": [attribution, *evaluation_attributions],
                 "global": global_attribution,
             },
@@ -285,6 +291,9 @@ def main() -> None:
         json.dumps(
             {
                 "schema_version": "prediction-record-bundle.v1",
+                "bundle_sha256": prediction_record_bundle_hash(
+                    [prediction_record, *evaluation_prediction_records]
+                ),
                 "items": [prediction_record, *evaluation_prediction_records],
             },
             sort_keys=True,

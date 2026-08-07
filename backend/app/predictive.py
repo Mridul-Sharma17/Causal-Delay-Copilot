@@ -173,6 +173,17 @@ def predictive_prediction_record_id(
     )[7:]
 
 
+def prediction_record_bundle_hash(items: Sequence[Mapping[str, Any]]) -> str:
+    return _json_hash(list(items))
+
+
+def predictive_attribution_bundle_hash(
+    items: Sequence[Mapping[str, Any]],
+    global_attribution: Mapping[str, Any] | None,
+) -> str:
+    return _json_hash({"items": list(items), "global": global_attribution})
+
+
 def _feature_vector(
     features: Mapping[str, float],
     *,
@@ -1015,6 +1026,17 @@ def load_predictive_attribution_bundle(
                 "PREDICTIVE_ATTRIBUTION_INVALID",
                 "The predictive attribution bundle has no item list.",
             )
+        global_attribution = raw.get("global")
+        if not isinstance(raw.get("bundle_sha256"), str) or raw["bundle_sha256"] != (
+            predictive_attribution_bundle_hash(
+                items,
+                global_attribution if isinstance(global_attribution, Mapping) else None,
+            )
+        ):
+            raise PredictiveScoringFailure(
+                "PREDICTIVE_ATTRIBUTION_INVALID",
+                "The predictive attribution bundle integrity check failed.",
+            )
         verified: dict[str, dict[str, Any]] = {}
         for item in items:
             if not isinstance(item, Mapping):
@@ -1058,7 +1080,6 @@ def load_predictive_attribution_bundle(
                     "The predictive attribution bundle contains duplicate references.",
                 )
             verified[artifact_ref] = attribution
-        global_attribution = raw.get("global")
         if global_attribution is not None:
             if not isinstance(global_attribution, Mapping):
                 raise PredictiveScoringFailure(
@@ -1209,6 +1230,13 @@ def load_prediction_record_bundle(
                 "PREDICTIVE_STUB_ARTIFACT_UNAVAILABLE",
                 "The prediction record bundle has no item list.",
             )
+        if not isinstance(raw.get("bundle_sha256"), str) or raw["bundle_sha256"] != (
+            prediction_record_bundle_hash(items)
+        ):
+            raise PredictiveScoringFailure(
+                "PREDICTIVE_STUB_ARTIFACT_UNAVAILABLE",
+                "The prediction record bundle integrity check failed.",
+            )
         verified: dict[str, dict[str, Any]] = {}
         for item in items:
             if not isinstance(item, Mapping):
@@ -1258,6 +1286,15 @@ def load_prediction_record_bundle(
                 or not record["model_artifact_ref"]
                 or not isinstance(record.get("feature_snapshot_hash"), str)
                 or not record["feature_snapshot_hash"]
+                or not isinstance(record.get("predictive_attribution_ref"), Mapping)
+                or record["predictive_attribution_ref"].get("state")
+                not in {"present", "missing"}
+                or (
+                    record["predictive_attribution_ref"].get("state") == "present"
+                    and not isinstance(
+                        record["predictive_attribution_ref"].get("value"), str
+                    )
+                )
             ):
                 raise PredictiveScoringFailure(
                     "PREDICTIVE_STUB_ARTIFACT_UNAVAILABLE",
@@ -1285,6 +1322,30 @@ def load_prediction_record_bundle(
             "PREDICTIVE_STUB_ARTIFACT_UNAVAILABLE",
             "The prediction record bundle could not be loaded safely.",
         ) from error
+
+
+def validate_prediction_record_attribution_bindings(
+    prediction_records: Mapping[str, Mapping[str, Any]],
+    attributions: Mapping[str, Mapping[str, Any]],
+) -> None:
+    """Verify every present Prediction Record reference resolves to its local attribution."""
+    for record_id, record in prediction_records.items():
+        reference = record.get("predictive_attribution_ref")
+        if not isinstance(reference, Mapping) or reference.get("state") == "missing":
+            continue
+        attribution_ref = reference.get("value")
+        attribution = attributions.get(attribution_ref)
+        if (
+            not isinstance(attribution_ref, str)
+            or attribution is None
+            or attribution.get("prediction_record_id") != record_id
+            or attribution.get("score_value") != record.get("score_value")
+            or attribution.get("model_artifact_ref") != record.get("model_artifact_ref")
+        ):
+            raise PredictiveScoringFailure(
+                "PREDICTIVE_ATTRIBUTION_INVALID",
+                "A prediction record is not bound to its local attribution.",
+            )
 
 
 def score_predictive_subject(

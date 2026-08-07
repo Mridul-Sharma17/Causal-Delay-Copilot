@@ -1155,20 +1155,22 @@ def _predictive_risk_status() -> dict[str, Any]:
             load_predictive_attribution_bundle,
             load_predictive_baseline,
             load_prediction_record_bundle,
+            validate_prediction_record_attribution_bindings,
         )
 
         baseline = load_predictive_baseline(
             PREDICTIVE_ARTIFACT_FILE,
             PREDICTIVE_REPORT_FILE,
         )
-        load_predictive_attribution_bundle(
+        attributions = load_predictive_attribution_bundle(
             PREDICTIVE_ATTRIBUTION_FILE,
             expected_model_artifact_ref=baseline.artifact_ref,
         )
-        load_prediction_record_bundle(
+        prediction_records = load_prediction_record_bundle(
             PREDICTIVE_RECORD_FILE,
             expected_model_artifact_ref=baseline.artifact_ref,
         )
+        validate_prediction_record_attribution_bindings(prediction_records, attributions)
     except Exception as error:
         code = getattr(error, "code", "PREDICTIVE_STUB_ARTIFACT_UNAVAILABLE")
         return {
@@ -1194,6 +1196,7 @@ def _predictive_fixture_signal_payloads(dataset_version_id: str) -> list[dict[st
             load_predictive_baseline,
             load_prediction_record_bundle,
             score_predictive_subject,
+            validate_prediction_record_attribution_bindings,
             validate_predictive_attribution,
         )
 
@@ -1209,6 +1212,7 @@ def _predictive_fixture_signal_payloads(dataset_version_id: str) -> list[dict[st
             PREDICTIVE_RECORD_FILE,
             expected_model_artifact_ref=baseline.artifact_ref,
         )
+        validate_prediction_record_attribution_bindings(prediction_records, attributions)
         with PREDICTIVE_FIXTURE_FILE.open("r", encoding="utf-8") as handle:
             raw = json.load(handle)
         if not isinstance(raw, Mapping) or not isinstance(raw.get("items"), list):

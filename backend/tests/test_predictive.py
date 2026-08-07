@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import json
 from pathlib import Path
 
 import pytest
@@ -17,7 +18,10 @@ from backend.app.predictive import (
     build_global_predictive_attribution,
     fit_predictive_baseline,
     load_predictive_baseline,
+    load_prediction_record_bundle,
+    prediction_record_bundle_hash,
     score_predictive_subject,
+    validate_prediction_record_attribution_bindings,
     validate_predictive_attribution,
     write_predictive_baseline,
 )
@@ -194,6 +198,47 @@ def test_serialized_baseline_is_verified_before_runtime_use(tmp_path: Path) -> N
     with pytest.raises(PredictiveScoringFailure) as error:
         load_predictive_baseline(artifact_path, report_path)
 
+    assert error.value.code == "PREDICTIVE_STUB_ARTIFACT_UNAVAILABLE"
+
+
+def test_prediction_records_are_sealed_and_bound_to_attributions(tmp_path: Path) -> None:
+    baseline = make_baseline()
+    result = score_predictive_subject(baseline, make_subject())
+    items = [result.prediction_record]
+    bundle_path = tmp_path / "prediction-records.json"
+    bundle_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "prediction-record-bundle.v1",
+                "bundle_sha256": prediction_record_bundle_hash(items),
+                "items": items,
+            }
+        ),
+        encoding="utf-8",
+    )
+    records = load_prediction_record_bundle(
+        bundle_path,
+        expected_model_artifact_ref=baseline.artifact_ref,
+    )
+    validate_prediction_record_attribution_bindings(
+        records,
+        {result.attribution["artifact_ref"]: result.attribution},
+    )
+
+    tampered = dict(result.prediction_record)
+    tampered["score_value"] = 0.01
+    bundle_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "prediction-record-bundle.v1",
+                "bundle_sha256": prediction_record_bundle_hash(items),
+                "items": [tampered],
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(PredictiveScoringFailure) as error:
+        load_prediction_record_bundle(bundle_path)
     assert error.value.code == "PREDICTIVE_STUB_ARTIFACT_UNAVAILABLE"
 
 
