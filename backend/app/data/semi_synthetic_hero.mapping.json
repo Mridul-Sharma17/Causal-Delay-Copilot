@@ -1,0 +1,61 @@
+{
+  "mapping_manifest_id": "semi-synthetic-hero.mapping.v1",
+  "schema_version": "mapping-manifest.v1",
+  "dataset_key": "semi-synthetic-hero",
+  "source_kind": "semi_synthetic",
+  "intended_role": "semi_synthetic_hero",
+  "source_schema_id": "semi-synthetic-construction",
+  "source_schema_version": "semi-synthetic-construction.v1",
+  "canonical_schema_version": "canonical-lineage.v1",
+  "adapter_id": "semi-synthetic-hero-adapter",
+  "adapter_version": "1.0.0",
+  "mapping_assumptions": ["semi_synthetic.clocks.v1", "semi_synthetic.generated_origin.v1"],
+  "license_and_attribution_ref": "generated-in-repository",
+  "data_classification": "generated",
+  "raw_redistribution_policy": "allowed",
+  "derived_redistribution_policy": "allowed",
+  "generator_metadata": {
+    "generator_version": "semi-synthetic-construction-generator.v1",
+    "seed": 20260807,
+    "scenario_id": "hero-load-and-slippage-v1",
+    "parameter_set_hash": "sha256:parameter-set-v1",
+    "calibration_evidence_refs": ["docs/causal_delay_copilot_stage2_strategy.md#11-data-strategy"],
+    "ground_truth_artifact_hash": "sha256:ground-truth-evaluation-only-v1"
+  },
+  "identity_mappings": {
+    "order_line_id": {"source_path": "source_key", "rule_id": "uuid5.dataset.order-line.v1", "rule_version": "1"},
+    "order_group_id": {"source_path": "group_key", "rule_id": "uuid5.dataset.order-group.v1", "rule_version": "1"},
+    "supplier_id": {"source_path": "supplier_key", "rule_id": "uuid5.dataset.supplier.v1", "rule_version": "1"}
+  },
+  "field_mappings": {
+    "material_class": {"source_path": "fields.material_class", "canonical_type": "classification", "rule_id": "field-state-preserving.v1", "rule_version": "1"},
+    "complexity_class": {"source_path": "fields.complexity_class", "canonical_type": "classification", "rule_id": "field-state-preserving.v1", "rule_version": "1"},
+    "quantity": {"source_path": "fields.quantity", "canonical_type": "quantity", "rule_id": "field-state-preserving.v1", "rule_version": "1"},
+    "value": {"source_path": "fields.value", "canonical_type": "money", "rule_id": "field-state-preserving.v1", "rule_version": "1"},
+    "project_id": {"source_path": "fields.project_id", "canonical_type": "identifier", "rule_id": "field-state-preserving.v1", "rule_version": "1"},
+    "project_phase": {"source_path": "fields.project_phase", "canonical_type": "classification", "rule_id": "field-state-preserving.v1", "rule_version": "1"},
+    "urgency_class": {"source_path": "fields.urgency_class", "canonical_type": "classification", "rule_id": "field-state-preserving.v1", "rule_version": "1"},
+    "geography_code": {"source_path": "fields.geography_code", "canonical_type": "classification", "rule_id": "field-state-preserving.v1", "rule_version": "1"},
+    "contract_form": {"source_path": "fields.contract_form", "canonical_type": "classification", "rule_id": "field-state-preserving.v1", "rule_version": "1"}
+  },
+  "event_mappings": {
+    "collection_path": "events",
+    "source_event_key": "source_event_key",
+    "kind": "kind",
+    "milestone_kind": "milestone_kind",
+    "occurred_at": "occurred_at",
+    "known_at": "known_at",
+    "available_at": "available_at",
+    "promised_for": "promised_for",
+    "reason": "reason",
+    "revises_promise_source_event_key": "revises_promise_source_event_key"
+  },
+  "entries": [
+    {"canonical": "order_line_id", "source": "source_key", "rule_id": "uuid5.dataset.order-line.v1", "rule_version": "1"},
+    {"canonical": "order_group_id", "source": "group_key", "rule_id": "uuid5.dataset.order-group.v1", "rule_version": "1"},
+    {"canonical": "supplier_id", "source": "supplier_key", "rule_id": "uuid5.dataset.supplier.v1", "rule_version": "1"},
+    {"canonical": "canonical_field", "source": "fields.*", "rule_id": "field-state-preserving.v1", "rule_version": "1"},
+    {"canonical": "order_line_event", "source": "events.*", "rule_id": "event-clock-preserving.v1", "rule_version": "1"},
+    {"canonical": "source_observation", "source": "source_key-and-locator", "rule_id": "opaque-lineage-token.v1", "rule_version": "1"}
+  ]
+}

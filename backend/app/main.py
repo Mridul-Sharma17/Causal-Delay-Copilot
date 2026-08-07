@@ -11,7 +11,6 @@ from fastapi.staticfiles import StaticFiles
 
 from .audit import (
     AuditIdempotencyConflict,
-    AuditStore,
     AuditStoreUnavailable,
 )
 from .contracts import (
@@ -20,9 +19,13 @@ from .contracts import (
     AuditOccurrenceResponse,
     AuditOccurrenceViewResponse,
     DemoWorkspaceResponse,
+    DatasetVersionListResponse,
     ErrorResponse,
     HealthProbe,
     HealthResponse,
+    IngestionRunRequest,
+    IngestionRunResponse,
+    LineageSnapshotResponse,
     ValidatedReferenceListResponse,
     ValidatedReferenceResponse,
     WorkspaceSelectionRequest,
@@ -31,6 +34,12 @@ from .contracts import (
     WorkspaceResultViewResponse,
 )
 from .errors import WorkspaceRequestError
+from .ingestion import (
+    DatasetVersionUnavailable,
+    IngestionIdempotencyConflict,
+    IngestionRejected,
+    LineageStore,
+)
 from .security import apply_public_response_headers
 from .settings import Settings
 from .state import StateRoot
@@ -50,7 +59,7 @@ def _error_response(status_code: int, code: str, recovery_action: str) -> JSONRe
 def create_app(settings: Settings | None = None) -> FastAPI:
     resolved_settings = settings or Settings()
     state_root = StateRoot(resolved_settings)
-    audit_store = AuditStore(
+    core_store = LineageStore(
         resolved_settings.database_path,
         release_candidate_id=resolved_settings.release_candidate_id,
         quotas=resolved_settings.quotas,
@@ -59,12 +68,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         state_layout = state_root.initialize()
-        audit_store.initialize()
+        core_store.initialize()
         app.state.state_layout = state_layout
         try:
             yield
         finally:
-            audit_store.close()
+            core_store.close()
 
     app = FastAPI(
         title="Causal Delay Copilot Core",
@@ -72,7 +81,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     app.state.settings = resolved_settings
-    app.state.audit_store = audit_store
+    app.state.audit_store = core_store
 
     @app.exception_handler(RequestValidationError)
     async def handle_request_validation(
@@ -114,8 +123,41 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ) -> JSONResponse:
         return _error_response(error.status_code, error.code.value, error.recovery_action)
 
+    @app.exception_handler(IngestionIdempotencyConflict)
+    async def handle_ingestion_idempotency_conflict(
+        _: Request,
+        __: IngestionIdempotencyConflict,
+    ) -> JSONResponse:
+        return _error_response(
+            409,
+            "INGESTION_IDEMPOTENCY_CONFLICT",
+            "USE_NEW_IDEMPOTENCY_KEY",
+        )
+
+    @app.exception_handler(DatasetVersionUnavailable)
+    async def handle_dataset_version_unavailable(
+        _: Request,
+        __: DatasetVersionUnavailable,
+    ) -> JSONResponse:
+        return _error_response(
+            404,
+            "DATASET_VERSION_UNAVAILABLE",
+            "SELECT_A_PUBLISHED_DATASET_VERSION_AND_RETRY",
+        )
+
+    @app.exception_handler(IngestionRejected)
+    async def handle_ingestion_rejected(
+        _: Request,
+        __: IngestionRejected,
+    ) -> JSONResponse:
+        return _error_response(
+            422,
+            "INGESTION_REJECTED",
+            "REPAIR_THE_REVIEWED_MAPPING_AND_RETRY",
+        )
+
     def resolve_workspace(request: Request) -> WorkspaceResolution:
-        resolution = audit_store.resolve_workspace(
+        resolution = core_store.resolve_workspace(
             request.cookies.get(DEMO_WORKSPACE_COOKIE_NAME)
         )
         request.state.workspace_resolution = resolution
@@ -185,7 +227,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return HealthProbe(state="live", code="CORE_LIVE")
 
     def readiness_probe() -> HealthProbe:
-        if not audit_store.check_ready():
+        if not core_store.check_ready():
             return HealthProbe(
                 state="unavailable",
                 code="CORE_STORE_UNAVAILABLE",
@@ -249,7 +291,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         request: AuditOccurrenceRequest,
     ) -> JSONResponse:
         resolution = resolve_workspace(request_context)
-        stored = audit_store.append_occurrence(
+        stored = core_store.append_occurrence(
             request,
             resolution.snapshot.workspace_id,
         )
@@ -277,7 +319,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 outcome_code=item.outcome_code,
                 created_at=item.created_at,
             )
-            for item in audit_store.list_occurrences(resolution.snapshot.workspace_id)
+            for item in core_store.list_occurrences(resolution.snapshot.workspace_id)
         ]
         response = JSONResponse(
             status_code=200,
@@ -294,7 +336,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         occurrence_id: str,
     ) -> JSONResponse:
         resolution = resolve_workspace(request)
-        occurrence = audit_store.get_occurrence(
+        occurrence = core_store.get_occurrence(
             resolution.snapshot.workspace_id,
             occurrence_id,
         )
@@ -313,6 +355,66 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
 
     @app.post(
+        "/api/ingestion-runs",
+        response_model=IngestionRunResponse,
+        status_code=201,
+    )
+    async def create_ingestion_run(request: IngestionRunRequest) -> JSONResponse:
+        stored = core_store.import_hero(
+            idempotency_key=request.idempotency_key,
+            dataset_key=request.dataset_key,
+            mapping_manifest_id=request.mapping_manifest_id,
+        )
+        response = IngestionRunResponse(
+            result=stored.result,
+            ingestion_run_id=stored.ingestion_run_id,
+            dataset_version_id=stored.dataset_version_id or "",
+            status=stored.status,
+        )
+        return JSONResponse(
+            status_code=200 if stored.result == "IDEMPOTENT_REPLAY" else 201,
+            content=response.model_dump(),
+        )
+
+    @app.get(
+        "/api/datasets",
+        response_model=DatasetVersionListResponse,
+    )
+    async def list_dataset_versions() -> JSONResponse:
+        response = DatasetVersionListResponse(items=core_store.list_dataset_versions())
+        return JSONResponse(status_code=200, content=response.model_dump(mode="json"))
+
+    @app.get(
+        "/api/datasets/{dataset_version_id}/lineage",
+        response_model=LineageSnapshotResponse,
+    )
+    async def get_dataset_lineage(
+        request: Request,
+        dataset_version_id: str,
+    ) -> JSONResponse:
+        resolution = resolve_workspace(request)
+        lineage = core_store.get_lineage(dataset_version_id)
+        binding = core_store.bind_lineage_snapshot(
+            workspace_id=resolution.snapshot.workspace_id,
+            dataset_version_id=dataset_version_id,
+        )
+        response = LineageSnapshotResponse(
+            **lineage,
+            audit_binding={
+                "snapshot_id": binding.snapshot_id,
+                "dataset_version_id": binding.dataset_version_id,
+                "occurrence_id": binding.occurrence_id,
+                "event_seq": binding.event_seq,
+                "content_hash": binding.content_hash,
+                "created_at": binding.created_at,
+            },
+        )
+        return attach_workspace_cookie(
+            JSONResponse(status_code=200, content=response.model_dump(mode="json")),
+            resolution,
+        )
+
+    @app.post(
         "/api/workspace/selections",
         response_model=WorkspaceSelectionResponse,
         status_code=201,
@@ -322,7 +424,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         request: WorkspaceSelectionRequest,
     ) -> JSONResponse:
         resolution = resolve_workspace(request_context)
-        receipt = audit_store.create_workspace_selection(
+        receipt = core_store.create_workspace_selection(
             resolution.snapshot.workspace_id,
             selection_id=request.selection_id,
             reference_id=request.reference_id,
@@ -350,7 +452,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         selection_id: str,
     ) -> JSONResponse:
         resolution = resolve_workspace(request)
-        selection = audit_store.get_workspace_selection(
+        selection = core_store.get_workspace_selection(
             resolution.snapshot.workspace_id,
             selection_id,
         )
@@ -375,7 +477,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         result_id: str,
     ) -> JSONResponse:
         resolution = resolve_workspace(request)
-        result = audit_store.get_workspace_result(
+        result = core_store.get_workspace_result(
             resolution.snapshot.workspace_id,
             result_id,
         )
@@ -404,7 +506,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 validation_attestation_ref=item.validation_attestation_ref,
                 release_candidate_id=item.release_candidate_id,
             )
-            for item in audit_store.list_validated_references()
+            for item in core_store.list_validated_references()
         ]
         return JSONResponse(
             status_code=200,
@@ -416,7 +518,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         response_model=ValidatedReferenceResponse,
     )
     async def get_validated_reference(reference_id: str) -> JSONResponse:
-        reference = audit_store.get_validated_reference(reference_id)
+        reference = core_store.get_validated_reference(reference_id)
         if reference is None:
             return workspace_resource_unavailable()
         response = ValidatedReferenceResponse(

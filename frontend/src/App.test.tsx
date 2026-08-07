@@ -24,6 +24,104 @@ const workspaceResponse = {
   remaining_terminal_fresh_bundles: 4,
 };
 
+const lineageResponse = {
+  ingestion_run: {
+    ingestion_run_id: "run-1",
+    status: "SUCCEEDED",
+  },
+  dataset_version: {
+    dataset_id: "semi-synthetic-hero",
+    dataset_version_id: "sha256:hero-v1",
+    source_kind: "semi_synthetic",
+    intended_role: "semi_synthetic_hero",
+    mapping_manifest_id: "semi-synthetic-hero.mapping.v1",
+    record_counts: {
+      order_lines: 3,
+      order_line_events: 6,
+      source_observations: 18,
+      validation_findings: 1,
+    },
+  },
+  mapping_manifest: {},
+  order_lines: [
+    {
+      order_line_id: "line-1",
+      order_group_id: "group-1",
+      supplier_id: "supplier-1",
+      fields: {
+        material_class: { state: "present", value: "switchgear" },
+      },
+    },
+  ],
+  order_line_events: [
+    {
+      event_id: "event-1",
+      order_line_id: "line-1",
+      kind: "committed",
+      clocks: {
+        occurred_at: {
+          state: "present",
+          value: {
+            source_value: "2026-01-05T09:30:00+05:30",
+            normalized_value: "2026-01-05T04:00:00+00:00",
+            precision: "minute",
+            timezone_status: "known",
+          },
+        },
+        known_at: { state: "unresolved" },
+        available_at: { state: "unresolved" },
+      },
+      milestone_kind: { state: "not_applicable" },
+      promised_for: { state: "not_applicable" },
+      reason: { state: "missing" },
+      revises_promise_event_id: { state: "not_applicable" },
+    },
+  ],
+  source_observations: [
+    {
+      source_observation_id: "observation-line-1",
+      target_record_type: "OrderLine",
+      target_record_id: "line-1",
+      target_field_path: "fields.material_class",
+      source_field_path: { state: "present", value: "fields.material_class" },
+      source_locator_token: "loc-line-1",
+    },
+    {
+      source_observation_id: "observation-line-id",
+      target_record_type: "OrderLine",
+      target_record_id: "line-1",
+      target_field_path: "order_line_id",
+      source_field_path: { state: "present", value: "source_key" },
+      source_locator_token: "loc-line-id",
+    },
+    {
+      source_observation_id: "observation-event-1",
+      target_record_type: "OrderLineEvent",
+      target_record_id: "event-1",
+      target_field_path: "event_id",
+      source_field_path: { state: "present", value: "source_event_key" },
+      source_locator_token: "loc-event-1",
+    },
+  ],
+  validation_findings: [
+    {
+      validation_finding_id: "finding-1",
+      code: "SOURCE_DUPLICATE_DEDUPED",
+      message: "An exact repeated bundled observation was deduplicated.",
+      remediation: "No action is required.",
+      affected_refs: ["line-1"],
+    },
+  ],
+  audit_binding: {
+    snapshot_id: "sha256:snapshot-1",
+    dataset_version_id: "sha256:hero-v1",
+    occurrence_id: "occurrence-2",
+    event_seq: 4,
+    content_hash: "sha256:lineage-1",
+    created_at: "2026-08-05T00:00:01Z",
+  },
+};
+
 describe("Core health journey", () => {
   afterEach(cleanup);
 
@@ -43,6 +141,31 @@ describe("Core health journey", () => {
 
       if (input === "/api/workspace") {
         return new Response(JSON.stringify(workspaceResponse), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+
+      if (input === "/api/ingestion-runs") {
+        expect(init?.method).toBe("POST");
+        expect(JSON.parse(String(init?.body))).toEqual({
+          idempotency_key: "core-semi-synthetic-hero-v1",
+          dataset_key: "semi-synthetic-hero",
+          mapping_manifest_id: "semi-synthetic-hero.mapping.v1",
+        });
+        return new Response(
+          JSON.stringify({
+            result: "CREATED",
+            ingestion_run_id: "run-1",
+            dataset_version_id: "sha256:hero-v1",
+            status: "SUCCEEDED",
+          }),
+          { status: 201, headers: { "content-type": "application/json" } },
+        );
+      }
+
+      if (typeof input === "string" && input.startsWith("/api/datasets/")) {
+        return new Response(JSON.stringify(lineageResponse), {
           status: 200,
           headers: { "content-type": "application/json" },
         });
@@ -81,7 +204,15 @@ describe("Core health journey", () => {
     expect(screen.getByText("Process liveness")).toBeInTheDocument();
     expect(screen.getByText("Core readiness")).toBeInTheDocument();
     expect(screen.getByText("Audit occurrence recorded · event 1")).toBeInTheDocument();
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+    expect(await screen.findByText("Canonical lineage")).toBeInTheDocument();
+    expect(await screen.findByText("3 order lines")).toBeInTheDocument();
+    expect(await screen.findByText("Canonical fields")).toBeInTheDocument();
+    expect(await screen.findByText("committed")).toBeInTheDocument();
+    expect(
+      await screen.findByText("Source observation register (3)"),
+    ).toBeInTheDocument();
+    expect(screen.getAllByText("SOURCE_DUPLICATE_DEDUPED").length).toBeGreaterThan(0);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(5));
   });
 
   test("does not expose an internal error when health is unavailable", async () => {

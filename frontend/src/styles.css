@@ -26,7 +26,8 @@ button {
 }
 
 .core-header,
-.health-panel {
+.health-panel,
+.lineage-panel {
   width: min(100%, 960px);
   margin: 0 auto;
 }
@@ -78,6 +79,13 @@ h2 {
   padding: 32px;
   background: #ffffff;
   border-left: 4px solid #0f62fe;
+}
+
+.lineage-panel {
+  margin-top: 24px;
+  padding: 32px;
+  background: #ffffff;
+  border-left: 4px solid #8a3ffc;
 }
 
 .panel-heading {
@@ -166,6 +174,185 @@ code {
   background: #defbe6;
 }
 
+.lineage-warning {
+  margin: 32px 0 0;
+  padding: 16px;
+  border-left: 4px solid #da1e28;
+  background: #fff1f1;
+  line-height: 1.5;
+}
+
+.lineage-counts {
+  margin-bottom: 24px;
+}
+
+.lineage-list {
+  display: grid;
+  gap: 1px;
+  margin: 0 0 24px;
+  padding: 0;
+  list-style: none;
+  background: #c6c6c6;
+}
+
+.lineage-list li {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 16px 20px;
+  background: #f4f4f4;
+}
+
+.lineage-list code {
+  margin-top: 0;
+}
+
+.lineage-list span {
+  color: #525252;
+  font-size: 0.875rem;
+  text-align: right;
+}
+
+.lineage-records {
+  display: grid;
+  gap: 24px;
+}
+
+.lineage-record {
+  padding: 24px;
+  background: #f4f4f4;
+  border-top: 4px solid #8a3ffc;
+}
+
+.record-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.record-heading h3,
+.lineage-findings h3 {
+  margin: 0;
+  font-size: 1.125rem;
+  font-weight: 500;
+}
+
+.record-heading span {
+  color: #525252;
+  font-size: 0.875rem;
+}
+
+.lineage-subsection {
+  margin-top: 24px;
+}
+
+.lineage-subsection h4 {
+  margin: 0 0 12px;
+  font-size: 1rem;
+  font-weight: 500;
+}
+
+.canonical-list,
+.event-facts {
+  display: grid;
+  gap: 1px;
+  margin: 0;
+  background: #c6c6c6;
+}
+
+.canonical-list > div,
+.event-facts > div {
+  display: grid;
+  grid-template-columns: minmax(130px, 0.7fr) minmax(0, 2fr);
+  gap: 16px;
+  padding: 16px;
+  background: #ffffff;
+}
+
+.canonical-list dd,
+.event-facts dd {
+  display: grid;
+  gap: 6px;
+}
+
+.canonical-list code,
+.event-facts code {
+  overflow-wrap: anywhere;
+}
+
+.fact-trace {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 2px 12px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid #e0e0e0;
+  color: #525252;
+  font-size: 0.75rem;
+}
+
+.fact-trace code {
+  margin-top: 0;
+  overflow-wrap: anywhere;
+}
+
+.event-list {
+  display: grid;
+  gap: 16px;
+}
+
+.event-record {
+  padding: 16px;
+  background: #ffffff;
+  border-left: 3px solid #0f62fe;
+}
+
+.event-record .record-heading {
+  display: block;
+}
+
+.event-record .record-heading code {
+  margin-top: 6px;
+}
+
+.lineage-register,
+.lineage-findings {
+  margin-top: 24px;
+  padding-top: 24px;
+  border-top: 1px solid #c6c6c6;
+}
+
+.lineage-register summary {
+  cursor: pointer;
+  font-weight: 500;
+}
+
+.lineage-register ul,
+.lineage-findings ul {
+  display: grid;
+  gap: 1px;
+  margin: 16px 0 0;
+  padding: 0;
+  list-style: none;
+  background: #c6c6c6;
+}
+
+.lineage-register li,
+.lineage-findings li {
+  display: grid;
+  gap: 6px;
+  padding: 16px;
+  background: #ffffff;
+}
+
+.lineage-register li span,
+.lineage-findings li span {
+  color: #525252;
+  font-size: 0.875rem;
+}
+
 .retry-button {
   min-height: 48px;
   padding: 0 20px;
@@ -190,11 +377,22 @@ code {
     padding: 32px 16px;
   }
 
-  .health-panel {
+  .health-panel,
+  .lineage-panel {
     padding: 24px 20px;
   }
 
   .probe-list {
     grid-template-columns: 1fr;
+  }
+
+  .lineage-list li {
+    display: block;
+  }
+
+  .lineage-list span {
+    display: block;
+    margin-top: 8px;
+    text-align: left;
   }
 }

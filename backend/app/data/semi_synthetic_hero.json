@@ -1,0 +1,170 @@
+{
+  "dataset_key": "semi-synthetic-hero",
+  "source_schema_id": "semi-synthetic-construction",
+  "source_schema_version": "semi-synthetic-construction.v1",
+  "rows": [
+    {
+      "source_key": "hero-line-001",
+      "group_key": "hero-group-001",
+      "supplier_key": "hero-supplier-001",
+      "fields": {
+        "material_class": {"state": "present", "value": "switchgear"},
+        "complexity_class": {"state": "present", "value": "high"},
+        "quantity": {"state": "present", "value": 120, "unit": "each"},
+        "value": {"state": "present", "value": 185000, "currency": "USD"},
+        "project_id": {"state": "present", "value": "hero-project-alpha"},
+        "project_phase": {"state": "present", "value": "procurement"},
+        "urgency_class": {"state": "present", "value": "standard"},
+        "geography_code": {"state": "present", "value": "IN-KA"},
+        "contract_form": {"state": "present", "value": "fixed_price"}
+      },
+      "events": [
+        {
+          "source_event_key": "hero-line-001-committed",
+          "kind": "committed",
+          "occurred_at": {"value": "2026-01-05T09:30:00+05:30", "kind": "instant", "precision": "minute", "timezone_status": "known", "source_timezone": "Asia/Kolkata"},
+          "known_at": {"value": "2026-01-05T09:31:00+05:30", "kind": "instant", "precision": "minute", "timezone_status": "known", "source_timezone": "Asia/Kolkata"},
+          "available_at": {"value": "2026-01-05T09:32:00+05:30", "kind": "instant", "precision": "minute", "timezone_status": "known", "source_timezone": "Asia/Kolkata"}
+        },
+        {
+          "source_event_key": "hero-line-001-promise-001",
+          "kind": "promise_recorded",
+          "milestone_kind": "supplier_handoff",
+          "occurred_at": {"value": "2026-01-05", "kind": "date", "precision": "date", "timezone_status": "not_applicable", "source_timezone": null},
+          "known_at": {"value": "2026-01-05T09:31:00+05:30", "kind": "instant", "precision": "minute", "timezone_status": "known", "source_timezone": "Asia/Kolkata"},
+          "available_at": {"value": "2026-01-05T09:32:00+05:30", "kind": "instant", "precision": "minute", "timezone_status": "known", "source_timezone": "Asia/Kolkata"},
+          "promised_for": {"value": "2026-02-15", "kind": "date", "precision": "date", "timezone_status": "not_applicable", "source_timezone": null}
+        },
+        {
+          "source_event_key": "hero-line-001-promise-002",
+          "kind": "promise_revised",
+          "milestone_kind": "supplier_handoff",
+          "occurred_at": {"value": "2026-01-20T10:00:00+05:30", "kind": "instant", "precision": "minute", "timezone_status": "known", "source_timezone": "Asia/Kolkata"},
+          "known_at": {"value": "2026-01-20T10:01:00+05:30", "kind": "instant", "precision": "minute", "timezone_status": "known", "source_timezone": "Asia/Kolkata"},
+          "available_at": {"value": "2026-01-20T10:02:00+05:30", "kind": "instant", "precision": "minute", "timezone_status": "known", "source_timezone": "Asia/Kolkata"},
+          "promised_for": {"value": "2026-02-20", "kind": "date", "precision": "date", "timezone_status": "not_applicable", "source_timezone": null},
+          "revises_promise_source_event_key": "hero-line-001-promise-001",
+          "reason": "supplier-confirmed revision"
+        },
+        {
+          "source_event_key": "hero-line-001-reached-001",
+          "kind": "milestone_reached",
+          "milestone_kind": "supplier_handoff",
+          "occurred_at": {"value": "2026-02-24T16:00:00+05:30", "kind": "instant", "precision": "minute", "timezone_status": "known", "source_timezone": "Asia/Kolkata"},
+          "known_at": {"value": "2026-02-24T16:05:00+05:30", "kind": "instant", "precision": "minute", "timezone_status": "known", "source_timezone": "Asia/Kolkata"},
+          "available_at": {"value": "2026-02-24T16:06:00+05:30", "kind": "instant", "precision": "minute", "timezone_status": "known", "source_timezone": "Asia/Kolkata"}
+        }
+      ]
+    },
+    {
+      "source_key": "hero-line-002",
+      "group_key": "hero-group-002",
+      "supplier_key": "hero-supplier-002",
+      "fields": {
+        "material_class": {"state": "present", "value": "fabrication"},
+        "complexity_class": {"state": "missing"},
+        "quantity": {"state": "invalid", "raw": "-3", "unit": "each"},
+        "value": {"state": "missing"},
+        "project_id": {"state": "present", "value": "hero-project-alpha"},
+        "project_phase": {"state": "present", "value": "procurement"},
+        "urgency_class": {"state": "not_applicable"},
+        "geography_code": {"state": "not_applicable"},
+        "contract_form": {"state": "unresolved", "raw": "pending-source-confirmation"}
+      },
+      "events": [
+        {
+          "source_event_key": "hero-line-002-committed",
+          "kind": "committed",
+          "occurred_at": {"value": "2026-01-08T11:00:00+05:30", "kind": "instant", "precision": "minute", "timezone_status": "known", "source_timezone": "Asia/Kolkata"},
+          "known_at": {"value": "2026-01-08T11:02:00+05:30", "kind": "instant", "precision": "minute", "timezone_status": "known", "source_timezone": "Asia/Kolkata"},
+          "available_at": {"value": "2026-01-08T11:03:00+05:30", "kind": "instant", "precision": "minute", "timezone_status": "known", "source_timezone": "Asia/Kolkata"}
+        },
+        {
+          "source_event_key": "hero-line-002-promise-001",
+          "kind": "promise_recorded",
+          "milestone_kind": "supplier_handoff",
+          "occurred_at": {"value": "2026-01-08", "kind": "date", "precision": "date", "timezone_status": "not_applicable", "source_timezone": null},
+          "known_at": null,
+          "available_at": {"value": "2026-01-08T11:03:00+05:30", "kind": "instant", "precision": "minute", "timezone_status": "known", "source_timezone": "Asia/Kolkata"},
+          "promised_for": {"value": "2026-02-28", "kind": "date", "precision": "date", "timezone_status": "not_applicable", "source_timezone": null}
+        },
+        {
+          "source_event_key": "hero-line-002-reached-001",
+          "kind": "milestone_reached",
+          "milestone_kind": "supplier_handoff",
+          "occurred_at": {"value": "2026-03-02T12:00:00", "kind": "local_datetime", "precision": "minute", "timezone_status": "unknown", "source_timezone": null},
+          "known_at": {"value": "2026-03-02T12:05:00+05:30", "kind": "instant", "precision": "minute", "timezone_status": "known", "source_timezone": "Asia/Kolkata"},
+          "available_at": {"value": "2026-03-02T12:06:00+05:30", "kind": "instant", "precision": "minute", "timezone_status": "known", "source_timezone": "Asia/Kolkata"}
+        }
+      ]
+    },
+    {
+      "source_key": "hero-line-003",
+      "group_key": "hero-group-003",
+      "supplier_key": "hero-supplier-001",
+      "fields": {
+        "material_class": {"state": "present", "value": "cable_tray"},
+        "complexity_class": {"state": "present", "value": "medium"},
+        "quantity": {"state": "present", "value": 40, "unit": "each"},
+        "value": {"state": "present", "value": 42000, "currency": "USD"},
+        "project_id": {"state": "present", "value": "hero-project-beta"},
+        "project_phase": {"state": "present", "value": "release"},
+        "urgency_class": {"state": "present", "value": "expedited"},
+        "geography_code": {"state": "present", "value": "IN-TN"},
+        "contract_form": {"state": "missing"}
+      },
+      "events": [
+        {
+          "source_event_key": "hero-line-003-committed",
+          "kind": "committed",
+          "occurred_at": {"value": "2026-01-12T14:00:00+05:30", "kind": "instant", "precision": "minute", "timezone_status": "known", "source_timezone": "Asia/Kolkata"},
+          "known_at": {"value": "2026-01-12T14:01:00+05:30", "kind": "instant", "precision": "minute", "timezone_status": "known", "source_timezone": "Asia/Kolkata"},
+          "available_at": {"value": "2026-01-12T14:02:00+05:30", "kind": "instant", "precision": "minute", "timezone_status": "known", "source_timezone": "Asia/Kolkata"}
+        },
+        {
+          "source_event_key": "hero-line-003-promise-001",
+          "kind": "promise_recorded",
+          "milestone_kind": "supplier_handoff",
+          "occurred_at": {"value": "2026-01-12", "kind": "date", "precision": "date", "timezone_status": "not_applicable", "source_timezone": null},
+          "known_at": {"value": "2026-01-12T14:01:00+05:30", "kind": "instant", "precision": "minute", "timezone_status": "known", "source_timezone": "Asia/Kolkata"},
+          "available_at": {"value": "2026-01-12T14:02:00+05:30", "kind": "instant", "precision": "minute", "timezone_status": "known", "source_timezone": "Asia/Kolkata"},
+          "promised_for": {"value": "2026-02-10", "kind": "date", "precision": "date", "timezone_status": "not_applicable", "source_timezone": null}
+        },
+        {
+          "source_event_key": "hero-line-003-reached-001",
+          "kind": "milestone_reached",
+          "milestone_kind": "supplier_handoff",
+          "occurred_at": {"value": "2026-02-09", "kind": "date", "precision": "date", "timezone_status": "not_applicable", "source_timezone": null},
+          "known_at": {"value": "2026-02-09T17:00:00+05:30", "kind": "instant", "precision": "minute", "timezone_status": "known", "source_timezone": "Asia/Kolkata"},
+          "available_at": {"value": "2026-02-09T17:01:00+05:30", "kind": "instant", "precision": "minute", "timezone_status": "known", "source_timezone": "Asia/Kolkata"}
+        }
+      ]
+    },
+    {
+      "source_key": "hero-line-003",
+      "group_key": "hero-group-003",
+      "supplier_key": "hero-supplier-001",
+      "fields": {
+        "material_class": {"state": "present", "value": "cable_tray"},
+        "complexity_class": {"state": "present", "value": "medium"},
+        "quantity": {"state": "present", "value": 40, "unit": "each"},
+        "value": {"state": "present", "value": 42000, "currency": "USD"},
+        "project_id": {"state": "present", "value": "hero-project-beta"},
+        "project_phase": {"state": "present", "value": "release"},
+        "urgency_class": {"state": "present", "value": "expedited"},
+        "geography_code": {"state": "present", "value": "IN-TN"},
+        "contract_form": {"state": "missing"}
+      },
+      "events": [
+        {
+          "source_event_key": "hero-line-003-reached-001",
+          "kind": "milestone_reached",
+          "milestone_kind": "supplier_handoff",
+          "occurred_at": {"value": "2026-02-09", "kind": "date", "precision": "date", "timezone_status": "not_applicable", "source_timezone": null},
+          "known_at": {"value": "2026-02-09T17:00:00+05:30", "kind": "instant", "precision": "minute", "timezone_status": "known", "source_timezone": "Asia/Kolkata"},
+          "available_at": {"value": "2026-02-09T17:01:00+05:30", "kind": "instant", "precision": "minute", "timezone_status": "known", "source_timezone": "Asia/Kolkata"}
+        }
+      ]
+    }
+  ]
+}

@@ -6,7 +6,7 @@ async function expectNoPublicLeakage(page: Page) {
   expect(await page.locator("body").innerText()).not.toMatch(forbiddenLeakage);
 }
 
-test("shows the typed health journey and one audit occurrence", async ({ page }) => {
+test("shows the typed health and canonical lineage journey", async ({ page }) => {
   await page.goto("/");
 
   await expect(page.getByRole("status")).toContainText(
@@ -15,6 +15,19 @@ test("shows the typed health journey and one audit occurrence", async ({ page })
   await expect(page.getByText(/Demo Workspace active/)).toBeVisible();
   await expect(page.getByText("Process liveness")).toBeVisible();
   await expect(page.getByText("Core readiness")).toBeVisible();
+  await expect(page.getByText("Canonical lineage")).toBeVisible();
+  await expect(page.getByText("3 order lines")).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Canonical fields" }).first(),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Order line events and clocks" }).first(),
+  ).toBeVisible();
+  await expect(page.getByText("Source observation register (126)")).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Validation findings" }),
+  ).toBeVisible();
+  await expect(page.getByText(/Snapshot bound to audit event/)).toBeVisible();
   const healthResponse = await page.request.get("/api/health");
   expect(healthResponse.ok()).toBeTruthy();
   const health = await healthResponse.json();
@@ -31,7 +44,7 @@ test("shows the typed health journey and one audit occurrence", async ({ page })
   await expect(page.getByText(/Audit occurrence recorded · event \d+/)).toBeVisible();
 });
 
-test("creates isolated browser workspaces with one idempotent audit row", async ({
+test("creates isolated browser workspaces with idempotent boot and lineage audit rows", async ({
   browser,
 }) => {
   const contextA = await browser.newContext();
@@ -71,8 +84,12 @@ test("creates isolated browser workspaces with one idempotent audit row", async 
     expect(auditBResponse.ok()).toBeTruthy();
     const auditA = await auditAResponse.json();
     const auditB = await auditBResponse.json();
-    expect(auditA.items).toHaveLength(1);
-    expect(auditB.items).toHaveLength(1);
+    expect(auditA.items).toHaveLength(2);
+    expect(auditB.items).toHaveLength(2);
+    expect(auditA.items.map((item: { occurrence_kind: string }) => item.occurrence_kind).sort()).toEqual([
+      "BOOT_HEALTH_CHECK",
+      "LINEAGE_SNAPSHOT_VIEW",
+    ]);
     expect(Object.keys(auditA.items[0]).sort()).toEqual([
       "created_at",
       "event_seq",
@@ -91,7 +108,7 @@ test("creates isolated browser workspaces with one idempotent audit row", async 
     expect(retryResponse.status()).toBe(200);
     expect((await retryResponse.json()).result).toBe("IDEMPOTENT_REPLAY");
     const auditAfterRetry = await pageA.request.get("/api/audit/occurrences");
-    expect((await auditAfterRetry.json()).items).toHaveLength(1);
+    expect((await auditAfterRetry.json()).items).toHaveLength(2);
     await expectNoPublicLeakage(pageA);
     await expectNoPublicLeakage(pageB);
   } finally {
