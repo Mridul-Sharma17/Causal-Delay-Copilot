@@ -113,10 +113,21 @@ def test_decision_brief_snapshot_is_immutable_and_replay_does_not_read_current_r
         )
         assert published.status_code == 201
         snapshot = published.json()["snapshot"]
-        assert snapshot["schema_version"] == "decision-brief-snapshot.v1"
+        assert snapshot["schema_version"] == "decision-brief-snapshot.v2"
         assert snapshot["subject_verdict"]["scope"] == "subject"
         assert snapshot["subject_applicability"]["state"] == "abstained"
         assert snapshot["action_lane"]["state"] == "read_only"
+        assert snapshot["ingress_attempt"]["attempt"]["status"] == "accepted"
+        assert (
+            snapshot["lineage"]["payload"]["dataset_version"]["dataset_version_id"]
+            == dataset_version_id
+        )
+        assert set(snapshot["referenced_records"]) == {
+            "investigation_request",
+            "ingress_attempt",
+            "lineage",
+            "validated_reference",
+        }
 
         with sqlite3.connect(tmp_path / "core.sqlite3") as raw:
             with pytest.raises(sqlite3.IntegrityError):

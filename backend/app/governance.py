@@ -11,6 +11,7 @@ from uuid import NAMESPACE_URL, uuid5
 from .audit import AuditIdempotencyConflict, AuditStoreUnavailable
 from .canonical import canonical_json as _canonical_json
 from .canonical import sha256 as _sha256
+from .diagnostics import diagnostic_summary as _diagnostic_summary
 from .validity import (
     ValidityIntegrityError,
     derive_subject_evidence_verdict,
@@ -21,7 +22,7 @@ from .validity import (
 
 
 GOVERNANCE_SCHEMA_VERSION = "governance.v1"
-DECISION_BRIEF_SNAPSHOT_SCHEMA_VERSION = "decision-brief-snapshot.v1"
+DECISION_BRIEF_SNAPSHOT_SCHEMA_VERSION = "decision-brief-snapshot.v2"
 REPLAY_SCHEMA_VERSION = "replay.v1"
 
 DECISION_BRIEF_SNAPSHOTS_TABLE = """
@@ -158,14 +159,28 @@ def _reference_projection(reference: object) -> dict[str, Any]:
     diagnostics = getattr(reference, "diagnostic_results", ())
     if not isinstance(diagnostics, (list, tuple)):
         raise DecisionBriefUnavailable("reference diagnostic results are invalid")
+    reference_slot_id = _text(getattr(reference, "reference_slot_id", None))
+    bundle_manifest_hash = _text(
+        getattr(reference, "bundle_manifest_hash", None)
+    )
 
     projection: dict[str, Any] = {
         "schema_version": "validated-reference-snapshot.v1",
-        "reference_slot_id": _text(getattr(reference, "reference_slot_id", None)),
-        "analysis_run_id": _text(getattr(reference, "analysis_run_id", None)),
-        "bundle_manifest_hash": _text(
-            getattr(reference, "bundle_manifest_hash", None)
+        "delivery_schema_version": "analysis-run-read-model.v1",
+        "delivery_mode": _text(
+            getattr(reference, "delivery_mode", None),
+            default="existing_run_reuse",
         ),
+        "delivery_badge": "Validated reference",
+        "verification_state": _text(
+            getattr(reference, "verification_state", None),
+            default="reference_validated",
+        ),
+        "reference_id": reference_slot_id,
+        "reference_slot_id": reference_slot_id,
+        "analysis_run_id": _text(getattr(reference, "analysis_run_id", None)),
+        "bundle_manifest_hash": bundle_manifest_hash,
+        "bundle_ref": bundle_manifest_hash,
         "validation_attestation_id": _text(
             getattr(reference, "validation_attestation_id", None)
         ),
@@ -192,15 +207,8 @@ def _reference_projection(reference: object) -> dict[str, Any]:
         ),
         "validated_at": _timestamp(getattr(reference, "validated_at")),
         "completed_at": _timestamp(getattr(reference, "completed_at")),
-        "delivery_mode": _text(
-            getattr(reference, "delivery_mode", None),
-            default="existing_run_reuse",
-        ),
-        "verification_state": _text(
-            getattr(reference, "verification_state", None),
-            default="reference_validated",
-        ),
         "diagnostics": deepcopy([dict(item) for item in diagnostics]),
+        "diagnostic_summary": _diagnostic_summary(diagnostics),
         "robustness_grade": deepcopy(getattr(reference, "robustness_grade", None)),
         "evidence_verdict": verified_verdict,
         "rendered_verdict": rendered_verdict,
@@ -316,14 +324,211 @@ def _subject_applicability(
     return applicability, subject_verdict, rendered
 
 
+def _ingress_attempt_projection(
+    connection: sqlite3.Connection,
+    *,
+    workspace_id: str,
+    request: Mapping[str, Any],
+) -> dict[str, Any]:
+    trigger_mode = request.get("trigger_mode")
+    if trigger_mode == "reactive":
+        table_name = "reactive_ingress_attempts"
+        occurrence_kind = "REACTIVE_INGRESS"
+    elif trigger_mode == "proactive":
+        table_name = "proactive_ingress_attempts"
+        occurrence_kind = "PROACTIVE_INGRESS"
+    else:
+        raise DecisionBriefUnavailable("investigation trigger mode is unsupported")
+
+    row = connection.execute(
+        f"""
+        SELECT attempts.attempt_id, attempts.content_hash,
+               attempts.occurrence_id, attempts.event_seq,
+               attempts.received_at, attempts.payload_json
+        FROM {table_name} AS attempts
+        JOIN audit_events AS audit
+          ON audit.workspace_id = attempts.workspace_id
+         AND audit.occurrence_id = attempts.occurrence_id
+         AND audit.event_seq = attempts.event_seq
+         AND audit.content_hash = attempts.content_hash
+         AND audit.occurrence_kind = ?
+        WHERE attempts.workspace_id = ?
+          AND attempts.investigation_request_id = ?
+        """,
+        (occurrence_kind, workspace_id, request["investigation_request_id"]),
+    ).fetchone()
+    if row is None:
+        raise DecisionBriefUnavailable("ingress attempt is unavailable")
+    try:
+        payload = json.loads(str(row["payload_json"]))
+    except (TypeError, ValueError, json.JSONDecodeError) as error:
+        raise DecisionBriefUnavailable("ingress attempt payload is invalid") from error
+    if not isinstance(payload, Mapping):
+        raise DecisionBriefUnavailable("ingress attempt payload is not an object")
+    attempt = deepcopy(dict(payload))
+    if (
+        attempt.get("attempt_id") != str(row["attempt_id"])
+        or attempt.get("investigation_request_id")
+        != str(request["investigation_request_id"])
+    ):
+        raise DecisionBriefUnavailable("ingress attempt identity is inconsistent")
+    audit = _mapping(attempt.get("audit"))
+    if audit is None or (
+        audit.get("occurrence_id") != str(row["occurrence_id"])
+        or audit.get("event_seq") != int(row["event_seq"])
+    ):
+        raise DecisionBriefUnavailable("ingress attempt audit binding is inconsistent")
+    return {
+        "schema_version": "ingress-attempt-snapshot.v1",
+        "trigger_mode": trigger_mode,
+        "attempt_id": str(row["attempt_id"]),
+        "content_hash": str(row["content_hash"]),
+        "record_hash": _sha256(attempt),
+        "audit_binding": {
+            "occurrence_id": str(row["occurrence_id"]),
+            "event_seq": int(row["event_seq"]),
+            "created_at": str(row["received_at"]),
+        },
+        "attempt": attempt,
+    }
+
+
+def _lineage_projection(
+    connection: sqlite3.Connection,
+    *,
+    workspace_id: str,
+    dataset_version_id: str,
+) -> dict[str, Any]:
+    version_row = connection.execute(
+        """
+        SELECT payload_json FROM dataset_versions
+        WHERE dataset_version_id = ?
+        """,
+        (dataset_version_id,),
+    ).fetchone()
+    run_row = connection.execute(
+        """
+        SELECT payload_json FROM ingestion_runs
+        WHERE dataset_version_id = ?
+        ORDER BY started_at, ingestion_run_id
+        LIMIT 1
+        """,
+        (dataset_version_id,),
+    ).fetchone()
+    if version_row is None or run_row is None:
+        raise DecisionBriefUnavailable("canonical lineage is unavailable")
+
+    try:
+        dataset_version = json.loads(str(version_row["payload_json"]))
+        ingestion_run = json.loads(str(run_row["payload_json"]))
+    except (TypeError, ValueError, json.JSONDecodeError) as error:
+        raise DecisionBriefUnavailable("canonical lineage payload is invalid") from error
+    if not isinstance(dataset_version, Mapping) or not isinstance(ingestion_run, Mapping):
+        raise DecisionBriefUnavailable("canonical lineage payload is not an object")
+
+    records: list[dict[str, Any]] = []
+    for row in connection.execute(
+        """
+        SELECT record_type, record_id, payload_json
+        FROM lineage_records
+        WHERE dataset_version_id = ?
+        ORDER BY record_type, record_id
+        """,
+        (dataset_version_id,),
+    ).fetchall():
+        try:
+            payload = json.loads(str(row["payload_json"]))
+        except (TypeError, ValueError, json.JSONDecodeError) as error:
+            raise DecisionBriefUnavailable("canonical lineage record is invalid") from error
+        if not isinstance(payload, Mapping):
+            raise DecisionBriefUnavailable("canonical lineage record is not an object")
+        records.append(
+            {
+                "record_type": str(row["record_type"]),
+                "record_id": str(row["record_id"]),
+                "payload": deepcopy(dict(payload)),
+            }
+        )
+
+    lineage = {
+        "ingestion_run": deepcopy(dict(ingestion_run)),
+        "dataset_version": deepcopy(dict(dataset_version)),
+        "mapping_manifest": deepcopy(dict(dataset_version.get("mapping_manifest", {})))
+        if isinstance(dataset_version.get("mapping_manifest"), Mapping)
+        else {},
+        "order_lines": [
+            item["payload"] for item in records if item["record_type"] == "OrderLine"
+        ],
+        "order_line_events": [
+            item["payload"]
+            for item in records
+            if item["record_type"] == "OrderLineEvent"
+        ],
+        "source_observations": [
+            item["payload"]
+            for item in records
+            if item["record_type"] == "SourceObservation"
+        ],
+        "validation_findings": [
+            item["payload"]
+            for item in records
+            if item["record_type"] == "ValidationFinding"
+        ],
+    }
+    binding_row = connection.execute(
+        """
+        SELECT snapshots.snapshot_id, snapshots.occurrence_id,
+               snapshots.event_seq, snapshots.content_hash, snapshots.created_at
+        FROM lineage_snapshots AS snapshots
+        JOIN audit_events AS audit
+          ON audit.workspace_id = snapshots.workspace_id
+         AND audit.occurrence_id = snapshots.occurrence_id
+         AND audit.event_seq = snapshots.event_seq
+         AND audit.content_hash = snapshots.content_hash
+         AND audit.occurrence_kind = 'LINEAGE_SNAPSHOT_VIEW'
+        WHERE snapshots.workspace_id = ? AND snapshots.dataset_version_id = ?
+        """,
+        (workspace_id, dataset_version_id),
+    ).fetchone()
+    return {
+        "schema_version": "lineage-snapshot.v1",
+        "dataset_version_id": dataset_version_id,
+        "content_hash": _sha256(lineage),
+        "audit_binding": (
+            None
+            if binding_row is None
+            else {
+                "snapshot_id": str(binding_row["snapshot_id"]),
+                "occurrence_id": str(binding_row["occurrence_id"]),
+                "event_seq": int(binding_row["event_seq"]),
+                "content_hash": str(binding_row["content_hash"]),
+                "created_at": str(binding_row["created_at"]),
+            }
+        ),
+        "payload": lineage,
+    }
+
+
 def _snapshot_content(
     *,
+    connection: sqlite3.Connection,
+    workspace_id: str,
     request: Mapping[str, Any],
     reference: Mapping[str, Any],
 ) -> dict[str, Any]:
     subject_applicability, subject_verdict, rendered_subject = _subject_applicability(
         request=request,
         reference=reference,
+    )
+    ingress_attempt = _ingress_attempt_projection(
+        connection,
+        workspace_id=workspace_id,
+        request=request,
+    )
+    lineage = _lineage_projection(
+        connection,
+        workspace_id=workspace_id,
+        dataset_version_id=str(request["dataset_version_id"]),
     )
     action_state = "read_only"
     action_reason = (
@@ -336,7 +541,33 @@ def _snapshot_content(
         "schema_version": DECISION_BRIEF_SNAPSHOT_SCHEMA_VERSION,
         "investigation_request_id": request["investigation_request_id"],
         "investigation_request": deepcopy(dict(request)),
+        "ingress_attempt": ingress_attempt,
+        "lineage": lineage,
         "reference": deepcopy(dict(reference)),
+        "referenced_records": {
+            "investigation_request": {
+                "record_id": request["investigation_request_id"],
+                "content_hash": request["content_hash"],
+            },
+            "ingress_attempt": {
+                "record_id": ingress_attempt["attempt_id"],
+                "content_hash": ingress_attempt["record_hash"],
+                "event_seq": ingress_attempt["audit_binding"]["event_seq"],
+            },
+            "lineage": {
+                "record_id": lineage["dataset_version_id"],
+                "content_hash": lineage["content_hash"],
+                "event_seq": (
+                    None
+                    if lineage["audit_binding"] is None
+                    else lineage["audit_binding"]["event_seq"]
+                ),
+            },
+            "validated_reference": {
+                "record_id": reference["reference_id"],
+                "content_hash": reference["reference_record_hash"],
+            },
+        },
         "subject_applicability": subject_applicability,
         "subject_verdict": subject_verdict,
         "rendered_subject_verdict": rendered_subject,
@@ -376,6 +607,70 @@ def _snapshot_from_row(row: sqlite3.Row) -> dict[str, Any]:
             raise DecisionBriefUnavailable
     if content.get("schema_version") != DECISION_BRIEF_SNAPSHOT_SCHEMA_VERSION:
         raise DecisionBriefUnavailable
+    request = _mapping(content.get("investigation_request"))
+    reference = _mapping(content.get("reference"))
+    ingress_attempt = _mapping(content.get("ingress_attempt"))
+    lineage = _mapping(content.get("lineage"))
+    references = _mapping(content.get("referenced_records"))
+    if any(
+        value is None
+        for value in (request, reference, ingress_attempt, lineage, references)
+    ):
+        raise DecisionBriefUnavailable
+
+    request_hash = request.get("content_hash")
+    request_without_hash = deepcopy(dict(request))
+    request_without_hash.pop("content_hash", None)
+    if (
+        not isinstance(request_hash, str)
+        or _sha256(
+            {
+                key: value
+                for key, value in request_without_hash.items()
+                if key != "accepted_at"
+            }
+        )
+        != request_hash
+    ):
+        raise DecisionBriefUnavailable
+
+    reference_hash = reference.get("reference_record_hash")
+    reference_without_hash = deepcopy(dict(reference))
+    reference_without_hash.pop("reference_record_hash", None)
+    if (
+        not isinstance(reference_hash, str)
+        or _sha256(reference_without_hash) != reference_hash
+    ):
+        raise DecisionBriefUnavailable
+
+    attempt = _mapping(ingress_attempt.get("attempt"))
+    attempt_hash = ingress_attempt.get("record_hash")
+    if (
+        attempt is None
+        or not isinstance(attempt_hash, str)
+        or _sha256(attempt) != attempt_hash
+    ):
+        raise DecisionBriefUnavailable
+
+    lineage_payload = _mapping(lineage.get("payload"))
+    lineage_hash = lineage.get("content_hash")
+    if (
+        lineage_payload is None
+        or not isinstance(lineage_hash, str)
+        or _sha256(lineage_payload) != lineage_hash
+    ):
+        raise DecisionBriefUnavailable
+
+    required_references = {
+        "investigation_request": request_hash,
+        "ingress_attempt": attempt_hash,
+        "lineage": lineage_hash,
+        "validated_reference": reference_hash,
+    }
+    for name, expected_hash in required_references.items():
+        record = _mapping(references.get(name))
+        if record is None or record.get("content_hash") != expected_hash:
+            raise DecisionBriefUnavailable
     content["content_hash"] = content_hash
     content["snapshot_id"] = str(row["snapshot_id"])
     content["reference_id"] = str(row["reference_id"])
@@ -490,6 +785,8 @@ class GovernanceMixin:
                     )
 
                 content = _snapshot_content(
+                    connection=connection,
+                    workspace_id=workspace_id,
                     request=request,
                     reference=reference_projection,
                 )

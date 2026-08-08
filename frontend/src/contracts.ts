@@ -34,7 +34,7 @@ export type AuditOccurrenceResponse = {
 };
 
 export type DecisionBriefSnapshot = {
-  schema_version: "decision-brief-snapshot.v1";
+  schema_version: "decision-brief-snapshot.v2";
   snapshot_id: string;
   investigation_request_id: string;
   reference_id: string;
@@ -50,6 +50,11 @@ export type DecisionBriefSnapshot = {
   action_lane: Record<string, unknown> & {
     state: "read_only" | "unavailable";
   };
+  investigation_request: Record<string, unknown>;
+  ingress_attempt: Record<string, unknown>;
+  lineage: Record<string, unknown>;
+  reference: Record<string, unknown>;
+  referenced_records: Record<string, unknown>;
 };
 
 export type DecisionBriefResponse = {
@@ -662,7 +667,7 @@ export function parseDemoWorkspaceResponse(value: unknown): DemoWorkspace {
 function parseDecisionBriefSnapshot(value: unknown): DecisionBriefSnapshot {
   if (
     !isRecord(value) ||
-    value.schema_version !== "decision-brief-snapshot.v1" ||
+    value.schema_version !== "decision-brief-snapshot.v2" ||
     typeof value.snapshot_id !== "string" ||
     typeof value.investigation_request_id !== "string" ||
     typeof value.reference_id !== "string" ||
@@ -684,12 +689,17 @@ function parseDecisionBriefSnapshot(value: unknown): DecisionBriefSnapshot {
         ))) ||
     !isRecord(value.action_lane) ||
     (value.action_lane.state !== "read_only" &&
-      value.action_lane.state !== "unavailable")
+      value.action_lane.state !== "unavailable") ||
+    !isRecord(value.investigation_request) ||
+    !isRecord(value.ingress_attempt) ||
+    !isRecord(value.lineage) ||
+    !isRecord(value.reference) ||
+    !isRecord(value.referenced_records)
   ) {
     throw new Error("invalid decision brief response");
   }
   return {
-    schema_version: "decision-brief-snapshot.v1",
+    schema_version: "decision-brief-snapshot.v2",
     snapshot_id: value.snapshot_id,
     investigation_request_id: value.investigation_request_id,
     reference_id: value.reference_id,
@@ -707,6 +717,11 @@ function parseDecisionBriefSnapshot(value: unknown): DecisionBriefSnapshot {
         ? null
         : (value.rendered_subject_verdict as Record<string, string>),
     action_lane: value.action_lane as DecisionBriefSnapshot["action_lane"],
+    investigation_request: value.investigation_request,
+    ingress_attempt: value.ingress_attempt,
+    lineage: value.lineage,
+    reference: value.reference,
+    referenced_records: value.referenced_records,
   };
 }
 

@@ -124,7 +124,7 @@ const referenceDeliveryResponse = {
 };
 
 const decisionBriefSnapshotResponse = {
-  schema_version: "decision-brief-snapshot.v1",
+  schema_version: "decision-brief-snapshot.v2",
   snapshot_id: "snapshot-1",
   investigation_request_id: "ir-1",
   reference_id: "ordinary-demo",
@@ -157,6 +157,28 @@ const decisionBriefSnapshotResponse = {
     state: "read_only",
     reason: "Subject applicability is insufficient; no action is authorized from this reference journey.",
     next_step: "Supply the frozen subject propensity support before applying population evidence.",
+  },
+  investigation_request: {
+    investigation_request_id: "ir-1",
+    content_hash: "sha256:request",
+  },
+  ingress_attempt: {
+    attempt_id: "attempt-1",
+    record_hash: "sha256:attempt",
+  },
+  lineage: {
+    dataset_version_id: "dataset-1",
+    content_hash: "sha256:lineage",
+  },
+  reference: {
+    reference_id: "ordinary-demo",
+    verification_state: "reference_validated",
+  },
+  referenced_records: {
+    investigation_request: { content_hash: "sha256:request" },
+    ingress_attempt: { content_hash: "sha256:attempt" },
+    lineage: { content_hash: "sha256:lineage" },
+    validated_reference: { content_hash: "sha256:reference" },
   },
   presentation: {
     schema_version: "reference-journey-presentation.v1",

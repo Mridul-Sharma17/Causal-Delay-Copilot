@@ -145,7 +145,7 @@ class DecisionBriefRequest(BaseModel):
 class DecisionBriefSnapshotResponse(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    schema_version: Literal["decision-brief-snapshot.v1"]
+    schema_version: Literal["decision-brief-snapshot.v2"]
     snapshot_id: str
     investigation_request_id: str
     reference_id: str
@@ -157,6 +157,11 @@ class DecisionBriefSnapshotResponse(BaseModel):
     subject_verdict: dict[str, Any] | None
     rendered_subject_verdict: dict[str, str] | None
     action_lane: dict[str, Any]
+    investigation_request: dict[str, Any]
+    ingress_attempt: dict[str, Any]
+    lineage: dict[str, Any]
+    reference: dict[str, Any]
+    referenced_records: dict[str, Any]
 
 
 class DecisionBriefResponse(BaseModel):

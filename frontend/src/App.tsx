@@ -526,6 +526,11 @@ function DecisionBriefPanel({
           typeof gate === "object" && gate !== null,
       )
     : [];
+  const storedAttempt =
+    typeof snapshot.ingress_attempt.attempt === "object" &&
+    snapshot.ingress_attempt.attempt !== null
+      ? (snapshot.ingress_attempt.attempt as Record<string, unknown>)
+      : {};
 
   return (
     <section className="decision-brief" aria-labelledby="decision-brief-heading">
@@ -576,6 +581,30 @@ function DecisionBriefPanel({
       <p className="verdict-next-step">
         <strong>Next step:</strong> {formatValue(applicability.next_step)}
       </p>
+      <dl className="verdict-facts">
+        <div>
+          <dt>Stored ingress state</dt>
+          <dd>
+            {formatValue(storedAttempt.status)} · {formatValue(storedAttempt.primary_code)}
+          </dd>
+        </div>
+        <div>
+          <dt>Stored reference validation</dt>
+          <dd>{formatValue(snapshot.reference.verification_state)}</dd>
+        </div>
+        <div>
+          <dt>Stored diagnostic summary</dt>
+          <dd>{formatValue(snapshot.reference.diagnostic_summary)}</dd>
+        </div>
+        <div>
+          <dt>Stored canonical lineage</dt>
+          <dd><code>{formatValue(snapshot.lineage.dataset_version_id)}</code></dd>
+        </div>
+        <div>
+          <dt>Content-addressed records</dt>
+          <dd>{Object.keys(snapshot.referenced_records).length}</dd>
+        </div>
+      </dl>
       <div className="action-lane">
         <strong>Action lane: read-only</strong>
         <span>{formatValue(snapshot.action_lane.reason)}</span>
