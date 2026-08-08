@@ -141,6 +141,35 @@ export type RiskSignalFixture = {
   signal: RiskSignal;
 };
 
+export type ProactiveSubjectField = RiskSignalFieldValue & {
+  known_at?: RiskSignal["generated_at"];
+  lineage_ref?: string;
+};
+
+export type ProactiveProposal = {
+  schema_version: "proactive-proposal.v1";
+  trigger_mode: "proactive";
+  source: {
+    schema_version: "trigger-source-envelope.v1";
+    source_system: string;
+    data_classification: "generated" | "public" | "restricted" | "confidential";
+  };
+  proposal_id: string;
+  proposal_revision: string;
+  dataset_version_id: string;
+  proposed_supplier_ref: ProactiveSubjectField;
+  target_milestone_kind: ProactiveSubjectField;
+  proposed_original_promise: ProactiveSubjectField;
+  adjustment_inputs: Record<string, ProactiveSubjectField>;
+  decision_at: ProactiveSubjectField;
+};
+
+export type ProactiveProposalFixture = {
+  fixture_id: string;
+  label: string;
+  proposal: ProactiveProposal;
+};
+
 export type PredictiveRiskStatus = {
   state: "verified" | "unavailable";
   code: string;
@@ -211,17 +240,36 @@ export type InvestigationRequest = {
   investigation_request_id: string;
   schema_version: "investigation-request.v1";
   trigger_mode: "reactive" | "proactive";
-  ingress_ref: {
-    kind: "RiskSignal";
-    source_system: string;
-    source_signal_id: string;
-    source_revision: string;
-    source_payload_sha256: string;
-    source_order_line_ref: { namespace: string; key: string | string[] };
-  };
+  ingress_ref:
+    | {
+        kind: "RiskSignal";
+        source_system: string;
+        source_signal_id: string;
+        source_revision: string;
+        source_payload_sha256: string;
+        source_order_line_ref: { namespace: string; key: string | string[] };
+      }
+    | {
+        kind: "ProactiveProposal";
+        source_system: string;
+        proposal_id: string;
+        proposal_revision: string;
+        source_payload_sha256: string;
+      };
   rerun_of_request_id: RiskSignalFieldValue;
   dataset_version_id: string;
-  subject: { order_line_id: string };
+  subject:
+    | { order_line_id: string }
+    | {
+        kind: "proactive_preview";
+        preview_subject_digest: string;
+        proposal_id: string;
+        proposal_revision: string;
+        supplier_id: ProactiveSubjectField;
+        target_milestone_kind: ProactiveSubjectField;
+        original_promise: ProactiveSubjectField;
+        adjustment_inputs: Record<string, ProactiveSubjectField>;
+      };
   decision_cutoff: CausalTemporalField;
   decision_cutoff_source: "canonical_commitment" | "proactive_decision";
   observation_cutoff: CausalTemporalField;
@@ -264,6 +312,34 @@ export type RiskSignalListResponse = {
 export type ReactiveInvestigationResponse = {
   result: "CREATED" | "IDEMPOTENT_REPLAY";
   attempt: ReactiveIngressAttempt;
+};
+
+export type ProactiveIngressAttempt = {
+  attempt_id: string;
+  status: "accepted" | "duplicate" | "rejected" | "accepted_with_warning";
+  scope: "proactive_ingress";
+  source_system: string;
+  proposal_id: string;
+  proposal_revision: string;
+  source_payload_sha256: string;
+  primary_code: string;
+  findings: IngressFinding[];
+  evidence_refs: string[];
+  retryable: boolean;
+  recovery_action: string;
+  received_at: string;
+  investigation_request_id: string | null;
+  investigation_request: InvestigationRequest | null;
+  audit: { occurrence_id: string; event_seq: number };
+};
+
+export type ProactiveProposalListResponse = {
+  items: ProactiveProposalFixture[];
+};
+
+export type ProactiveInvestigationResponse = {
+  result: "CREATED" | "IDEMPOTENT_REPLAY";
+  attempt: ProactiveIngressAttempt;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -533,6 +609,25 @@ function parseRiskSignalFieldValue(value: unknown): RiskSignalFieldValue {
   return { state, value: value.value };
 }
 
+function parseProactiveSubjectField(value: unknown): ProactiveSubjectField {
+  if (!isRecord(value)) {
+    throw new Error("invalid proactive response");
+  }
+  const field = parseRiskSignalFieldValue(value);
+  const knownAt =
+    value.known_at === undefined
+      ? undefined
+      : parseSignalTemporal(value.known_at);
+  if (value.lineage_ref !== undefined && typeof value.lineage_ref !== "string") {
+    throw new Error("invalid proactive response");
+  }
+  return {
+    ...field,
+    ...(knownAt === undefined ? {} : { known_at: knownAt }),
+    ...(value.lineage_ref === undefined ? {} : { lineage_ref: value.lineage_ref }),
+  };
+}
+
 function parseSignalTemporal(value: unknown): RiskSignal["generated_at"] {
   if (
     !isRecord(value) ||
@@ -677,6 +772,77 @@ export function parseRiskSignalListResponse(value: unknown): RiskSignalListRespo
   };
 }
 
+function parseProactiveProposal(value: unknown): ProactiveProposal {
+  if (!isRecord(value) || !isRecord(value.source)) {
+    throw new Error("invalid proactive response");
+  }
+  const source = value.source;
+  if (
+    value.schema_version !== "proactive-proposal.v1" ||
+    value.trigger_mode !== "proactive" ||
+    source.schema_version !== "trigger-source-envelope.v1" ||
+    typeof source.source_system !== "string" ||
+    (source.data_classification !== "generated" &&
+      source.data_classification !== "public" &&
+      source.data_classification !== "restricted" &&
+      source.data_classification !== "confidential") ||
+    typeof value.proposal_id !== "string" ||
+    typeof value.proposal_revision !== "string" ||
+    typeof value.dataset_version_id !== "string" ||
+    !isRecord(value.adjustment_inputs) ||
+    !isRecord(value.proposed_supplier_ref) ||
+    !isRecord(value.target_milestone_kind) ||
+    !isRecord(value.proposed_original_promise) ||
+    !isRecord(value.decision_at)
+  ) {
+    throw new Error("invalid proactive response");
+  }
+  return {
+    schema_version: value.schema_version,
+    trigger_mode: value.trigger_mode,
+    source: {
+      schema_version: source.schema_version,
+      source_system: source.source_system,
+      data_classification: source.data_classification,
+    },
+    proposal_id: value.proposal_id,
+    proposal_revision: value.proposal_revision,
+    dataset_version_id: value.dataset_version_id,
+    proposed_supplier_ref: parseProactiveSubjectField(value.proposed_supplier_ref),
+    target_milestone_kind: parseProactiveSubjectField(value.target_milestone_kind),
+    proposed_original_promise: parseProactiveSubjectField(
+      value.proposed_original_promise,
+    ),
+    adjustment_inputs: Object.fromEntries(
+      Object.entries(value.adjustment_inputs).map(([key, item]) => [
+        key,
+        parseProactiveSubjectField(item),
+      ]),
+    ),
+    decision_at: parseProactiveSubjectField(value.decision_at),
+  };
+}
+
+export function parseProactiveProposalListResponse(
+  value: unknown,
+): ProactiveProposalListResponse {
+  if (!isRecord(value) || !Array.isArray(value.items)) {
+    throw new Error("invalid proactive response");
+  }
+  return {
+    items: value.items.map((item) => {
+      if (!isRecord(item) || typeof item.fixture_id !== "string" || typeof item.label !== "string") {
+        throw new Error("invalid proactive response");
+      }
+      return {
+        fixture_id: item.fixture_id,
+        label: item.label,
+        proposal: parseProactiveProposal(item.proposal),
+      };
+    }),
+  };
+}
+
 function parseCausalTemporalField(value: unknown): CausalTemporalField {
   if (!isRecord(value)) {
     throw new Error("invalid reactive response");
@@ -810,27 +976,106 @@ function parseCausalEngineInput(value: unknown): CausalEngineInput {
   };
 }
 
+function parseInvestigationIngressReference(
+  value: unknown,
+): InvestigationRequest["ingress_ref"] {
+  if (!isRecord(value) || typeof value.kind !== "string") {
+    throw new Error("invalid investigation response");
+  }
+  if (value.kind === "RiskSignal") {
+    if (
+      typeof value.source_system !== "string" ||
+      typeof value.source_signal_id !== "string" ||
+      typeof value.source_revision !== "string" ||
+      typeof value.source_payload_sha256 !== "string" ||
+      !isRecord(value.source_order_line_ref) ||
+      typeof value.source_order_line_ref.namespace !== "string" ||
+      (typeof value.source_order_line_ref.key !== "string" &&
+        (!Array.isArray(value.source_order_line_ref.key) ||
+          !value.source_order_line_ref.key.every(
+            (item) => typeof item === "string",
+          )))
+    ) {
+      throw new Error("invalid investigation response");
+    }
+    return {
+      kind: "RiskSignal",
+      source_system: value.source_system,
+      source_signal_id: value.source_signal_id,
+      source_revision: value.source_revision,
+      source_payload_sha256: value.source_payload_sha256,
+      source_order_line_ref: {
+        namespace: value.source_order_line_ref.namespace,
+        key: value.source_order_line_ref.key,
+      },
+    };
+  }
+  if (
+    value.kind !== "ProactiveProposal" ||
+    typeof value.source_system !== "string" ||
+    typeof value.proposal_id !== "string" ||
+    typeof value.proposal_revision !== "string" ||
+    typeof value.source_payload_sha256 !== "string"
+  ) {
+    throw new Error("invalid investigation response");
+  }
+  return {
+    kind: "ProactiveProposal",
+    source_system: value.source_system,
+    proposal_id: value.proposal_id,
+    proposal_revision: value.proposal_revision,
+    source_payload_sha256: value.source_payload_sha256,
+  };
+}
+
+function parseInvestigationSubject(
+  value: unknown,
+): InvestigationRequest["subject"] {
+  if (!isRecord(value)) {
+    throw new Error("invalid investigation response");
+  }
+  if (value.kind === "proactive_preview") {
+    if (
+      typeof value.preview_subject_digest !== "string" ||
+      typeof value.proposal_id !== "string" ||
+      typeof value.proposal_revision !== "string" ||
+      !isRecord(value.supplier_id) ||
+      !isRecord(value.target_milestone_kind) ||
+      !isRecord(value.original_promise) ||
+      !isRecord(value.adjustment_inputs)
+    ) {
+      throw new Error("invalid investigation response");
+    }
+    return {
+      kind: "proactive_preview",
+      preview_subject_digest: value.preview_subject_digest,
+      proposal_id: value.proposal_id,
+      proposal_revision: value.proposal_revision,
+      supplier_id: parseProactiveSubjectField(value.supplier_id),
+      target_milestone_kind: parseProactiveSubjectField(
+        value.target_milestone_kind,
+      ),
+      original_promise: parseProactiveSubjectField(value.original_promise),
+      adjustment_inputs: Object.fromEntries(
+        Object.entries(value.adjustment_inputs).map(([key, item]) => [
+          key,
+          parseProactiveSubjectField(item),
+        ]),
+      ),
+    };
+  }
+  if (typeof value.order_line_id !== "string") {
+    throw new Error("invalid investigation response");
+  }
+  return { order_line_id: value.order_line_id };
+}
+
 function parseInvestigationRequest(value: unknown): InvestigationRequest {
   if (
     !isRecord(value) ||
     typeof value.investigation_request_id !== "string" ||
     value.schema_version !== "investigation-request.v1" ||
     (value.trigger_mode !== "reactive" && value.trigger_mode !== "proactive") ||
-    !isRecord(value.ingress_ref) ||
-    value.ingress_ref.kind !== "RiskSignal" ||
-    typeof value.ingress_ref.source_system !== "string" ||
-    typeof value.ingress_ref.source_signal_id !== "string" ||
-    typeof value.ingress_ref.source_revision !== "string" ||
-    typeof value.ingress_ref.source_payload_sha256 !== "string" ||
-    !isRecord(value.ingress_ref.source_order_line_ref) ||
-    typeof value.ingress_ref.source_order_line_ref.namespace !== "string" ||
-    (typeof value.ingress_ref.source_order_line_ref.key !== "string" &&
-      (!Array.isArray(value.ingress_ref.source_order_line_ref.key) ||
-        !value.ingress_ref.source_order_line_ref.key.every(
-          (item) => typeof item === "string",
-        ))) ||
-    !isRecord(value.subject) ||
-    typeof value.subject.order_line_id !== "string" ||
     !isRecord(value.decision_cutoff) ||
     !isRecord(value.observation_cutoff) ||
     (value.decision_cutoff_source !== "canonical_commitment" &&
@@ -848,26 +1093,16 @@ function parseInvestigationRequest(value: unknown): InvestigationRequest {
     typeof value.causal_input_digest !== "string" ||
     typeof value.content_hash !== "string"
   ) {
-    throw new Error("invalid reactive response");
+    throw new Error("invalid investigation response");
   }
   return {
     investigation_request_id: value.investigation_request_id,
     schema_version: value.schema_version,
     trigger_mode: value.trigger_mode,
-    ingress_ref: {
-      kind: "RiskSignal",
-      source_system: value.ingress_ref.source_system,
-      source_signal_id: value.ingress_ref.source_signal_id,
-      source_revision: value.ingress_ref.source_revision,
-      source_payload_sha256: value.ingress_ref.source_payload_sha256,
-      source_order_line_ref: {
-        namespace: value.ingress_ref.source_order_line_ref.namespace,
-        key: value.ingress_ref.source_order_line_ref.key,
-      },
-    },
+    ingress_ref: parseInvestigationIngressReference(value.ingress_ref),
     rerun_of_request_id: parseRiskSignalFieldValue(value.rerun_of_request_id),
     dataset_version_id: value.dataset_version_id,
-    subject: { order_line_id: value.subject.order_line_id },
+    subject: parseInvestigationSubject(value.subject),
     decision_cutoff: parseCausalTemporalField(value.decision_cutoff),
     decision_cutoff_source: value.decision_cutoff_source,
     observation_cutoff: parseCausalTemporalField(value.observation_cutoff),
@@ -970,5 +1205,94 @@ export function parseReactiveInvestigationResponse(
   return {
     result: value.result,
     attempt: parseReactiveIngressAttempt(value.attempt),
+  };
+}
+
+function parseProactiveIngressAttempt(value: unknown): ProactiveIngressAttempt {
+  if (!isRecord(value) || !isRecord(value.audit)) {
+    throw new Error("invalid proactive response");
+  }
+  if (
+    typeof value.attempt_id !== "string" ||
+    (value.status !== "accepted" &&
+      value.status !== "duplicate" &&
+      value.status !== "rejected" &&
+      value.status !== "accepted_with_warning") ||
+    value.scope !== "proactive_ingress" ||
+    typeof value.source_system !== "string" ||
+    typeof value.proposal_id !== "string" ||
+    typeof value.proposal_revision !== "string" ||
+    typeof value.source_payload_sha256 !== "string" ||
+    typeof value.primary_code !== "string" ||
+    !Array.isArray(value.findings) ||
+    !value.findings.every((finding) => {
+      if (!isRecord(finding)) return false;
+      return (
+        typeof finding.finding_id === "string" &&
+        typeof finding.code === "string" &&
+        (finding.severity === "info" ||
+          finding.severity === "warning" ||
+          finding.severity === "error") &&
+        (finding.disposition === "advisory" || finding.disposition === "reject") &&
+        Array.isArray(finding.affected_refs) &&
+        finding.affected_refs.every((item) => typeof item === "string") &&
+        typeof finding.message === "string" &&
+        typeof finding.remediation === "string"
+      );
+    }) ||
+    !Array.isArray(value.evidence_refs) ||
+    !value.evidence_refs.every((item) => typeof item === "string") ||
+    typeof value.retryable !== "boolean" ||
+    typeof value.recovery_action !== "string" ||
+    typeof value.received_at !== "string" ||
+    (value.investigation_request_id !== null &&
+      typeof value.investigation_request_id !== "string") ||
+    (value.investigation_request !== null &&
+      !isRecord(value.investigation_request)) ||
+    typeof value.audit.occurrence_id !== "string" ||
+    typeof value.audit.event_seq !== "number" ||
+    !Number.isInteger(value.audit.event_seq) ||
+    value.audit.event_seq < 1
+  ) {
+    throw new Error("invalid proactive response");
+  }
+  return {
+    attempt_id: value.attempt_id,
+    status: value.status,
+    scope: "proactive_ingress",
+    source_system: value.source_system,
+    proposal_id: value.proposal_id,
+    proposal_revision: value.proposal_revision,
+    source_payload_sha256: value.source_payload_sha256,
+    primary_code: value.primary_code,
+    findings: value.findings as IngressFinding[],
+    evidence_refs: value.evidence_refs,
+    retryable: value.retryable,
+    recovery_action: value.recovery_action,
+    received_at: value.received_at,
+    investigation_request_id: value.investigation_request_id,
+    investigation_request:
+      value.investigation_request === null
+        ? null
+        : parseInvestigationRequest(value.investigation_request),
+    audit: {
+      occurrence_id: value.audit.occurrence_id,
+      event_seq: value.audit.event_seq,
+    },
+  };
+}
+
+export function parseProactiveInvestigationResponse(
+  value: unknown,
+): ProactiveInvestigationResponse {
+  if (
+    !isRecord(value) ||
+    (value.result !== "CREATED" && value.result !== "IDEMPOTENT_REPLAY")
+  ) {
+    throw new Error("invalid proactive response");
+  }
+  return {
+    result: value.result,
+    attempt: parseProactiveIngressAttempt(value.attempt),
   };
 }

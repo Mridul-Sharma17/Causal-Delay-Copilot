@@ -25,12 +25,16 @@ from .canonical import (
     timestamp as _timestamp,
 )
 from .contracts import (
+    ProactiveProposalFixtureResponse,
+    ProactiveProposalRequest,
+    ProactiveProposalPreviewResponse,
     RiskSignalAdvisoryContextRequest,
     RiskSignalFixtureResponse,
     RiskSignalPreviewResponse,
     RiskSignalRequest,
 )
 RISK_SIGNAL_SCHEMA_VERSION = "risk-signal.v1"
+PROACTIVE_PROPOSAL_SCHEMA_VERSION = "proactive-proposal.v1"
 TRIGGER_SOURCE_SCHEMA_VERSION = "trigger-source-envelope.v1"
 CAUSAL_INPUT_SCHEMA_VERSION = "causal-input-projection.v2"
 CAUSAL_QUESTION_VERSION = "supplier-load-slippage.v1"
@@ -44,7 +48,11 @@ ESTIMATOR_WINDOW_SELECTOR_VERSION = "estimator-window.v1"
 HISTORY_LOOKBACK_SELECTOR_VERSION = "history-lookback.v1"
 SOURCE_NAMESPACE = "semi-synthetic-hero"
 SOURCE_SYSTEM = "bundled-predictive-stub"
+PROACTIVE_SOURCE_SYSTEM = "bundled-pre-award-hook"
 FIXTURE_FILE = Path(__file__).with_name("data") / "risk_signal_fixtures.json"
+PROACTIVE_FIXTURE_FILE = (
+    Path(__file__).with_name("data") / "proactive_proposal_fixtures.json"
+)
 PROTECTED_SOURCE_FILE = Path(__file__).with_name("data") / "risk_signal_protected_sources.json"
 PREDICTIVE_FIXTURE_FILE = (
     Path(__file__).with_name("data") / "predictive_risk_signal_fixture.json"
@@ -65,6 +73,7 @@ PREDICTIVE_REPORT_FILE = (
     Path(__file__).with_name("data") / "predictive_baseline_report.json"
 )
 PREDICTIVE_FIXTURE_ID = "hero-reactive-risk-predictive-baseline-v1"
+PROACTIVE_FIXTURE_ID = "hero-proactive-proposal-v1"
 TEMPORAL_ELIGIBILITY_RELEASE_FILE = (
     Path(__file__).with_name("data") / "temporal_eligibility_release.json"
 )
@@ -100,6 +109,10 @@ _RISK_SIGNAL_CODES = (
     "SLIPPAGE_DURATION_BASIS_MIXED",
     "PREDICTOR_ARTIFACT_UNAVAILABLE",
     "PREDICTIVE_ATTRIBUTION_UNAVAILABLE",
+    "PROACTIVE_SCHEMA_UNSUPPORTED",
+    "PROACTIVE_INTEGRITY_FAILED",
+    "PROACTIVE_REVISION_CONFLICT",
+    "PROACTIVE_DATASET_UNAVAILABLE",
     "FROZEN_PROMISE_UNAVAILABLE",
     "FROZEN_PROMISE_CONFLICT",
     "FROZEN_PROMISE_TEMPORALLY_INVALID",
@@ -144,6 +157,45 @@ REACTIVE_INGRESS_ATTEMPTS_COLUMNS = [
     "payload_json",
 ]
 
+PROACTIVE_INGRESS_ATTEMPTS_TABLE = """
+    CREATE TABLE IF NOT EXISTS proactive_ingress_attempts (
+        attempt_id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL REFERENCES demo_workspaces(workspace_id),
+        idempotency_key TEXT NOT NULL,
+        source_system TEXT NOT NULL,
+        proposal_id TEXT NOT NULL,
+        proposal_revision TEXT NOT NULL,
+        source_payload_sha256 TEXT NOT NULL,
+        content_hash TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (
+            status IN ('accepted', 'duplicate', 'rejected', 'accepted_with_warning')
+        ),
+        primary_code TEXT NOT NULL,
+        investigation_request_id TEXT,
+        occurrence_id TEXT NOT NULL UNIQUE,
+        event_seq INTEGER NOT NULL,
+        received_at TEXT NOT NULL,
+        payload_json TEXT NOT NULL
+    )
+"""
+PROACTIVE_INGRESS_ATTEMPTS_COLUMNS = [
+    "attempt_id",
+    "workspace_id",
+    "idempotency_key",
+    "source_system",
+    "proposal_id",
+    "proposal_revision",
+    "source_payload_sha256",
+    "content_hash",
+    "status",
+    "primary_code",
+    "investigation_request_id",
+    "occurrence_id",
+    "event_seq",
+    "received_at",
+    "payload_json",
+]
+
 INVESTIGATION_REQUESTS_TABLE = """
     CREATE TABLE IF NOT EXISTS investigation_requests (
         investigation_request_id TEXT PRIMARY KEY,
@@ -177,7 +229,7 @@ def _ensure_table(
     columns = connection.execute(f"PRAGMA table_info({table_name})").fetchall()
     if [str(column[1]) for column in columns] != expected_columns:
         raise sqlite3.DatabaseError(
-            f"{table_name} schema is not the locked reactive ingress schema"
+            f"{table_name} schema is not the locked ingress schema"
         )
 
 
@@ -196,8 +248,19 @@ def ensure_risk_schema(connection: sqlite3.Connection, *, create: bool) -> None:
         INVESTIGATION_REQUESTS_COLUMNS,
         create=create,
     )
+    _ensure_table(
+        connection,
+        "proactive_ingress_attempts",
+        PROACTIVE_INGRESS_ATTEMPTS_TABLE,
+        PROACTIVE_INGRESS_ATTEMPTS_COLUMNS,
+        create=create,
+    )
     if create:
-        for table_name in ("reactive_ingress_attempts", "investigation_requests"):
+        for table_name in (
+            "reactive_ingress_attempts",
+            "proactive_ingress_attempts",
+            "investigation_requests",
+        ):
             connection.execute(
                 f"""
                 CREATE TRIGGER IF NOT EXISTS {table_name}_immutable_update
@@ -224,8 +287,18 @@ class StoredReactiveIngress:
     attempt: dict[str, Any]
 
 
+@dataclass(frozen=True, slots=True)
+class StoredProactiveIngress:
+    result: str
+    attempt: dict[str, Any]
+
+
 class RiskSignalFixtureUnavailable(Exception):
     """A requested protected bundled fixture is not available to this version."""
+
+
+class ProactiveProposalFixtureUnavailable(Exception):
+    """A requested protected bundled proposal is not available to this version."""
 
 
 def _finding(
@@ -276,6 +349,11 @@ _RECOVERY_ACTIONS = {
     "RISK_SIGNAL_CONTEXT_CONFLICT": "REVIEW_SOURCE_CONTEXT_AGAINST_CANONICAL_LINE",
     "RISK_SIGNAL_CONTEXT_UNVERIFIABLE": "CONTINUE_WITH_CANONICAL_FACTS_ONLY",
     "RISK_SIGNAL_MODE_MISMATCH": "USE_THE_REACTIVE_RISK_SIGNAL_ROUTE",
+    "PROACTIVE_ACCEPTED": "CONTINUE_TO_ELIGIBILITY_REVIEW",
+    "PROACTIVE_SCHEMA_UNSUPPORTED": "USE_SUPPORTED_PROACTIVE_PROPOSAL_SCHEMA",
+    "PROACTIVE_INTEGRITY_FAILED": "REPAIR_PROTECTED_PROPOSAL_AND_RETRY",
+    "PROACTIVE_REVISION_CONFLICT": "SUBMIT_A_NEW_PROPOSAL_REVISION",
+    "PROACTIVE_DATASET_UNAVAILABLE": "SELECT_A_FROZEN_DATASET_VERSION_AND_RETRY",
     "CAUSAL_QUESTION_VERSION_UNAVAILABLE": "RESTORE_VERSIONED_CORE_CONFIGURATION",
     "ENGINE_CONFIGURATION_UNAVAILABLE": "RESTORE_VERSIONED_CORE_CONFIGURATION",
     "SLIPPAGE_DURATION_BASIS_MIXED": "WAIT_FOR_ONE_RELEASED_DURATION_BASIS",
@@ -447,6 +525,95 @@ def _field_from_record(record: Any) -> dict[str, Any]:
     if state in {"missing", "not_applicable", "invalid", "unresolved"}:
         return _field(str(state))
     return _field("unresolved")
+
+
+def _normalise_proactive_temporal(field: Any) -> _Temporal:
+    if not hasattr(field, "state") or field.state != "present":
+        return _Temporal(_field(str(getattr(field, "state", "unresolved"))), None)
+    value = getattr(field, "value", None)
+    if not isinstance(value, Mapping):
+        return _Temporal(_field("invalid"), None)
+    return _normalise_temporal(value)
+
+
+def _proactive_target_field(field: Any) -> dict[str, Any]:
+    if field.state != "present":
+        return _field(field.state)
+    if not isinstance(field.value, str) or field.value not in {
+        "supplier_completion",
+        "supplier_handoff",
+    }:
+        return _field("invalid")
+    return _field("present", field.value)
+
+
+def _proactive_source_reference(
+    field: Any,
+    *,
+    dataset_id: str,
+    mapping_manifest: Mapping[str, Any],
+) -> dict[str, Any]:
+    if field.state != "present":
+        return _field(field.state)
+    if not isinstance(field.value, Mapping):
+        return _field("invalid")
+    if field.value.get("namespace") != SOURCE_NAMESPACE:
+        return _field("unresolved")
+    keys = _source_key(field.value.get("key"))
+    if len(keys) != 1:
+        return _field("unresolved")
+    canonical = _canonical_identity_from_mapping(
+        dataset_id,
+        mapping_manifest,
+        "supplier_id",
+        keys[0],
+    )
+    return _field("present", canonical) if canonical is not None else _field("unresolved")
+
+
+def _proactive_projection_field(
+    field: Any,
+    cutoff: _Temporal,
+    *,
+    value: Any | None = None,
+    state: str | None = None,
+    temporal: _Temporal | None = None,
+) -> dict[str, Any]:
+    field_state = state or field.state
+    if field_state != "present":
+        return _field(field_state)
+    if field.state != "present":
+        return _field(field.state)
+    if field.known_at is None:
+        return _field("unresolved")
+    known_at = _normalise_temporal(field.known_at.model_dump(mode="json"))
+    if _compare(known_at, cutoff) not in {-1, 0}:
+        return _field("unresolved")
+    if temporal is not None:
+        return temporal.field
+    if value is None and field.value is None:
+        return _field("invalid")
+    return _field("present", field.value if value is None else value)
+
+
+def _proactive_subject_input(
+    source_field: Any,
+    normalised_field: Mapping[str, Any],
+    *,
+    temporal: bool = False,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "state": normalised_field.get("state", "unresolved"),
+    }
+    if payload["state"] == "present":
+        payload["value"] = normalised_field.get("value")
+    if source_field.known_at is not None:
+        payload["known_at"] = source_field.known_at.model_dump(mode="json")
+    if source_field.lineage_ref is not None:
+        payload["lineage_ref"] = source_field.lineage_ref
+    if temporal and source_field.state != "present":
+        payload["state"] = source_field.state
+    return payload
 
 
 def _resolve_commitment_event(
@@ -1344,6 +1511,90 @@ def _fixture_payloads(dataset_version_id: str) -> list[dict[str, Any]]:
     return _fixture_preview_payloads(_fixture_signal_payloads(dataset_version_id))
 
 
+def _protected_proactive_payload(proposal_payload: Mapping[str, Any]) -> dict[str, Any]:
+    payload = deepcopy(dict(proposal_payload))
+    source = payload.get("source")
+    if isinstance(source, dict):
+        source.pop("source_payload_sha256", None)
+    return payload
+
+
+def _proactive_proposal_payloads(dataset_version_id: str) -> list[dict[str, Any]]:
+    with PROACTIVE_FIXTURE_FILE.open("r", encoding="utf-8") as handle:
+        raw = json.load(handle)
+    if not isinstance(raw, dict) or not isinstance(raw.get("items"), list):
+        raise ValueError("proactive proposal fixture bundle is invalid")
+    fixtures: list[dict[str, Any]] = []
+    for item in raw["items"]:
+        if not isinstance(item, dict):
+            raise ValueError("proactive proposal fixture is invalid")
+        proposal_payload = deepcopy(item.get("proposal"))
+        if not isinstance(proposal_payload, dict):
+            raise ValueError("proactive proposal fixture has no proposal")
+        proposal = ProactiveProposalRequest.model_validate(proposal_payload)
+        if proposal.dataset_version_id != dataset_version_id:
+            raise ValueError("proactive proposal fixture is bound to another Dataset Version")
+        protected_payload = _protected_proactive_payload(
+            proposal.model_dump(mode="json")
+        )
+        protected_hash = _sha256(_canonical_json(protected_payload).encode("utf-8"))
+        if proposal.source.source_payload_sha256 != protected_hash:
+            raise ValueError("proactive proposal fixture has an invalid protected source digest")
+        fixtures.append(
+            {
+                "fixture_id": str(item.get("fixture_id", "")),
+                "label": str(item.get("label", "")),
+                "proposal": proposal.model_dump(mode="json"),
+            }
+        )
+    return fixtures
+
+
+def _proactive_proposal_preview_payloads(
+    fixtures: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    payloads: list[dict[str, Any]] = []
+    for fixture in fixtures:
+        proposal_payload = deepcopy(fixture["proposal"])
+        source = proposal_payload.get("source")
+        if isinstance(source, dict):
+            proposal_payload["source"] = {
+                key: source[key]
+                for key in ("schema_version", "source_system", "data_classification")
+            }
+        proposal_payload.pop("requester_ref", None)
+        payloads.append(
+            ProactiveProposalFixtureResponse(
+                fixture_id=fixture["fixture_id"],
+                label=fixture["label"],
+                proposal=ProactiveProposalPreviewResponse.model_validate(
+                    proposal_payload
+                ),
+            ).model_dump(mode="json")
+        )
+    return payloads
+
+
+def _matches_bundled_proactive_proposal(
+    proposal: ProactiveProposalRequest,
+) -> bool:
+    try:
+        for fixture in _proactive_proposal_payloads(proposal.dataset_version_id):
+            fixture_proposal = ProactiveProposalRequest.model_validate(
+                fixture["proposal"]
+            )
+            if (
+                _protected_proactive_payload(proposal.model_dump(mode="json"))
+                == _protected_proactive_payload(fixture_proposal.model_dump(mode="json"))
+                and proposal.source.source_payload_sha256
+                == fixture_proposal.source.source_payload_sha256
+            ):
+                return True
+    except (OSError, TypeError, ValueError):
+        return False
+    return False
+
+
 def _matches_bundled_fixture_payload(signal: RiskSignalRequest) -> bool:
     protected_bytes = _protected_source_bytes(
         signal.source.protected_source_locator
@@ -1444,6 +1695,17 @@ class ReactiveInvestigationMixin:
         generated = _predictive_fixture_signal_payloads(dataset_version_id)
         return _fixture_preview_payloads(generated) + _fixture_payloads(dataset_version_id)
 
+    def list_proactive_proposal_fixtures(
+        self,
+        dataset_version_id: str,
+    ) -> list[dict[str, Any]]:
+        self.get_lineage(dataset_version_id)
+        if not self._is_bundled_dataset_version(dataset_version_id):
+            return []
+        return _proactive_proposal_preview_payloads(
+            _proactive_proposal_payloads(dataset_version_id)
+        )
+
     def predictive_risk_status(self) -> dict[str, Any]:
         return _predictive_risk_status()
 
@@ -1463,6 +1725,18 @@ class ReactiveInvestigationMixin:
                 return RiskSignalRequest.model_validate(fixture["signal"])
         raise RiskSignalFixtureUnavailable
 
+    def get_proactive_proposal_fixture(
+        self,
+        dataset_version_id: str,
+        fixture_id: str,
+    ) -> ProactiveProposalRequest:
+        if not self._is_bundled_dataset_version(dataset_version_id):
+            raise ProactiveProposalFixtureUnavailable
+        for fixture in _proactive_proposal_payloads(dataset_version_id):
+            if fixture["fixture_id"] == fixture_id:
+                return ProactiveProposalRequest.model_validate(fixture["proposal"])
+        raise ProactiveProposalFixtureUnavailable
+
     def create_reactive_fixture_investigation(
         self,
         fixture_id: str,
@@ -1473,6 +1747,17 @@ class ReactiveInvestigationMixin:
     ) -> StoredReactiveIngress:
         signal = self.get_risk_signal_fixture(dataset_version_id, fixture_id)
         return self.create_reactive_investigation(signal, workspace_id, now=now)
+
+    def create_proactive_fixture_investigation(
+        self,
+        fixture_id: str,
+        dataset_version_id: str,
+        workspace_id: str,
+        *,
+        now: datetime | None = None,
+    ) -> StoredProactiveIngress:
+        proposal = self.get_proactive_proposal_fixture(dataset_version_id, fixture_id)
+        return self.create_proactive_investigation(proposal, workspace_id, now=now)
 
     def _persist_ingress_attempt_locked(
         self,
@@ -1560,6 +1845,172 @@ class ReactiveInvestigationMixin:
             ),
         )
         return attempt
+
+    def _persist_proactive_ingress_attempt_locked(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        workspace_id: str,
+        idempotency_key: str,
+        content_hash: str,
+        attempt: dict[str, Any],
+        request: dict[str, Any] | None,
+        attempt_id: str,
+        audit_idempotency_key: str,
+    ) -> dict[str, Any]:
+        occurrence_id = uuid5(
+            NAMESPACE_URL,
+            f"causal-delay-copilot:proactive-audit:{workspace_id}:{audit_idempotency_key}",
+        ).hex
+        cursor = connection.execute(
+            """
+            INSERT INTO audit_events (
+                workspace_id, occurrence_id, idempotency_key,
+                occurrence_kind, outcome_code, content_hash, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                workspace_id,
+                occurrence_id,
+                audit_idempotency_key,
+                "PROACTIVE_INGRESS",
+                attempt["primary_code"],
+                content_hash,
+                attempt["received_at"],
+            ),
+        )
+        if cursor.lastrowid is None:
+            raise sqlite3.DatabaseError("proactive ingress audit event was not sequenced")
+        attempt["attempt_id"] = attempt_id
+        attempt["audit"] = {
+            "occurrence_id": occurrence_id,
+            "event_seq": int(cursor.lastrowid),
+        }
+        if request is not None:
+            connection.execute(
+                """
+                INSERT INTO investigation_requests (
+                    investigation_request_id, workspace_id, attempt_id,
+                    content_hash, accepted_at, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    request["investigation_request_id"],
+                    workspace_id,
+                    attempt_id,
+                    request["content_hash"],
+                    request["accepted_at"],
+                    _canonical_json(request),
+                ),
+            )
+        connection.execute(
+            """
+            INSERT INTO proactive_ingress_attempts (
+                attempt_id, workspace_id, idempotency_key,
+                source_system, proposal_id, proposal_revision,
+                source_payload_sha256, content_hash, status, primary_code,
+                investigation_request_id, occurrence_id, event_seq,
+                received_at, payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                attempt_id,
+                workspace_id,
+                idempotency_key,
+                attempt["source_system"],
+                attempt["proposal_id"],
+                attempt["proposal_revision"],
+                attempt["source_payload_sha256"],
+                content_hash,
+                attempt["status"],
+                attempt["primary_code"],
+                attempt["investigation_request_id"],
+                occurrence_id,
+                int(cursor.lastrowid),
+                attempt["received_at"],
+                _canonical_json(attempt),
+            ),
+        )
+        return attempt
+
+    def record_proactive_schema_failure(
+        self,
+        workspace_id: str,
+        *,
+        request_body: bytes,
+        now: datetime | None = None,
+    ) -> None:
+        received_at = now or datetime.now(timezone.utc)
+        content_hash = _sha256(request_body)
+        attempt_id = "attempt_" + uuid4().hex
+        idempotency_key = _sha256(
+            {
+                "schema_failure": content_hash,
+                "attempt_id": attempt_id,
+            }
+        )
+        attempt = {
+            "attempt_id": "attempt_pending",
+            "status": "rejected",
+            "scope": "proactive_ingress",
+            "source_system": "unavailable",
+            "proposal_id": "unavailable",
+            "proposal_revision": "unavailable",
+            "source_payload_sha256": content_hash,
+            "primary_code": "PROACTIVE_SCHEMA_UNSUPPORTED",
+            "findings": [
+                _clean_finding(
+                    _finding(
+                        code="PROACTIVE_SCHEMA_UNSUPPORTED",
+                        severity="error",
+                        disposition="reject",
+                        affected_refs=[],
+                        message="The proactive proposal body did not match the supported schema.",
+                        remediation="Use the versioned bundled Proactive Proposal contract.",
+                        phase=1,
+                    )
+                )
+            ],
+            "evidence_refs": [],
+            "retryable": False,
+            "recovery_action": _RECOVERY_ACTIONS["PROACTIVE_SCHEMA_UNSUPPORTED"],
+            "received_at": _timestamp(received_at),
+            "investigation_request_id": None,
+            "investigation_request": None,
+            "audit": {"occurrence_id": "pending", "event_seq": 0},
+        }
+        with self._lock:
+            connection = self._connection_or_raise()
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                mutation = self._record_mutation_locked(
+                    workspace_id,
+                    idempotency_key=f"proactive-schema:{idempotency_key}",
+                    mutation_kind="PROACTIVE_INGRESS",
+                    content_hash=content_hash,
+                    terminal_fresh_bundle=False,
+                    now=received_at,
+                )
+                if mutation.replayed:
+                    connection.commit()
+                    return
+                self._persist_proactive_ingress_attempt_locked(
+                    connection,
+                    workspace_id=workspace_id,
+                    idempotency_key=idempotency_key,
+                    content_hash=content_hash,
+                    attempt=attempt,
+                    request=None,
+                    attempt_id=attempt_id,
+                    audit_idempotency_key=f"proactive-schema:{idempotency_key}",
+                )
+                connection.commit()
+            except sqlite3.Error as error:
+                connection.rollback()
+                raise AuditStoreUnavailable from error
+            except Exception:
+                connection.rollback()
+                raise
 
     def record_reactive_schema_failure(
         self,
@@ -1765,6 +2216,137 @@ class ReactiveInvestigationMixin:
                 )
                 connection.commit()
                 return StoredReactiveIngress("CREATED", attempt)
+            except sqlite3.Error as error:
+                connection.rollback()
+                raise AuditStoreUnavailable from error
+            except Exception:
+                connection.rollback()
+                raise
+
+    def create_proactive_investigation(
+        self,
+        proposal: ProactiveProposalRequest,
+        workspace_id: str,
+        *,
+        now: datetime | None = None,
+    ) -> StoredProactiveIngress:
+        received_at = now or datetime.now(timezone.utc)
+        proposal_payload = proposal.model_dump(mode="json")
+        source = proposal.source
+        source_payload_hash = source.source_payload_sha256
+        content_hash = _safe_sha256(proposal_payload)
+        idempotency_key = _sha256(
+            {
+                "source_system": source.source_system,
+                "proposal_id": proposal.proposal_id,
+                "proposal_revision": proposal.proposal_revision,
+                "source_payload_sha256": source_payload_hash,
+                "dataset_version_id": proposal.dataset_version_id,
+                "trigger_mode": proposal.trigger_mode,
+                "causal_question_version": CAUSAL_QUESTION_VERSION,
+                "engine_configuration_ref": ENGINE_CONFIGURATION_REF,
+                "content_hash": content_hash,
+            }
+        )
+
+        with self._lock:
+            connection = self._connection_or_raise()
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                existing = connection.execute(
+                    """
+                    SELECT payload_json
+                    FROM proactive_ingress_attempts
+                    WHERE workspace_id = ? AND idempotency_key = ?
+                    """,
+                    (workspace_id, idempotency_key),
+                ).fetchone()
+                if existing is not None:
+                    replay = json.loads(str(existing["payload_json"]))
+                    duplicate_attempt_id = "attempt_" + uuid4().hex
+                    replay["status"] = "duplicate"
+                    replay["received_at"] = _timestamp(received_at)
+                    replay["audit"] = {"occurrence_id": "pending", "event_seq": 0}
+                    duplicate_mutation = self._record_mutation_locked(
+                        workspace_id,
+                        idempotency_key=f"proactive-duplicate:{duplicate_attempt_id}",
+                        mutation_kind="PROACTIVE_INGRESS",
+                        content_hash=content_hash,
+                        terminal_fresh_bundle=False,
+                        now=received_at,
+                    )
+                    if duplicate_mutation.replayed:
+                        raise sqlite3.DatabaseError(
+                            "proactive duplicate mutation was unexpectedly replayed"
+                        )
+                    self._persist_proactive_ingress_attempt_locked(
+                        connection,
+                        workspace_id=workspace_id,
+                        idempotency_key=idempotency_key,
+                        content_hash=content_hash,
+                        attempt=replay,
+                        request=None,
+                        attempt_id=duplicate_attempt_id,
+                        audit_idempotency_key=f"proactive-duplicate:{duplicate_attempt_id}",
+                    )
+                    connection.commit()
+                    return StoredProactiveIngress("IDEMPOTENT_REPLAY", replay)
+
+                revision_conflict = connection.execute(
+                    """
+                    SELECT 1
+                    FROM proactive_ingress_attempts
+                    WHERE workspace_id = ?
+                      AND source_system = ?
+                      AND proposal_id = ?
+                      AND proposal_revision = ?
+                      AND source_payload_sha256 != ?
+                    LIMIT 1
+                    """,
+                    (
+                        workspace_id,
+                        source.source_system,
+                        proposal.proposal_id,
+                        proposal.proposal_revision,
+                        source_payload_hash,
+                    ),
+                ).fetchone() is not None
+
+                attempt, request = self._normalise_proactive_proposal(
+                    proposal,
+                    received_at=received_at,
+                    revision_conflict=revision_conflict,
+                    workspace_id=workspace_id,
+                )
+                mutation = self._record_mutation_locked(
+                    workspace_id,
+                    idempotency_key=idempotency_key,
+                    mutation_kind="PROACTIVE_INGRESS",
+                    content_hash=content_hash,
+                    terminal_fresh_bundle=False,
+                    now=received_at,
+                )
+                if mutation.replayed:
+                    raise sqlite3.DatabaseError(
+                        "proactive ingress mutation was unexpectedly replayed"
+                    )
+
+                attempt_id = "attempt_" + uuid5(
+                    NAMESPACE_URL,
+                    f"causal-delay-copilot:proactive-attempt:{workspace_id}:{idempotency_key}",
+                ).hex
+                self._persist_proactive_ingress_attempt_locked(
+                    connection,
+                    workspace_id=workspace_id,
+                    idempotency_key=idempotency_key,
+                    content_hash=content_hash,
+                    attempt=attempt,
+                    request=request,
+                    attempt_id=attempt_id,
+                    audit_idempotency_key=f"proactive:{idempotency_key}",
+                )
+                connection.commit()
+                return StoredProactiveIngress("CREATED", attempt)
             except sqlite3.Error as error:
                 connection.rollback()
                 raise AuditStoreUnavailable from error
@@ -2598,6 +3180,450 @@ class ReactiveInvestigationMixin:
                 "FROZEN_PROMISE_TEMPORALLY_INVALID",
             },
             "recovery_action": _RECOVERY_ACTIONS[primary_code],
+            "received_at": _timestamp(received_at),
+            "investigation_request_id": (
+                request["investigation_request_id"] if request is not None else None
+            ),
+            "investigation_request": request,
+            "audit": {"occurrence_id": "pending", "event_seq": 0},
+        }
+        return attempt, request
+
+    def _normalise_proactive_proposal(
+        self,
+        proposal: ProactiveProposalRequest,
+        *,
+        received_at: datetime,
+        revision_conflict: bool,
+        workspace_id: str,
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        source = proposal.source
+        findings: list[dict[str, Any]] = []
+        schema_invalid = False
+        integrity_invalid = False
+
+        if proposal.schema_version != PROACTIVE_PROPOSAL_SCHEMA_VERSION or (
+            source.schema_version != TRIGGER_SOURCE_SCHEMA_VERSION
+        ) or proposal.trigger_mode != "proactive":
+            schema_invalid = True
+            findings.append(
+                _finding(
+                    code="PROACTIVE_SCHEMA_UNSUPPORTED",
+                    severity="error",
+                    disposition="reject",
+                    affected_refs=[],
+                    message="The proactive proposal schema or trigger mode is not supported by this Core release.",
+                    remediation="Use the versioned bundled Proactive Proposal contract.",
+                    phase=1,
+                )
+            )
+
+        if (
+            not _SHA256_PATTERN.fullmatch(source.source_payload_sha256)
+            or not source.protected_source_locator.startswith(
+                "bundled://proactive-proposal/"
+            )
+            or source.source_system != PROACTIVE_SOURCE_SYSTEM
+            or not _matches_bundled_proactive_proposal(proposal)
+        ):
+            integrity_invalid = True
+            findings.append(
+                _finding(
+                    code="PROACTIVE_INTEGRITY_FAILED",
+                    severity="error",
+                    disposition="reject",
+                    affected_refs=[],
+                    message="The protected Proactive Proposal envelope failed its integrity check.",
+                    remediation="Use an unmodified bundled proposal and retry.",
+                    phase=2,
+                )
+            )
+
+        if revision_conflict:
+            findings.append(
+                _finding(
+                    code="PROACTIVE_REVISION_CONFLICT",
+                    severity="error",
+                    disposition="reject",
+                    affected_refs=[],
+                    message="The proposal identity and revision already carry different protected content.",
+                    remediation="Submit a new immutable proposal revision.",
+                    phase=3,
+                )
+            )
+
+        lineage: dict[str, Any] | None = None
+        mapping_refs: list[str] = []
+        field_lineage_refs = sorted(
+            {
+                f"proactive-field:{field.lineage_ref}"
+                for field in (
+                    proposal.proposed_supplier_ref,
+                    proposal.target_milestone_kind,
+                    proposal.proposed_original_promise,
+                    proposal.decision_at,
+                    *proposal.adjustment_inputs.values(),
+                )
+                if field.lineage_ref is not None
+            }
+        )
+        dataset_id = ""
+        if not schema_invalid and not integrity_invalid and not revision_conflict:
+            from .ingestion import DatasetVersionUnavailable
+
+            try:
+                if not self._is_bundled_dataset_version(proposal.dataset_version_id):
+                    raise DatasetVersionUnavailable
+                lineage = self.get_lineage(proposal.dataset_version_id)
+            except DatasetVersionUnavailable:
+                findings.append(
+                    _finding(
+                        code="PROACTIVE_DATASET_UNAVAILABLE",
+                        severity="error",
+                        disposition="reject",
+                        affected_refs=[proposal.dataset_version_id],
+                        message="The frozen Dataset Version is not an authorized bundled Core version.",
+                        remediation="Select one frozen bundled Dataset Version and retry.",
+                        phase=5,
+                    )
+                )
+            if lineage is not None:
+                dataset = lineage.get("dataset_version", {})
+                dataset_id = str(dataset.get("dataset_id", ""))
+                mapping_refs = _lineage_mapping_refs(lineage)
+
+        decision = _normalise_proactive_temporal(proposal.decision_at)
+        supplier_source = _proactive_source_reference(
+            proposal.proposed_supplier_ref,
+            dataset_id=dataset_id,
+            mapping_manifest=(lineage or {}).get("mapping_manifest", {}),
+        )
+        target = _proactive_target_field(proposal.target_milestone_kind)
+        promise = _normalise_proactive_temporal(proposal.proposed_original_promise)
+        if promise.comparable is not None and decision.comparable is not None:
+            promise_order = _compare(promise, decision)
+            if promise_order == -1:
+                promise = _Temporal(_field("invalid"), None)
+        preview_subject_digest = _sha256(
+            {
+                "source_system": source.source_system,
+                "proposal_id": proposal.proposal_id,
+                "proposal_revision": proposal.proposal_revision,
+                "dataset_version_id": proposal.dataset_version_id,
+                "proposed_supplier_ref": proposal.proposed_supplier_ref.model_dump(
+                    mode="json"
+                ),
+                "resolved_supplier_id": supplier_source,
+                "decision_at": proposal.decision_at.model_dump(mode="json"),
+                "target_milestone_kind": proposal.target_milestone_kind.model_dump(
+                    mode="json"
+                ),
+                "proposed_original_promise": proposal.proposed_original_promise.model_dump(
+                    mode="json"
+                ),
+                "adjustment_inputs": {
+                    name: field.model_dump(mode="json")
+                    for name, field in sorted(proposal.adjustment_inputs.items())
+                },
+            }
+        )
+
+        adjustment_fields: dict[str, Any] = {}
+        subject_adjustments: dict[str, dict[str, Any]] = {}
+        registered_adjustments = (
+            "material_class",
+            "complexity_class",
+            "quantity",
+            "value",
+            "project_id",
+            "project_phase",
+            "urgency_class",
+            "geography_code",
+            "contract_form",
+        )
+        for name in registered_adjustments:
+            field = proposal.adjustment_inputs.get(name)
+            if field is None:
+                subject_adjustments[name] = {"state": "missing"}
+                adjustment_fields[name] = _field("missing")
+                continue
+            subject_adjustments[name] = field.model_dump(mode="json")
+            adjustment_fields[name] = _proactive_projection_field(field, decision)
+        if set(proposal.adjustment_inputs).difference(registered_adjustments):
+            findings.append(
+                _finding(
+                    code="PROACTIVE_SCHEMA_UNSUPPORTED",
+                    severity="error",
+                    disposition="reject",
+                    affected_refs=sorted(
+                        set(proposal.adjustment_inputs).difference(registered_adjustments)
+                    ),
+                    message="The proposal contains an adjustment input outside the registered subject set.",
+                    remediation="Submit only the versioned registered adjustment inputs.",
+                    phase=1,
+                )
+            )
+
+        resolved_supplier_field = _proactive_projection_field(
+            proposal.proposed_supplier_ref,
+            decision,
+            value=supplier_source.get("value"),
+            state=supplier_source.get("state"),
+        )
+        target_field = _proactive_projection_field(
+            proposal.target_milestone_kind,
+            decision,
+            value=target.get("value"),
+            state=target.get("state"),
+        )
+        original_promise_field = _proactive_projection_field(
+            proposal.proposed_original_promise,
+            decision,
+            temporal=promise,
+        )
+
+        selected_ids: list[str] = []
+        load_snapshot_error: str | None = None
+        duration_basis: str | None = None
+        duration_basis_evidence: dict[str, Any] = {
+            "counts": {},
+            "identity_hashes": {},
+        }
+        configuration = ENGINE_CONFIGURATION_REGISTRY.get(ENGINE_CONFIGURATION_REF)
+        if lineage is not None and configuration is not None:
+            duration_basis_evidence = _duration_basis_at_cutoff(
+                configuration,
+                dataset_version_id=proposal.dataset_version_id,
+            )
+            duration_basis = duration_basis_evidence["basis"]
+            if (
+                decision.comparable is not None
+                and resolved_supplier_field.get("state") == "present"
+                and target_field.get("state") == "present"
+            ):
+                selected_ids, load_snapshot_error = _selected_order_line_ids(
+                    lineage,
+                    subject_id=preview_subject_digest,
+                    subject_supplier_id=str(resolved_supplier_field.get("value")),
+                    decision_cutoff=decision,
+                    target_milestone_kind=str(target_field.get("value")),
+                )
+                if load_snapshot_error is not None:
+                    findings.append(
+                        _finding(
+                            code=load_snapshot_error,
+                            severity="error",
+                            disposition="reject",
+                            affected_refs=[preview_subject_digest],
+                            message="The point-in-time supplier history contains an unresolved membership fact.",
+                            remediation="Repair the frozen canonical clocks and retry the proposal.",
+                            phase=9,
+                        )
+                    )
+
+        if CAUSAL_QUESTION_VERSION not in CAUSAL_QUESTION_REGISTRY:
+            findings.append(
+                _finding(
+                    code="CAUSAL_QUESTION_VERSION_UNAVAILABLE",
+                    severity="error",
+                    disposition="reject",
+                    affected_refs=[],
+                    message="The fixed causal question version is unavailable in this Core release.",
+                    remediation="Restore the versioned Core causal-question configuration.",
+                    phase=9,
+                )
+            )
+        if ENGINE_CONFIGURATION_REF not in ENGINE_CONFIGURATION_REGISTRY:
+            findings.append(
+                _finding(
+                    code="ENGINE_CONFIGURATION_UNAVAILABLE",
+                    severity="error",
+                    disposition="reject",
+                    affected_refs=[],
+                    message="The fixed causal engine configuration is unavailable in this Core release.",
+                    remediation="Restore the versioned Core engine configuration.",
+                    phase=9,
+                )
+            )
+        if lineage is not None and configuration is not None and duration_basis is None:
+            findings.append(
+                _finding(
+                    code="SLIPPAGE_DURATION_BASIS_MIXED",
+                    severity="error",
+                    disposition="reject",
+                    affected_refs=[
+                        f"{basis}:{duration_basis_evidence['counts'][basis]}:{duration_basis_evidence['identity_hashes'][basis]}"
+                        for basis in sorted(duration_basis_evidence["counts"])
+                    ],
+                    message="Released target rows do not share one canonical slippage duration basis.",
+                    remediation="Wait for a released Dataset Version with one duration basis before creating an engine request.",
+                    phase=9,
+                )
+            )
+
+        findings.sort(key=lambda finding: (finding["_phase"], finding["_code_order"]))
+        rejecting = [finding for finding in findings if _is_rejection(finding)]
+        cleaned_findings = [_clean_finding(finding) for finding in findings]
+        primary_code = (
+            rejecting[0]["code"] if rejecting else "PROACTIVE_ACCEPTED"
+        )
+        status = (
+            "rejected"
+            if rejecting
+            else "accepted_with_warning"
+            if findings
+            else "accepted"
+        )
+        request: dict[str, Any] | None = None
+        if (
+            not rejecting
+            and lineage is not None
+            and duration_basis is not None
+            and configuration is not None
+        ):
+            projection = {
+                "causal_input_schema_version": CAUSAL_INPUT_SCHEMA_VERSION,
+                "dataset_version_id": proposal.dataset_version_id,
+                "subject_analytical_values": {
+                    "supplier_id": resolved_supplier_field,
+                    "original_promise": original_promise_field,
+                    "adjustment_inputs": adjustment_fields,
+                    "subject_exclusion_identity": preview_subject_digest,
+                },
+                "decision_cutoff": decision.field,
+                "observation_cutoff": decision.field,
+                "target_milestone_kind": target_field,
+                "canonical_slippage_duration_basis": duration_basis,
+                "causal_question_version": CAUSAL_QUESTION_VERSION,
+                "engine_configuration_ref": ENGINE_CONFIGURATION_REF,
+                "estimator_window_ref": _window_ref(
+                    selector_version=configuration["estimator_window_selector_version"],
+                    selected_ids=selected_ids,
+                    observation_cutoff=decision,
+                    subject_id=preview_subject_digest,
+                    remove_subject=False,
+                ),
+                "history_lookback_ref": _window_ref(
+                    selector_version=configuration["history_lookback_selector_version"],
+                    selected_ids=selected_ids,
+                    observation_cutoff=decision,
+                    subject_id=preview_subject_digest,
+                    remove_subject=False,
+                ),
+                "historical_population_digest": _historical_population_digest(
+                    lineage,
+                    selected_ids,
+                    decision_cutoff=decision,
+                ),
+                "analytical_fact_lineage_refs": sorted(
+                    {*mapping_refs, *field_lineage_refs}
+                ),
+            }
+            causal_input_digest = _sha256(projection)
+            subject = {
+                "kind": "proactive_preview",
+                "preview_subject_digest": preview_subject_digest,
+                "proposal_id": proposal.proposal_id,
+                "proposal_revision": proposal.proposal_revision,
+                "supplier_id": _proactive_subject_input(
+                    proposal.proposed_supplier_ref,
+                    resolved_supplier_field,
+                ),
+                "target_milestone_kind": _proactive_subject_input(
+                    proposal.target_milestone_kind,
+                    target,
+                ),
+                "original_promise": _proactive_subject_input(
+                    proposal.proposed_original_promise,
+                    promise.field,
+                    temporal=True,
+                ),
+                "adjustment_inputs": {
+                    name: _proactive_subject_input(
+                        proposal.adjustment_inputs[name],
+                        _field(
+                            proposal.adjustment_inputs[name].state,
+                            proposal.adjustment_inputs[name].value,
+                        ),
+                    )
+                    if name in proposal.adjustment_inputs
+                    else {"state": "missing"}
+                    for name in registered_adjustments
+                },
+            }
+            request = {
+                "investigation_request_id": "ir_" + uuid5(
+                    NAMESPACE_URL,
+                    f"causal-delay-copilot:investigation:{workspace_id}:{source.source_system}:{proposal.proposal_id}:{proposal.proposal_revision}:{causal_input_digest}",
+                ).hex,
+                "schema_version": "investigation-request.v1",
+                "trigger_mode": "proactive",
+                "ingress_ref": {
+                    "kind": "ProactiveProposal",
+                    "source_system": source.source_system,
+                    "proposal_id": proposal.proposal_id,
+                    "proposal_revision": proposal.proposal_revision,
+                    "source_payload_sha256": source.source_payload_sha256,
+                },
+                "rerun_of_request_id": _field("missing"),
+                "dataset_version_id": proposal.dataset_version_id,
+                "subject": subject,
+                "decision_cutoff": decision.field,
+                "decision_cutoff_source": "proactive_decision",
+                "observation_cutoff": decision.field,
+                "target_milestone_kind": target_field,
+                "causal_question_version": CAUSAL_QUESTION_VERSION,
+                "engine_configuration_ref": ENGINE_CONFIGURATION_REF,
+                "ingress_validation_refs": [
+                    finding["finding_id"] for finding in cleaned_findings
+                ],
+                "provenance_refs": [
+                    f"proactive-proposal:{source.source_system}:{proposal.proposal_id}:{proposal.proposal_revision}",
+                    *mapping_refs,
+                    *field_lineage_refs,
+                ],
+                "prediction_metadata": _field("not_applicable"),
+                "accepted_at": _timestamp(received_at),
+                "causal_engine_input": projection,
+                "causal_input_digest": causal_input_digest,
+            }
+            request["content_hash"] = _sha256(
+                {
+                    key: value
+                    for key, value in request.items()
+                    if key not in {"accepted_at", "content_hash"}
+                }
+            )
+
+        attempt = {
+            "attempt_id": "attempt_pending",
+            "status": status,
+            "scope": "proactive_ingress",
+            "source_system": source.source_system,
+            "proposal_id": proposal.proposal_id,
+            "proposal_revision": proposal.proposal_revision,
+            "source_payload_sha256": source.source_payload_sha256,
+            "primary_code": primary_code,
+            "findings": cleaned_findings,
+            "evidence_refs": sorted(
+                set(
+                    request["provenance_refs"]
+                    if request is not None
+                    else [*mapping_refs, *field_lineage_refs]
+                )
+            ),
+            "retryable": primary_code
+            in {
+                "PROACTIVE_INTEGRITY_FAILED",
+                "PROACTIVE_DATASET_UNAVAILABLE",
+                "COMMITMENT_CUTOFF_UNUSABLE",
+                "LOAD_SNAPSHOT_UNRESOLVABLE",
+                "SLIPPAGE_DURATION_BASIS_MIXED",
+            },
+            "recovery_action": _RECOVERY_ACTIONS.get(
+                primary_code,
+                "RESTORE_VERSIONED_CORE_CONFIGURATION",
+            ),
             "received_at": _timestamp(received_at),
             "investigation_request_id": (
                 request["investigation_request_id"] if request is not None else None

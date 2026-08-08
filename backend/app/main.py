@@ -27,6 +27,10 @@ from .contracts import (
     IngestionRunRequest,
     IngestionRunResponse,
     LineageSnapshotResponse,
+    ProactiveInvestigationResponse,
+    ProactiveFixtureRequest,
+    ProactiveProposalListResponse,
+    ProactiveProposalRequest,
     ReactiveInvestigationResponse,
     ReactiveFixtureRequest,
     RiskSignalListResponse,
@@ -45,7 +49,10 @@ from .ingestion import (
     IngestionRejected,
     LineageStore,
 )
-from .risk import RiskSignalFixtureUnavailable
+from .risk import (
+    ProactiveProposalFixtureUnavailable,
+    RiskSignalFixtureUnavailable,
+)
 from .security import apply_public_response_headers
 from .settings import Settings
 from .state import StateRoot
@@ -53,6 +60,8 @@ from .workspace import DEMO_WORKSPACE_COOKIE_NAME, WorkspaceResolution
 
 MAX_REACTIVE_REQUEST_BYTES = 64 * 1024
 MAX_REACTIVE_REQUEST_MESSAGES = 4096
+MAX_PROACTIVE_REQUEST_BYTES = 64 * 1024
+MAX_PROACTIVE_REQUEST_MESSAGES = 4096
 
 
 class ReactiveRequestTooLarge(Exception):
@@ -115,17 +124,30 @@ class ReactiveBodyLimitMiddleware:
             resolution = self.core_store.resolve_workspace(
                 request.cookies.get(DEMO_WORKSPACE_COOKIE_NAME)
             )
-            self.core_store.record_reactive_schema_failure(
-                resolution.snapshot.workspace_id,
-                request_body=f"reactive-body-too-large:{error.observed_bytes}".encode(
-                    "ascii"
-                ),
-            )
+            proactive = scope.get("path") == "/api/investigations/proactive"
+            if proactive:
+                self.core_store.record_proactive_schema_failure(
+                    resolution.snapshot.workspace_id,
+                    request_body=f"proactive-body-too-large:{error.observed_bytes}".encode(
+                        "ascii"
+                    ),
+                )
+            else:
+                self.core_store.record_reactive_schema_failure(
+                    resolution.snapshot.workspace_id,
+                    request_body=f"reactive-body-too-large:{error.observed_bytes}".encode(
+                        "ascii"
+                    ),
+                )
             response = _attach_workspace_cookie(
                 _error_response(
                     413,
-                    "RISK_SIGNAL_SCHEMA_UNSUPPORTED",
-                    "USE_SUPPORTED_RISK_SIGNAL_SCHEMA",
+                    "PROACTIVE_SCHEMA_UNSUPPORTED"
+                    if proactive
+                    else "RISK_SIGNAL_SCHEMA_UNSUPPORTED",
+                    "USE_SUPPORTED_PROACTIVE_PROPOSAL_SCHEMA"
+                    if proactive
+                    else "USE_SUPPORTED_RISK_SIGNAL_SCHEMA",
                 ),
                 resolution,
                 secure=self.secure_cookie,
@@ -145,11 +167,22 @@ class ReactiveBodyLimitMiddleware:
         await response(scope, receive, send)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope.get("type") != "http" or scope.get("path") != (
-            "/api/investigations/reactive"
-        ):
+        path = scope.get("path")
+        if scope.get("type") != "http" or path not in {
+            "/api/investigations/reactive",
+            "/api/investigations/proactive",
+        }:
             await self.app(scope, receive, send)
             return
+        proactive = path == "/api/investigations/proactive"
+        max_bytes = (
+            MAX_PROACTIVE_REQUEST_BYTES if proactive else MAX_REACTIVE_REQUEST_BYTES
+        )
+        max_messages = (
+            MAX_PROACTIVE_REQUEST_MESSAGES
+            if proactive
+            else MAX_REACTIVE_REQUEST_MESSAGES
+        )
 
         content_length = next(
             (
@@ -164,7 +197,7 @@ class ReactiveBodyLimitMiddleware:
                 declared_length = int(content_length)
             except (TypeError, ValueError):
                 declared_length = 0
-            if declared_length > MAX_REACTIVE_REQUEST_BYTES:
+            if declared_length > max_bytes:
                 await self._reject(
                     scope,
                     receive,
@@ -180,20 +213,20 @@ class ReactiveBodyLimitMiddleware:
         while True:
             message = await receive()
             received_messages += 1
-            if received_messages > MAX_REACTIVE_REQUEST_MESSAGES:
+            if received_messages > max_messages:
                 await self._reject(
                     scope,
                     receive,
                     send,
                     ReactiveRequestTooLarge(
-                        max(observed_bytes, MAX_REACTIVE_REQUEST_BYTES + 1)
+                        max(observed_bytes, max_bytes + 1)
                     ),
                 )
                 return
             if message.get("type") == "http.request":
                 body = message.get("body", b"")
                 observed_bytes += len(body) if isinstance(body, bytes) else 0
-                if observed_bytes > MAX_REACTIVE_REQUEST_BYTES:
+                if observed_bytes > max_bytes:
                     await self._reject(
                         scope,
                         receive,
@@ -257,18 +290,31 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         request: Request,
         __: RequestValidationError,
     ) -> JSONResponse:
-        if request.url.path == "/api/investigations/reactive":
+        if request.url.path in {
+            "/api/investigations/reactive",
+            "/api/investigations/proactive",
+        }:
             try:
                 resolution = resolve_workspace(request)
-                core_store.record_reactive_schema_failure(
-                    resolution.snapshot.workspace_id,
-                    request_body=await request.body(),
-                )
+                if request.url.path == "/api/investigations/proactive":
+                    core_store.record_proactive_schema_failure(
+                        resolution.snapshot.workspace_id,
+                        request_body=await request.body(),
+                    )
+                    code = "PROACTIVE_SCHEMA_UNSUPPORTED"
+                    recovery = "USE_SUPPORTED_PROACTIVE_PROPOSAL_SCHEMA"
+                else:
+                    core_store.record_reactive_schema_failure(
+                        resolution.snapshot.workspace_id,
+                        request_body=await request.body(),
+                    )
+                    code = "RISK_SIGNAL_SCHEMA_UNSUPPORTED"
+                    recovery = "USE_SUPPORTED_RISK_SIGNAL_SCHEMA"
                 return attach_workspace_cookie(
                     _error_response(
                         422,
-                        "RISK_SIGNAL_SCHEMA_UNSUPPORTED",
-                        "USE_SUPPORTED_RISK_SIGNAL_SCHEMA",
+                        code,
+                        recovery,
                     ),
                     resolution,
                 )
@@ -350,6 +396,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def handle_risk_signal_fixture_unavailable(
         _: Request,
         __: RiskSignalFixtureUnavailable,
+    ) -> JSONResponse:
+        return _error_response(
+            404,
+            "DATASET_VERSION_UNAVAILABLE",
+            "SELECT_A_PUBLISHED_DATASET_VERSION_AND_RETRY",
+        )
+
+    @app.exception_handler(ProactiveProposalFixtureUnavailable)
+    async def handle_proactive_proposal_fixture_unavailable(
+        _: Request,
+        __: ProactiveProposalFixtureUnavailable,
     ) -> JSONResponse:
         return _error_response(
             404,
@@ -639,6 +696,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         return JSONResponse(status_code=200, content=response.model_dump(mode="json"))
 
+    @app.get(
+        "/api/proactive-proposals",
+        response_model=ProactiveProposalListResponse,
+    )
+    async def list_proactive_proposals(dataset_version_id: str) -> JSONResponse:
+        response = ProactiveProposalListResponse(
+            items=core_store.list_proactive_proposal_fixtures(dataset_version_id)
+        )
+        return JSONResponse(status_code=200, content=response.model_dump(mode="json"))
+
     @app.post(
         "/api/investigations/reactive/fixtures",
         response_model=ReactiveInvestigationResponse,
@@ -681,6 +748,59 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             resolution.snapshot.workspace_id,
         )
         response = ReactiveInvestigationResponse(
+            result=stored.result,
+            attempt=stored.attempt,
+        )
+        return attach_workspace_cookie(
+            JSONResponse(
+                status_code=200 if stored.result == "IDEMPOTENT_REPLAY" else 201,
+                content=response.model_dump(mode="json"),
+            ),
+            resolution,
+        )
+
+    @app.post(
+        "/api/investigations/proactive/fixtures",
+        response_model=ProactiveInvestigationResponse,
+        status_code=201,
+    )
+    async def create_proactive_fixture_investigation(
+        request_context: Request,
+        request: ProactiveFixtureRequest,
+    ) -> JSONResponse:
+        resolution = resolve_workspace(request_context)
+        stored = core_store.create_proactive_fixture_investigation(
+            request.fixture_id,
+            request.dataset_version_id,
+            resolution.snapshot.workspace_id,
+        )
+        response = ProactiveInvestigationResponse(
+            result=stored.result,
+            attempt=stored.attempt,
+        )
+        return attach_workspace_cookie(
+            JSONResponse(
+                status_code=200 if stored.result == "IDEMPOTENT_REPLAY" else 201,
+                content=response.model_dump(mode="json"),
+            ),
+            resolution,
+        )
+
+    @app.post(
+        "/api/investigations/proactive",
+        response_model=ProactiveInvestigationResponse,
+        status_code=201,
+    )
+    async def create_proactive_investigation(
+        request_context: Request,
+        request: ProactiveProposalRequest,
+    ) -> JSONResponse:
+        resolution = resolve_workspace(request_context)
+        stored = core_store.create_proactive_investigation(
+            request,
+            resolution.snapshot.workspace_id,
+        )
+        response = ProactiveInvestigationResponse(
             result=stored.result,
             attempt=stored.attempt,
         )

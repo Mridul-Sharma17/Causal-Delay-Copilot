@@ -3,11 +3,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   getDatasetLineage,
   getHealth,
+  getProactiveProposals,
   getRiskSignals,
   getWorkspace,
   importHeroDataset,
   recordBootOccurrence,
   submitReactiveInvestigation,
+  submitProactiveInvestigation,
 } from "./api";
 import {
   auditOutcomeCode,
@@ -18,6 +20,8 @@ import {
   type LineageRecord,
   type LineageSnapshot,
   type PredictiveRiskStatus,
+  type ProactiveIngressAttempt,
+  type ProactiveProposalFixture,
   type ReactiveIngressAttempt,
   type RiskSignalFixture,
 } from "./contracts";
@@ -197,6 +201,10 @@ function App() {
   const [riskFailureAttempt, setRiskFailureAttempt] =
     useState<ReactiveIngressAttempt | null>(null);
   const [riskFailureState, setRiskFailureState] = useState<RiskState>("pending");
+  const [proactiveState, setProactiveState] = useState<RiskState>("pending");
+  const [proactiveFixtures, setProactiveFixtures] = useState<ProactiveProposalFixture[]>([]);
+  const [proactiveAttempt, setProactiveAttempt] =
+    useState<ProactiveIngressAttempt | null>(null);
   const bootKey = useRef<string | null>(null);
 
   const loadHealth = useCallback(async () => {
@@ -216,6 +224,9 @@ function App() {
       setRiskAttempt(null);
       setRiskFailureAttempt(null);
       setRiskFailureState("pending");
+      setProactiveState("pending");
+      setProactiveFixtures([]);
+      setProactiveAttempt(null);
 
       try {
         const nextWorkspace = await getWorkspace();
@@ -271,8 +282,31 @@ function App() {
             setRiskAttempt(attempt.attempt);
             setRiskState("ready");
           }
+          setProactiveState("loading");
+          try {
+            const availableProposals = await getProactiveProposals(
+              imported.dataset_version_id,
+            );
+            setProactiveFixtures(availableProposals.items);
+            const proposalFixture = availableProposals.items.find(
+              (item) => item.fixture_id === "hero-proactive-proposal-v1",
+            );
+            if (proposalFixture === undefined) {
+              setProactiveState("failed");
+            } else {
+              const attempt = await submitProactiveInvestigation(
+                imported.dataset_version_id,
+                proposalFixture.fixture_id,
+              );
+              setProactiveAttempt(attempt.attempt);
+              setProactiveState("ready");
+            }
+          } catch {
+            setProactiveState("failed");
+          }
         } catch {
           setRiskState("failed");
+          setProactiveState("failed");
         }
       } catch {
         setLineage(null);
@@ -329,6 +363,13 @@ function App() {
           : "Core ready";
   const acceptedRiskFixture = preferredRiskFixture(riskFixtures);
   const predictiveArtifactsVerified = hasVerifiedPredictiveArtifacts(acceptedRiskFixture);
+  const proactiveRequest = proactiveAttempt?.investigation_request ?? null;
+  const proactiveSubject =
+    proactiveRequest !== null &&
+    "kind" in proactiveRequest.subject &&
+    proactiveRequest.subject.kind === "proactive_preview"
+      ? proactiveRequest.subject
+      : null;
 
   return (
     <main className="core-shell">
@@ -511,7 +552,12 @@ function App() {
                 </div>
                 <div>
                   <dt>Reactive subject</dt>
-                  <dd>{riskAttempt.investigation_request?.subject.order_line_id ?? "Unavailable"}</dd>
+                  <dd>
+                    {riskAttempt.investigation_request !== null &&
+                    "order_line_id" in riskAttempt.investigation_request.subject
+                      ? riskAttempt.investigation_request.subject.order_line_id
+                      : "Unavailable"}
+                  </dd>
                 </div>
                 <div>
                   <dt>Causal decision cutoff</dt>
@@ -583,6 +629,99 @@ function App() {
                   <span>No Investigation Request was created.</span>
                 </div>
               )}
+            </article>
+          )}
+
+          {proactiveState === "loading" && (
+            <p className="supporting-copy" role="status">
+              Loading the bundled proactive proposal preview.
+            </p>
+          )}
+          {proactiveState === "failed" && (
+            <p className="lineage-warning" role="status">
+              Proactive proposal intake is unavailable. No cached proposal was substituted.
+            </p>
+          )}
+          {proactiveState === "ready" && proactiveAttempt !== null && (
+            <article className="risk-attempt proactive-attempt">
+              <div className="record-heading">
+                <div>
+                  <p className="eyebrow">
+                    {proactiveFixtures.find(
+                      (item) =>
+                        item.proposal.proposal_id === proactiveAttempt.proposal_id &&
+                        item.proposal.proposal_revision === proactiveAttempt.proposal_revision,
+                    )?.label ?? "Proactive proposal"}
+                  </p>
+                  <h3>
+                    {proactiveAttempt.status === "rejected"
+                      ? "Proactive preview rejected"
+                      : proactiveAttempt.status === "duplicate"
+                        ? "Existing proactive preview reused"
+                        : proactiveAttempt.status === "accepted_with_warning"
+                          ? "Proactive preview accepted with warning"
+                          : "Proactive preview accepted"}
+                  </h3>
+                </div>
+                <span>PROACTIVE · PREVIEW-ONLY</span>
+              </div>
+
+              <p className="supporting-copy">
+                This pre-award proposal is a preview subject. It is not a committed Order Line
+                and cannot create actual milestone or post-commitment history.
+              </p>
+
+              <dl className="risk-facts">
+                <div>
+                  <dt>Proposal subject</dt>
+                  <dd>
+                    {proactiveAttempt.proposal_id} · {proactiveAttempt.proposal_revision}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Supplier preview</dt>
+                  <dd>
+                    {proactiveSubject === null
+                      ? "Unavailable"
+                      : `${fieldState(proactiveSubject.supplier_id)} · ${formatValue(proactiveSubject.supplier_id.value)}`}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Target milestone</dt>
+                  <dd>
+                    {proactiveSubject === null
+                      ? "Unavailable"
+                      : `${fieldState(proactiveSubject.target_milestone_kind)} · ${formatValue(proactiveSubject.target_milestone_kind.value)}`}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Decision cutoff</dt>
+                  <dd>
+                    {proactiveRequest === null
+                      ? "Unavailable"
+                      : temporalSummary(proactiveRequest.decision_cutoff)}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Observation cutoff</dt>
+                  <dd>
+                    {proactiveRequest === null
+                      ? "Unavailable"
+                      : temporalSummary(proactiveRequest.observation_cutoff)}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Scientific input digest</dt>
+                  <dd>
+                    <code>{proactiveRequest?.causal_input_digest ?? "Unavailable"}</code>
+                  </dd>
+                </div>
+              </dl>
+
+              <p className="risk-note">
+                No canonical Order Line, commitment event, actual milestone, or post-commitment
+                history was created.
+              </p>
             </article>
           )}
         </section>

@@ -77,6 +77,7 @@ class AuditOccurrenceViewResponse(BaseModel):
         "BOOT_HEALTH_CHECK",
         "LINEAGE_SNAPSHOT_VIEW",
         "REACTIVE_INGRESS",
+        "PROACTIVE_INGRESS",
     ]
     outcome_code: Literal[
         "CORE_READY",
@@ -96,6 +97,12 @@ class AuditOccurrenceViewResponse(BaseModel):
         "RISK_SIGNAL_CONTEXT_CONFLICT",
         "RISK_SIGNAL_CONTEXT_UNVERIFIABLE",
         "RISK_SIGNAL_MODE_MISMATCH",
+        "PROACTIVE_ACCEPTED",
+        "PROACTIVE_SCHEMA_UNSUPPORTED",
+        "PROACTIVE_INTEGRITY_FAILED",
+        "PROACTIVE_REVISION_CONFLICT",
+        "PROACTIVE_DATASET_UNAVAILABLE",
+        "PROACTIVE_SUBJECT_INPUT_UNUSABLE",
         "CAUSAL_QUESTION_VERSION_UNAVAILABLE",
         "ENGINE_CONFIGURATION_UNAVAILABLE",
         "SLIPPAGE_DURATION_BASIS_MIXED",
@@ -624,6 +631,32 @@ class RiskSignalRequest(BaseModel):
     advisory_context: RiskSignalFieldValueRequest | None = None
 
 
+class ProactiveSubjectFieldRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    state: ValueState
+    value: Any | None = None
+    known_at: TemporalValueRequest | None = None
+    lineage_ref: str | None = Field(default=None, min_length=1, max_length=256)
+
+
+class ProactiveProposalRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: str = Field(min_length=1, max_length=64)
+    trigger_mode: Literal["reactive", "proactive"] = "proactive"
+    source: TriggerSourceEnvelopeRequest
+    proposal_id: str = Field(min_length=1, max_length=128)
+    proposal_revision: str = Field(min_length=1, max_length=128)
+    dataset_version_id: str = Field(min_length=1, max_length=256)
+    proposed_supplier_ref: ProactiveSubjectFieldRequest
+    target_milestone_kind: ProactiveSubjectFieldRequest
+    proposed_original_promise: ProactiveSubjectFieldRequest
+    adjustment_inputs: dict[str, ProactiveSubjectFieldRequest]
+    decision_at: ProactiveSubjectFieldRequest
+    requester_ref: str = Field(min_length=1, max_length=256)
+
+
 class RiskSignalSourcePreviewResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -693,6 +726,56 @@ class ReactiveFixtureRequest(BaseModel):
     fixture_id: str = Field(min_length=1, max_length=128)
 
 
+class ProactiveProposalSourcePreviewResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["trigger-source-envelope.v1"]
+    source_system: str
+    data_classification: Literal[
+        "generated",
+        "public",
+        "restricted",
+        "confidential",
+    ]
+
+
+class ProactiveProposalPreviewResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["proactive-proposal.v1"]
+    trigger_mode: Literal["proactive"]
+    source: ProactiveProposalSourcePreviewResponse
+    proposal_id: str
+    proposal_revision: str
+    dataset_version_id: str
+    proposed_supplier_ref: ProactiveSubjectFieldRequest
+    target_milestone_kind: ProactiveSubjectFieldRequest
+    proposed_original_promise: ProactiveSubjectFieldRequest
+    adjustment_inputs: dict[str, ProactiveSubjectFieldRequest]
+    decision_at: ProactiveSubjectFieldRequest
+
+
+class ProactiveProposalFixtureResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    fixture_id: str
+    label: str
+    proposal: ProactiveProposalPreviewResponse
+
+
+class ProactiveProposalListResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[ProactiveProposalFixtureResponse]
+
+
+class ProactiveFixtureRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    dataset_version_id: str = Field(min_length=1, max_length=256)
+    fixture_id: str = Field(min_length=1, max_length=128)
+
+
 class IngressFindingResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -723,10 +806,42 @@ class RiskSignalIngressReferenceResponse(BaseModel):
     source_order_line_ref: SourceEntityReferenceRequest
 
 
+class ProactiveProposalIngressReferenceResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["ProactiveProposal"]
+    source_system: str
+    proposal_id: str
+    proposal_revision: str
+    source_payload_sha256: str
+
+
 class InvestigationSubjectResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     order_line_id: str
+
+
+class ProactiveSubjectInputResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    state: ValueState
+    value: Any | None = None
+    known_at: TemporalValueRequest | None = None
+    lineage_ref: str | None = None
+
+
+class ProactiveInvestigationSubjectResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["proactive_preview"]
+    preview_subject_digest: str
+    proposal_id: str
+    proposal_revision: str
+    supplier_id: ProactiveSubjectInputResponse
+    target_milestone_kind: ProactiveSubjectInputResponse
+    original_promise: ProactiveSubjectInputResponse
+    adjustment_inputs: dict[str, ProactiveSubjectInputResponse]
 
 
 class CausalWindowBoundsResponse(BaseModel):
@@ -790,10 +905,10 @@ class InvestigationRequestResponse(BaseModel):
     investigation_request_id: str
     schema_version: Literal["investigation-request.v1"]
     trigger_mode: Literal["reactive", "proactive"]
-    ingress_ref: RiskSignalIngressReferenceResponse
+    ingress_ref: RiskSignalIngressReferenceResponse | ProactiveProposalIngressReferenceResponse
     rerun_of_request_id: FieldValueResponse
     dataset_version_id: str
-    subject: InvestigationSubjectResponse
+    subject: InvestigationSubjectResponse | ProactiveInvestigationSubjectResponse
     decision_cutoff: TemporalFieldResponse
     decision_cutoff_source: Literal["canonical_commitment", "proactive_decision"]
     observation_cutoff: TemporalFieldResponse
@@ -835,3 +950,31 @@ class ReactiveInvestigationResponse(BaseModel):
 
     result: Literal["CREATED", "IDEMPOTENT_REPLAY"]
     attempt: ReactiveIngressAttemptResponse
+
+
+class ProactiveIngressAttemptResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    attempt_id: str
+    status: Literal["accepted", "duplicate", "rejected", "accepted_with_warning"]
+    scope: Literal["proactive_ingress"]
+    source_system: str
+    proposal_id: str
+    proposal_revision: str
+    source_payload_sha256: str
+    primary_code: str
+    findings: list[IngressFindingResponse]
+    evidence_refs: list[str]
+    retryable: bool
+    recovery_action: str
+    received_at: datetime
+    investigation_request_id: str | None
+    investigation_request: InvestigationRequestResponse | None
+    audit: IngressAuditBindingResponse
+
+
+class ProactiveInvestigationResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    result: Literal["CREATED", "IDEMPOTENT_REPLAY"]
+    attempt: ProactiveIngressAttemptResponse

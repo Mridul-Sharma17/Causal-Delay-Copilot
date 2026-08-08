@@ -335,6 +335,112 @@ const rejectedReactiveAttemptResponse = {
   },
 };
 
+const proactiveProposalResponse = {
+  items: [
+    {
+      fixture_id: "hero-proactive-proposal-v1",
+      label: "Bundled proactive proposal preview",
+      proposal: {
+        schema_version: "proactive-proposal.v1",
+        trigger_mode: "proactive",
+        source: {
+          schema_version: "trigger-source-envelope.v1",
+          source_system: "bundled-pre-award-hook",
+          data_classification: "generated",
+        },
+        proposal_id: "hero-proposal-001",
+        proposal_revision: "v1",
+        dataset_version_id: "sha256:hero-v1",
+        proposed_supplier_ref: { state: "present", value: "supplier-1" },
+        target_milestone_kind: { state: "present", value: "supplier_handoff" },
+        proposed_original_promise: { state: "present", value: "2026-02-15" },
+        adjustment_inputs: {
+          quantity: { state: "present", value: 10 },
+        },
+        decision_at: {
+          state: "present",
+          value: {
+            kind: "instant",
+            source_value: "2026-01-10T09:00:00+05:30",
+            normalized_value: "2026-01-10T03:30:00+00:00",
+            precision: "minute",
+            timezone_status: "known",
+            source_timezone: { state: "present", value: "Asia/Kolkata" },
+          },
+        },
+      },
+    },
+  ],
+};
+
+const proactiveAttemptResponse = {
+  result: "CREATED",
+  attempt: {
+    ...reactiveAttemptResponse.attempt,
+    attempt_id: "proactive-attempt-1",
+    scope: "proactive_ingress",
+    source_system: "bundled-pre-award-hook",
+    proposal_id: "hero-proposal-001",
+    proposal_revision: "v1",
+    source_payload_sha256: "sha256:proactive-proposal",
+    primary_code: "PROACTIVE_ACCEPTED",
+    evidence_refs: ["proactive-proposal:bundled-pre-award-hook:hero-proposal-001:v1"],
+    recovery_action: "CONTINUE_TO_PREVIEW_REVIEW",
+    investigation_request_id: "proactive-ir-1",
+    investigation_request: {
+      ...reactiveAttemptResponse.attempt.investigation_request,
+      investigation_request_id: "proactive-ir-1",
+      trigger_mode: "proactive",
+      ingress_ref: {
+        kind: "ProactiveProposal",
+        source_system: "bundled-pre-award-hook",
+        proposal_id: "hero-proposal-001",
+        proposal_revision: "v1",
+        source_payload_sha256: "sha256:proactive-proposal",
+      },
+      subject: {
+        kind: "proactive_preview",
+        preview_subject_digest: "sha256:preview-subject",
+        proposal_id: "hero-proposal-001",
+        proposal_revision: "v1",
+        supplier_id: { state: "present", value: "supplier-1" },
+        target_milestone_kind: { state: "present", value: "supplier_handoff" },
+        original_promise: { state: "present", value: "2026-02-15" },
+        adjustment_inputs: { quantity: { state: "present", value: 10 } },
+      },
+      decision_cutoff_source: "proactive_decision",
+      prediction_metadata: { state: "not_applicable" },
+      causal_engine_input: {
+        ...reactiveAttemptResponse.attempt.investigation_request.causal_engine_input,
+        subject_analytical_values: {
+          ...reactiveAttemptResponse.attempt.investigation_request.causal_engine_input
+            .subject_analytical_values,
+          subject_exclusion_identity: "proactive-preview:sha256:preview-subject",
+        },
+        estimator_window_ref: {
+          ...reactiveAttemptResponse.attempt.investigation_request.causal_engine_input
+            .estimator_window_ref,
+          subject_removal: {
+            subject_identity: "proactive-preview:sha256:preview-subject",
+            removed: false,
+            post_subject_identity_hash: "sha256:window",
+          },
+        },
+        history_lookback_ref: {
+          ...reactiveAttemptResponse.attempt.investigation_request.causal_engine_input
+            .history_lookback_ref,
+          subject_removal: {
+            subject_identity: "proactive-preview:sha256:preview-subject",
+            removed: false,
+            post_subject_identity_hash: "sha256:window",
+          },
+        },
+      },
+    },
+    audit: { occurrence_id: "occurrence-proactive-1", event_seq: 4 },
+  },
+};
+
 describe("Core health journey", () => {
   afterEach(cleanup);
 
@@ -404,6 +510,13 @@ describe("Core health journey", () => {
         );
       }
 
+      if (typeof input === "string" && input.startsWith("/api/proactive-proposals")) {
+        return new Response(JSON.stringify(proactiveProposalResponse), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+
       if (input === "/api/investigations/reactive/fixtures") {
         expect(init?.method).toBe("POST");
         const submitted = JSON.parse(String(init?.body));
@@ -416,6 +529,19 @@ describe("Core health journey", () => {
         }
         expect(submitted.fixture_id).toBe("hero-reactive-risk-v1");
         return new Response(JSON.stringify(reactiveAttemptResponse), {
+          status: 201,
+          headers: { "content-type": "application/json" },
+        });
+      }
+
+      if (input === "/api/investigations/proactive/fixtures") {
+        expect(init?.method).toBe("POST");
+        const submitted = JSON.parse(String(init?.body));
+        expect(submitted).toEqual({
+          dataset_version_id: "sha256:hero-v1",
+          fixture_id: "hero-proactive-proposal-v1",
+        });
+        return new Response(JSON.stringify(proactiveAttemptResponse), {
           status: 201,
           headers: { "content-type": "application/json" },
         });
@@ -456,6 +582,11 @@ describe("Core health journey", () => {
     expect(screen.getByText("Audit occurrence recorded · event 1")).toBeInTheDocument();
     expect(await screen.findByText("Canonical lineage")).toBeInTheDocument();
     expect(await screen.findByText("Investigation request accepted")).toBeInTheDocument();
+    expect(await screen.findByText("Proactive preview accepted")).toBeInTheDocument();
+    expect(screen.getByText("PROACTIVE · PREVIEW-ONLY")).toBeInTheDocument();
+    expect(
+      screen.getByText(/No canonical Order Line, commitment event, actual milestone/),
+    ).toBeInTheDocument();
     expect(screen.getByText("Prediction score")).toBeInTheDocument();
     expect(screen.getByText("Trigger only; excluded from the scientific digest")).toBeInTheDocument();
     fireEvent.click(
@@ -471,7 +602,7 @@ describe("Core health journey", () => {
       await screen.findByText("Source observation register (3)"),
     ).toBeInTheDocument();
     expect(screen.getAllByText("SOURCE_DUPLICATE_DEDUPED").length).toBeGreaterThan(0);
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(8));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(10));
   });
 
   test("does not expose an internal error when health is unavailable", async () => {

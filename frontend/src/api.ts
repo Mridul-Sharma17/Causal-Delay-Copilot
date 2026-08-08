@@ -4,6 +4,8 @@ import {
   parseDemoWorkspaceResponse,
   parseAuditOccurrenceResponse,
   parseHealthResponse,
+  parseProactiveInvestigationResponse,
+  parseProactiveProposalListResponse,
   parseReactiveInvestigationResponse,
   parseRiskSignalListResponse,
   type AuditOccurrenceRequest,
@@ -12,6 +14,8 @@ import {
   type HealthResponse,
   type IngestionRunResponse,
   type LineageSnapshot,
+  type ProactiveInvestigationResponse,
+  type ProactiveProposalListResponse,
   type ReactiveInvestigationResponse,
   type RiskSignalListResponse,
 } from "./contracts";
@@ -152,5 +156,40 @@ export function submitReactiveInvestigation(
       }),
     },
     parseReactiveInvestigationResponse,
+  );
+}
+
+export function getProactiveProposals(
+  datasetVersionId: string,
+): Promise<ProactiveProposalListResponse> {
+  return requestJson(
+    `/api/proactive-proposals?dataset_version_id=${encodeURIComponent(datasetVersionId)}`,
+    {
+      headers: { accept: "application/json" },
+      credentials: "same-origin",
+    },
+    parseProactiveProposalListResponse,
+  );
+}
+
+export function submitProactiveInvestigation(
+  datasetVersionId: string,
+  fixtureId: string,
+): Promise<ProactiveInvestigationResponse> {
+  return requestJson(
+    "/api/investigations/proactive/fixtures",
+    {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        "content-type": "application/json",
+      },
+      credentials: "same-origin",
+      body: JSON.stringify({
+        dataset_version_id: datasetVersionId,
+        fixture_id: fixtureId,
+      }),
+    },
+    parseProactiveInvestigationResponse,
   );
 }
