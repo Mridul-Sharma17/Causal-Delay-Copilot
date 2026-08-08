@@ -31,6 +31,7 @@ PROPENSITY_SPEC_VERSION = "v1"
 SEED_POLICY_ID = "sha256-coordinate-seeds"
 SEED_POLICY_VERSION = "v1"
 ARTIFACT_CONTRACT_VERSION = "analysis-run-artifacts.v1"
+PROPENSITY_RESULT_SCHEMA_VERSION = "analysis-run-propensity-result.v1"
 VARIANT_ORDER = ("primary", "stricter_threshold", "short_history", "long_history")
 ALLOWED_ROLES = frozenset(
     {"semi_synthetic_hero", "out_of_domain_validation", "rejection_vignette"}
@@ -91,6 +92,19 @@ THREAD_VARIABLES = (
     "VECLIB_MAXIMUM_THREADS",
     "BLIS_NUM_THREADS",
 )
+NUMERIC_ADJUSTMENT_FIELDS = frozenset({"quantity", "value"})
+VALUE_STATES = ("present", "missing", "not_applicable", "unknown", "redacted")
+PROPENSITY_FAILURE_CODES = frozenset(
+    {
+        "ENGINE_FEATURE_CONTRACT_VIOLATION",
+        "ENGINE_INTERNAL_ERROR",
+        "ENGINE_NUISANCE_FIT_FAILED",
+        "ENGINE_NUISANCE_PREDICTION_INVALID",
+        "ENGINE_SPLIT_INFEASIBLE",
+        "ENGINE_SPLIT_INTEGRITY_VIOLATION",
+    }
+)
+PROPENSITY_ABSTENTION_CODES = frozenset({"OVERLAP_COHORT_INSUFFICIENT"})
 REQUIRED_RUNTIME_DEPENDENCIES = {
     "doubleml": "0.11.3",
     "numpy": "2.2.6",
@@ -113,6 +127,14 @@ class AnalysisRunRequestError(ValueError):
         self.recovery_action = recovery_action
         self.status_code = status_code
         super().__init__(code)
+
+
+class PropensityStageError(ValueError):
+    """A closed, safe failure raised inside the propensity stage."""
+
+    def __init__(self, code: str) -> None:
+        self.code = code if code in PROPENSITY_FAILURE_CODES else "ENGINE_INTERNAL_ERROR"
+        super().__init__(self.code)
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,12 +219,8 @@ def _require_refs(value: Any) -> list[Any]:
         raise ValueError("ENGINE_INPUT_SCHEMA_UNSUPPORTED") from None
 
 
-def _propensity_spec(adjustment_set: Mapping[str, Any]) -> dict[str, Any]:
-    adjustment_ref = {
-        "adjustment_set_id": adjustment_set.get("adjustment_set_id"),
-        "adjustment_set_version": adjustment_set.get("adjustment_set_version"),
-    }
-    learner_parameters = {
+def _propensity_learner_parameters() -> dict[str, Any]:
+    return {
         "learning_rate": 0.05,
         "max_iter": 200,
         "max_leaf_nodes": 15,
@@ -222,6 +240,14 @@ def _propensity_spec(adjustment_set: Mapping[str, Any]) -> dict[str, Any]:
         "tol": 1e-7,
         "verbose": 0,
     }
+
+
+def _propensity_spec(adjustment_set: Mapping[str, Any]) -> dict[str, Any]:
+    adjustment_ref = {
+        "adjustment_set_id": adjustment_set.get("adjustment_set_id"),
+        "adjustment_set_version": adjustment_set.get("adjustment_set_version"),
+    }
+    learner_parameters = _propensity_learner_parameters()
     return {
         "propensity_spec_id": PROPENSITY_SPEC_ID,
         "propensity_spec_version": PROPENSITY_SPEC_VERSION,
@@ -291,6 +317,11 @@ def _validate_variant_input(value: Any, expected_variant: str) -> dict[str, Any]
         (deepcopy(row) for row in rows),
         key=lambda row: str(row.get("order_line_id", "")).encode("utf-8"),
     )
+    row_ids = [row.get("order_line_id") for row in ordered_rows]
+    if not all(isinstance(row_id, str) for row_id in row_ids):
+        raise ValueError("ENGINE_INPUT_SCHEMA_UNSUPPORTED")
+    if len(set(row_ids)) != len(row_ids):
+        raise ValueError("ENGINE_INPUT_INTEGRITY_MISMATCH")
     required_row_fields = {
         "order_line_id",
         "supplier_id",
@@ -308,8 +339,11 @@ def _validate_variant_input(value: Any, expected_variant: str) -> dict[str, Any]
             raise ValueError("ENGINE_INPUT_SCHEMA_UNSUPPORTED")
         if any(key in row_mapping for key in PROHIBITED_SCIENTIFIC_FIELDS):
             raise ValueError("ENGINE_FEATURE_CONTRACT_VIOLATION")
-        if not isinstance(row_mapping["order_line_id"], str) or not isinstance(
-            row_mapping["supplier_id"], str
+        if (
+            not isinstance(row_mapping["order_line_id"], str)
+            or not row_mapping["order_line_id"]
+            or not isinstance(row_mapping["supplier_id"], str)
+            or not row_mapping["supplier_id"]
         ):
             raise ValueError("ENGINE_INPUT_SCHEMA_UNSUPPORTED")
         if not isinstance(row_mapping["high_load_exposure"], bool) or not isinstance(
@@ -346,6 +380,18 @@ def _validate_variant_input(value: Any, expected_variant: str) -> dict[str, Any]
         "s8_content_hash"
     ) != content_hash:
         raise ValueError("ENGINE_INPUT_INTEGRITY_MISMATCH")
+    summary = normalised.get("cohort_stage_summaries", {}).get("S8_OUTCOME")
+    if isinstance(summary, Mapping):
+        if (
+            "selected_count" in summary
+            and summary.get("selected_count") != len(ordered_rows)
+        ):
+            raise ValueError("ENGINE_INPUT_INTEGRITY_MISMATCH")
+        if (
+            "selected_identity_hash" in summary
+            and summary.get("selected_identity_hash") != identity_hash
+        ):
+            raise ValueError("ENGINE_INPUT_INTEGRITY_MISMATCH")
     return normalised
 
 
@@ -801,6 +847,8 @@ def derived_seed_registry(request: Mapping[str, Any]) -> list[dict[str, Any]]:
             )
             for outer_fold_index in range(5):
                 for component in SEED_COMPONENTS:
+                    if component == "inner_calibration_split":
+                        continue
                     material = _seed_material(
                         request,
                         variant_id=variant_id,
@@ -1059,6 +1107,825 @@ def build_fresh_analysis_payload(
     }
 
 
+def _field_definition_map(adjustment_set: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
+    definitions = adjustment_set.get("field_definitions")
+    if not isinstance(definitions, list):
+        return {}
+    result: dict[str, Mapping[str, Any]] = {}
+    for definition in definitions:
+        if not isinstance(definition, Mapping):
+            continue
+        name = definition.get("name")
+        if isinstance(name, str) and name:
+            result[name] = definition
+    return result
+
+
+def _value_token(value: Mapping[str, Any]) -> str:
+    state = value.get("state")
+    if state != "present":
+        if state not in VALUE_STATES:
+            raise PropensityStageError("ENGINE_FEATURE_CONTRACT_VIOLATION")
+        return f"state:{state}"
+    try:
+        return f"value:{scientific_json(value.get('value'))}"
+    except (TypeError, ValueError, OverflowError):
+        raise PropensityStageError("ENGINE_FEATURE_CONTRACT_VIOLATION") from None
+
+
+@dataclass(frozen=True, slots=True)
+class _PropensityFeatureLayout:
+    fields: tuple[str, ...]
+    numeric_fields: frozenset[str]
+    categorical_levels: dict[str, tuple[str, ...]]
+    feature_names: tuple[str, ...]
+
+    def transform(self, rows: Sequence[Mapping[str, Any]]) -> Any:
+        import numpy as np
+
+        matrix = np.zeros((len(rows), len(self.feature_names)), dtype=np.float64)
+        for row_index, row in enumerate(rows):
+            covariates = row.get("covariates")
+            if not isinstance(covariates, Mapping):
+                raise PropensityStageError("ENGINE_FEATURE_CONTRACT_VIOLATION")
+            column = 0
+            for field in self.fields:
+                value = covariates.get(field)
+                if not isinstance(value, Mapping):
+                    raise PropensityStageError("ENGINE_FEATURE_CONTRACT_VIOLATION")
+                state = value.get("state")
+                if state not in VALUE_STATES:
+                    raise PropensityStageError("ENGINE_FEATURE_CONTRACT_VIOLATION")
+                if field in self.numeric_fields:
+                    if state == "present":
+                        raw_value = value.get("value")
+                        if (
+                            not isinstance(raw_value, (int, float))
+                            or isinstance(raw_value, bool)
+                            or not math.isfinite(float(raw_value))
+                        ):
+                            raise PropensityStageError(
+                                "ENGINE_FEATURE_CONTRACT_VIOLATION"
+                            )
+                        matrix[row_index, column] = float(raw_value)
+                    column += 1
+                    token = f"state:{state}"
+                    levels = self.categorical_levels[field]
+                    if token not in levels:
+                        raise PropensityStageError(
+                            "ENGINE_FEATURE_CONTRACT_VIOLATION"
+                        )
+                    matrix[row_index, column + levels.index(token)] = 1.0
+                    column += len(levels)
+                    continue
+
+                token = _value_token(value)
+                levels = self.categorical_levels[field]
+                if token not in levels:
+                    raise PropensityStageError("ENGINE_FEATURE_CONTRACT_VIOLATION")
+                matrix[row_index, column + levels.index(token)] = 1.0
+                column += len(levels)
+            if not np.isfinite(matrix[row_index]).all():
+                raise PropensityStageError("ENGINE_NUISANCE_PREDICTION_INVALID")
+        return matrix
+
+
+def _declared_categorical_values(definition: Mapping[str, Any]) -> list[Any] | None:
+    for key in ("categories", "vocabulary", "ordered_vocabulary", "allowed_values"):
+        values = definition.get(key)
+        if isinstance(values, list):
+            return deepcopy(values)
+    return None
+
+
+def _build_propensity_feature_layout(
+    request: Mapping[str, Any],
+    rows: Sequence[Mapping[str, Any]],
+    subject_rows: Sequence[Mapping[str, Any]],
+) -> _PropensityFeatureLayout:
+    adjustment_set = request.get("adjustment_set")
+    if not isinstance(adjustment_set, Mapping):
+        raise PropensityStageError("ENGINE_FEATURE_CONTRACT_VIOLATION")
+    fields = adjustment_set.get("fields")
+    if not isinstance(fields, list) or not all(isinstance(field, str) for field in fields):
+        raise PropensityStageError("ENGINE_FEATURE_CONTRACT_VIOLATION")
+    field_names = tuple(str(field) for field in fields)
+    definitions = _field_definition_map(adjustment_set)
+    numeric_fields = frozenset(
+        field
+        for field in field_names
+        if field in NUMERIC_ADJUSTMENT_FIELDS
+        or definitions.get(field, {}).get("estimation_type") in {"numeric", "continuous"}
+        or definitions.get(field, {}).get("logical_type") in {"numeric", "number"}
+    )
+    categorical_levels: dict[str, tuple[str, ...]] = {}
+    feature_names: list[str] = []
+    for field in field_names:
+        if field in numeric_fields:
+            levels = tuple(f"state:{state}" for state in VALUE_STATES)
+            categorical_levels[field] = levels
+            feature_names.append(f"{field}::value")
+            feature_names.extend(f"{field}::{level}" for level in levels)
+            continue
+
+        definition = definitions.get(field, {})
+        declared_values = _declared_categorical_values(definition)
+        if declared_values is not None:
+            ordered_levels: list[str] = [f"state:{state}" for state in VALUE_STATES]
+            seen_levels = set(ordered_levels)
+            for value in declared_values:
+                try:
+                    token = f"value:{scientific_json(value)}"
+                except (TypeError, ValueError, OverflowError):
+                    raise PropensityStageError(
+                        "ENGINE_FEATURE_CONTRACT_VIOLATION"
+                    ) from None
+                if token not in seen_levels:
+                    ordered_levels.append(token)
+                    seen_levels.add(token)
+        else:
+            # A subject must never expand or otherwise alter the historical
+            # feature layout. Legacy requests without a declared vocabulary
+            # may derive a compatibility layout from S8 rows only.
+            levels = {f"state:{state}" for state in VALUE_STATES}
+            for row in rows:
+                covariates = row.get("covariates")
+                value = covariates.get(field) if isinstance(covariates, Mapping) else None
+                if not isinstance(value, Mapping):
+                    raise PropensityStageError("ENGINE_FEATURE_CONTRACT_VIOLATION")
+                levels.add(_value_token(value))
+            ordered_levels = sorted(levels, key=lambda item: item.encode("utf-8"))
+        ordered_levels = tuple(ordered_levels)
+        categorical_levels[field] = ordered_levels
+        feature_names.extend(f"{field}::{level}" for level in ordered_levels)
+    return _PropensityFeatureLayout(
+        fields=field_names,
+        numeric_fields=numeric_fields,
+        categorical_levels=categorical_levels,
+        feature_names=tuple(feature_names),
+    )
+
+
+def _stage_seed(
+    request: Mapping[str, Any],
+    *,
+    variant_id: str,
+    repeat_index: int,
+    outer_fold_index: int | None,
+    component: str,
+) -> int:
+    material = _seed_material(
+        request,
+        variant_id=variant_id,
+        repeat_index=repeat_index,
+        outer_fold_index=outer_fold_index,
+        inner_fold_index=None,
+        component=component,
+    )
+    return int.from_bytes(
+        hashlib.sha256(scientific_json(material).encode("utf-8")).digest()[:4],
+        "big",
+    )
+
+
+def _validate_split_partition(
+    train_indices: Sequence[int],
+    test_indices: Sequence[int],
+    *,
+    row_count: int,
+    exposure: Any,
+    groups: Any,
+    require_both_train: bool,
+    require_both_test: bool = False,
+) -> tuple[Any, Any]:
+    import numpy as np
+
+    train = np.asarray(sorted(int(index) for index in train_indices), dtype=int)
+    test = np.asarray(sorted(int(index) for index in test_indices), dtype=int)
+    if (
+        len(train) == 0
+        or len(test) == 0
+        or len(set(train.tolist()).intersection(test.tolist()))
+        or sorted([*train.tolist(), *test.tolist()]) != list(range(row_count))
+    ):
+        raise PropensityStageError("ENGINE_SPLIT_INTEGRITY_VIOLATION")
+    if set(groups[train].tolist()).intersection(groups[test].tolist()):
+        raise PropensityStageError("ENGINE_SPLIT_INTEGRITY_VIOLATION")
+    if require_both_train and len(set(exposure[train].tolist())) != 2:
+        raise PropensityStageError("ENGINE_SPLIT_INFEASIBLE")
+    if require_both_test and len(set(exposure[test].tolist())) != 2:
+        raise PropensityStageError("ENGINE_SPLIT_INFEASIBLE")
+    return train, test
+
+
+def _outer_split_records(
+    request: Mapping[str, Any],
+    variant_id: str,
+    rows: Sequence[Mapping[str, Any]],
+    exposure: Any,
+    groups: Any,
+) -> list[tuple[int, Any, Any, list[dict[str, Any]]]]:
+    import numpy as np
+    from sklearn.model_selection import StratifiedGroupKFold
+
+    row_count = len(rows)
+    splitter_input = np.zeros((row_count, 1), dtype=np.float64)
+    records: list[tuple[int, Any, Any, list[dict[str, Any]]]] = []
+    row_ids = [str(row["order_line_id"]) for row in rows]
+    for repeat_index in range(2):
+        outer_split_seed = _stage_seed(
+            request,
+            variant_id=variant_id,
+            repeat_index=repeat_index,
+            outer_fold_index=None,
+            component="outer_split",
+        )
+        splitter = StratifiedGroupKFold(
+            n_splits=5,
+            shuffle=True,
+            random_state=outer_split_seed,
+        )
+        splits = list(splitter.split(splitter_input, exposure, groups=groups))
+        if len(splits) != 5:
+            raise PropensityStageError("ENGINE_SPLIT_INTEGRITY_VIOLATION")
+        seen_test: list[int] = []
+        for fold_index, (raw_train, raw_test) in enumerate(splits):
+            train, test = _validate_split_partition(
+                raw_train,
+                raw_test,
+                row_count=row_count,
+                exposure=exposure,
+                groups=groups,
+                require_both_train=True,
+            )
+            seen_test.extend(test.tolist())
+            calibration_records: list[dict[str, Any]] = []
+            local_exposure = exposure[train]
+            local_groups = groups[train]
+            local_input = np.zeros((len(train), 1), dtype=np.float64)
+            calibration_splitter = StratifiedGroupKFold(
+                n_splits=3,
+                shuffle=True,
+                random_state=_stage_seed(
+                    request,
+                    variant_id=variant_id,
+                    repeat_index=repeat_index,
+                    outer_fold_index=fold_index,
+                    component="inner_calibration_split",
+                ),
+            )
+            calibration_splits = list(
+                calibration_splitter.split(
+                    local_input,
+                    local_exposure,
+                    groups=local_groups,
+                )
+            )
+            if len(calibration_splits) != 3:
+                raise PropensityStageError("ENGINE_SPLIT_INTEGRITY_VIOLATION")
+            inner_calibration_split_seed = _stage_seed(
+                request,
+                variant_id=variant_id,
+                repeat_index=repeat_index,
+                outer_fold_index=fold_index,
+                component="inner_calibration_split",
+            )
+            propensity_learner_seed = _stage_seed(
+                request,
+                variant_id=variant_id,
+                repeat_index=repeat_index,
+                outer_fold_index=fold_index,
+                component="propensity_learner",
+            )
+            for calibration_index, (calibration_train, calibration_test) in enumerate(
+                calibration_splits
+            ):
+                calibration_train, calibration_test = _validate_split_partition(
+                    calibration_train,
+                    calibration_test,
+                    row_count=len(train),
+                    exposure=local_exposure,
+                    groups=local_groups,
+                    require_both_train=True,
+                    require_both_test=True,
+                )
+                calibration_records.append(
+                    {
+                        "fold_index": calibration_index,
+                        "train_ids": [row_ids[int(train[index])] for index in calibration_train],
+                        "test_ids": [row_ids[int(train[index])] for index in calibration_test],
+                        "train_supplier_ids": sorted(
+                            str(groups[int(train[index])]) for index in calibration_train
+                        ),
+                        "test_supplier_ids": sorted(
+                            str(groups[int(train[index])]) for index in calibration_test
+                        ),
+                    }
+                )
+            records.append(
+                (
+                    repeat_index,
+                    train,
+                    test,
+                    [
+                        {
+                            "fold_index": fold_index,
+                            "outer_split_seed": outer_split_seed,
+                            "inner_calibration_split_seed": inner_calibration_split_seed,
+                            "propensity_learner_seed": propensity_learner_seed,
+                            "train_ids": [row_ids[int(index)] for index in train],
+                            "test_ids": [row_ids[int(index)] for index in test],
+                            "train_supplier_ids": sorted(str(value) for value in groups[train]),
+                            "test_supplier_ids": sorted(str(value) for value in groups[test]),
+                            "calibration_folds": calibration_records,
+                        }
+                    ],
+                )
+            )
+        if sorted(seen_test) != list(range(row_count)):
+            raise PropensityStageError("ENGINE_SPLIT_INTEGRITY_VIOLATION")
+    return records
+
+
+def _propensity_classifier(seed: int) -> Any:
+    from sklearn.ensemble import HistGradientBoostingClassifier
+
+    parameters = _propensity_learner_parameters()
+    parameters.update(
+        {
+            "loss": "log_loss",
+            "class_weight": None,
+            "random_state": seed,
+        }
+    )
+    return HistGradientBoostingClassifier(**parameters)
+
+
+def _safe_stage_error(error: BaseException) -> str:
+    code = getattr(error, "code", None)
+    if isinstance(code, str) and code in PROPENSITY_FAILURE_CODES:
+        return code
+    if isinstance(error, ValueError) and str(error) in PROPENSITY_FAILURE_CODES:
+        return str(error)
+    if isinstance(error, (TypeError, ValueError, RuntimeError)):
+        return "ENGINE_NUISANCE_FIT_FAILED"
+    return "ENGINE_INTERNAL_ERROR"
+
+
+def _variant_summary_count(variant: Mapping[str, Any]) -> int:
+    summaries = variant.get("cohort_stage_summaries")
+    if not isinstance(summaries, Mapping):
+        return 0
+    summary = summaries.get("S8_OUTCOME")
+    if not isinstance(summary, Mapping):
+        return 0
+    for key in ("selected_count", "count", "denominator_count"):
+        value = summary.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            return value
+    return 0
+
+
+def _safe_variant_detail(
+    variant_id: str,
+    source_variant: Mapping[str, Any],
+    materialized_variant: Mapping[str, Any],
+) -> dict[str, Any]:
+    state = materialized_variant.get("state")
+    if state == "scientifically_unavailable":
+        return {
+            "variant_id": variant_id,
+            "s8_status": "scientifically_unavailable",
+            "s8_count": _variant_summary_count(source_variant),
+            "propensity_status": "not_run",
+            "overlap_status": "not_run",
+            "s9_status": "not_run",
+            "s9_count": 0,
+            "reason_code": materialized_variant.get("reason_code"),
+            "component_failures": [],
+        }
+    if state == "failed":
+        return {
+            "variant_id": variant_id,
+            "s8_status": "released",
+            "s8_count": materialized_variant.get("s8_count", 0),
+            "propensity_status": "failed",
+            "overlap_status": "not_run",
+            "s9_status": "not_run",
+            "s9_count": 0,
+            "reason_code": materialized_variant.get("reason_code"),
+            "component_failures": deepcopy(
+                materialized_variant.get("component_failures", [])
+            ),
+        }
+    overlap = materialized_variant.get("overlap")
+    s9 = materialized_variant.get("s9")
+    if not isinstance(overlap, Mapping) or not isinstance(s9, Mapping):
+        return {
+            "variant_id": variant_id,
+            "s8_status": "released",
+            "s8_count": materialized_variant.get("s8_count", 0),
+            "propensity_status": "failed",
+            "overlap_status": "failed",
+            "s9_status": "not_run",
+            "s9_count": 0,
+            "reason_code": "ENGINE_INTERNAL_ERROR",
+            "component_failures": [
+                {
+                    "component": "s9_materialization",
+                    "variant_id": variant_id,
+                    "code": "ENGINE_INTERNAL_ERROR",
+                }
+            ],
+        }
+    return {
+        "variant_id": variant_id,
+        "s8_status": "released",
+        "s8_count": materialized_variant.get("s8_count", 0),
+        "propensity_status": "complete",
+        "propensity_count": materialized_variant.get("propensity_count", 0),
+        "propensity_repeat_count": 2,
+        "overlap_status": overlap.get("state"),
+        "retained_count": s9.get("retained_count", 0),
+        "trimmed_count": s9.get("trimmed_count", 0),
+        "overall_trim_rate": s9.get("overall_trim_rate"),
+        "arm_trim_rates": deepcopy(s9.get("arm_trim_rates", {})),
+        "post_trim_support_status": (
+            overlap.get("post_trim_support", {}).get("state")
+            if isinstance(overlap.get("post_trim_support"), Mapping)
+            else None
+        ),
+        "s9_status": s9.get("state"),
+        "s9_count": s9.get("retained_count", 0),
+        "reason_code": materialized_variant.get("reason_code"),
+        "component_failures": [],
+    }
+
+
+def _safe_detail(
+    request: Mapping[str, Any],
+    source_variants: Mapping[str, Mapping[str, Any]],
+    variants: Mapping[str, Mapping[str, Any]],
+    failures: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    details = [
+        _safe_variant_detail(variant_id, source_variants[variant_id], variants[variant_id])
+        for variant_id in VARIANT_ORDER
+    ]
+    return {
+        "schema_version": "analysis-run-safe-detail.v1",
+        "execution_state": "failed" if failures else "complete",
+        "last_completed_stage": (
+            "S9_OVERLAP"
+            if any(item.get("propensity_status") == "complete" for item in details)
+            else "S8_OUTCOME"
+        ),
+        "variants": details,
+        "component_failures": deepcopy(list(failures)),
+        "estimator_executed": False,
+        "scope": "propensity_and_overlap_only",
+    }
+
+
+def _materialize_propensity_variant(
+    request: Mapping[str, Any],
+    variant: Mapping[str, Any],
+) -> dict[str, Any]:
+    import numpy as np
+    from threadpoolctl import threadpool_limits
+
+    variant_id = str(variant["variant_id"])
+    rows = variant.get("rows")
+    if not isinstance(rows, list) or not rows:
+        raise PropensityStageError("ENGINE_FEATURE_CONTRACT_VIOLATION")
+    subject = request.get("subject")
+    subject_rows: list[dict[str, Any]] = []
+    if isinstance(subject, Mapping) and subject.get("state") == "eligible":
+        profile = subject.get("profile")
+        if not isinstance(profile, Mapping) or not isinstance(
+            profile.get("adjustment_inputs"), Mapping
+        ):
+            raise PropensityStageError("ENGINE_FEATURE_CONTRACT_VIOLATION")
+        subject_rows.append(
+            {
+                "order_line_id": str(subject.get("subject_id", "subject")),
+                "covariates": deepcopy(profile["adjustment_inputs"]),
+            }
+        )
+    feature_layout = _build_propensity_feature_layout(request, rows, subject_rows)
+    matrix = feature_layout.transform(rows)
+    subject_matrix = feature_layout.transform(subject_rows) if subject_rows else None
+    exposure = np.asarray(
+        [1 if bool(row["high_load_exposure"]) else 0 for row in rows], dtype=np.int8
+    )
+    groups = np.asarray([str(row["supplier_id"]) for row in rows], dtype=object)
+    if len(set(exposure.tolist())) != 2:
+        raise PropensityStageError("ENGINE_SPLIT_INFEASIBLE")
+    split_records = _outer_split_records(request, variant_id, rows, exposure, groups)
+    raw_predictions = np.full((2, len(rows)), np.nan, dtype=np.float64)
+    subject_predictions: list[float] = []
+    fold_assignments: list[dict[str, Any]] = []
+    row_ids = [str(row["order_line_id"]) for row in rows]
+    with threadpool_limits(limits=1):
+        for repeat_index, train, test, records in split_records:
+            fold_record = records[0]
+            fold_index = int(fold_record["fold_index"])
+            calibration_splits = [
+                (
+                    np.asarray(
+                        [
+                            next(
+                                index
+                                for index, global_index in enumerate(train)
+                                if row_ids[int(global_index)] == row_id
+                            )
+                            for row_id in calibration["train_ids"]
+                        ],
+                        dtype=int,
+                    ),
+                    np.asarray(
+                        [
+                            next(
+                                index
+                                for index, global_index in enumerate(train)
+                                if row_ids[int(global_index)] == row_id
+                            )
+                            for row_id in calibration["test_ids"]
+                        ],
+                        dtype=int,
+                    ),
+                )
+                for calibration in fold_record["calibration_folds"]
+            ]
+            model = _propensity_classifier(
+                _stage_seed(
+                    request,
+                    variant_id=variant_id,
+                    repeat_index=repeat_index,
+                    outer_fold_index=fold_index,
+                    component="propensity_learner",
+                )
+            )
+            try:
+                from sklearn.calibration import CalibratedClassifierCV
+
+                calibrated = CalibratedClassifierCV(
+                    estimator=model,
+                    method="sigmoid",
+                    cv=calibration_splits,
+                    n_jobs=1,
+                    ensemble=True,
+                )
+                calibrated.fit(matrix[train], exposure[train])
+                predictions = calibrated.predict_proba(matrix[test])[:, 1]
+                if subject_matrix is not None:
+                    subject_predictions.append(
+                        float(calibrated.predict_proba(subject_matrix)[:, 1][0])
+                    )
+            except PropensityStageError:
+                raise
+            except Exception as error:
+                raise PropensityStageError(_safe_stage_error(error)) from None
+            predictions = np.asarray(predictions, dtype=np.float64)
+            if (
+                len(predictions) != len(test)
+                or not np.isfinite(predictions).all()
+                or np.any(predictions < 0.0)
+                or np.any(predictions > 1.0)
+            ):
+                raise PropensityStageError("ENGINE_NUISANCE_PREDICTION_INVALID")
+            raw_predictions[repeat_index, test] = predictions
+            fold_assignments.append(
+                {
+                    "repeat_index": repeat_index,
+                    **deepcopy(fold_record),
+                }
+            )
+    if not np.isfinite(raw_predictions).all():
+        raise PropensityStageError("ENGINE_NUISANCE_PREDICTION_INVALID")
+    means = raw_predictions.mean(axis=0)
+    if (
+        not np.isfinite(means).all()
+        or np.any(means < 0.0)
+        or np.any(means > 1.0)
+    ):
+        raise PropensityStageError("ENGINE_NUISANCE_PREDICTION_INVALID")
+
+    from .eligibility import evaluate_propensity_overlap
+
+    overlap_rows = [
+        {
+            "id": row_ids[index],
+            "supplier_id": str(rows[index]["supplier_id"]),
+            "exposure": bool(exposure[index]),
+            "propensity": float(means[index]),
+        }
+        for index in range(len(rows))
+    ]
+    overlap = evaluate_propensity_overlap(overlap_rows)
+    retained_ids = [str(value) for value in overlap.get("retained_ids", [])]
+    retained_id_set = set(retained_ids)
+    propensity_predictions = [
+        {
+            "row_id": row_ids[index],
+            "repeat_predictions": [
+                float(raw_predictions[0, index]),
+                float(raw_predictions[1, index]),
+            ],
+            "mean": float(means[index]),
+            "external_prediction_slots": [float(means[index]), float(means[index])],
+            "retained_in_s9": row_ids[index] in retained_id_set,
+        }
+        for index in range(len(rows))
+    ]
+    s9_state = "supported" if overlap.get("state") == "supported" else "unsupported"
+    subject_result: dict[str, Any]
+    if subject_matrix is None:
+        subject_result = {
+            "state": "scientifically_unavailable",
+            "reason_code": (
+                subject.get("scientific_code", "SUBJECT_PROPENSITY_UNAVAILABLE")
+                if isinstance(subject, Mapping)
+                else "SUBJECT_PROPENSITY_UNAVAILABLE"
+            ),
+        }
+    else:
+        if len(subject_predictions) != 10 or not all(
+            math.isfinite(value) and 0.0 <= value <= 1.0
+            for value in subject_predictions
+        ):
+            raise PropensityStageError("ENGINE_NUISANCE_PREDICTION_INVALID")
+        subject_result = {
+            "state": "present",
+            "repeat_fold_predictions": subject_predictions,
+            "value": sum(subject_predictions) / len(subject_predictions),
+            "aggregation": "arithmetic_mean_of_ten_primary_outer_fold_models",
+        }
+    return {
+        "variant_id": variant_id,
+        "state": "materialized",
+        "reason_code": None if s9_state == "supported" else overlap.get("reason_code"),
+        "s8_count": len(rows),
+        "s8_identity_hash": variant.get("s8_identity_hash"),
+        "s8_content_hash": variant.get("s8_content_hash"),
+        "feature_schema": {
+            "schema_version": "analysis-run-feature-matrix.v1",
+            "ordered_feature_names": list(feature_layout.feature_names),
+            "feature_schema_digest": scientific_sha256(
+                list(feature_layout.feature_names)
+            ),
+            "row_identity_hash": scientific_sha256(row_ids),
+            "shape": [int(matrix.shape[0]), int(matrix.shape[1])],
+        },
+        "folds": {
+            "outer_repeats": 2,
+            "outer_folds_per_repeat": 5,
+            "inner_calibration_folds": 3,
+            "group_field": "supplier_id",
+            "stratify_field": "high_load_exposure",
+            "assignments": fold_assignments,
+        },
+        "fold_assignments": deepcopy(fold_assignments),
+        "propensity": {
+            "state": "complete",
+            "repeat_count": 2,
+            "outer_fold_count": 10,
+            "aggregation": "arithmetic_mean_of_repeat_oof_probabilities",
+            "authoritative_identity_hash": scientific_sha256(
+                [item["mean"] for item in propensity_predictions]
+            ),
+        },
+        "propensity_predictions": propensity_predictions,
+        "propensity_count": len(propensity_predictions),
+        "external_predictions": {
+            "schema_version": "doubleml-external-predictions.v1",
+            "row_ids": retained_ids,
+            "repeat_columns": [0, 1],
+            "ml_m": [
+                [item["mean"], item["mean"]]
+                for item in propensity_predictions
+                if item["row_id"] in retained_id_set
+            ],
+            "source": "authoritative_mean_calibrated_oof_propensity",
+            "refit_inside_doubleml": False,
+        },
+        "subject_propensity": subject_result,
+        "overlap": deepcopy(overlap),
+        "s9": {
+            "state": s9_state,
+            "retained_ids": retained_ids,
+            "retained_count": len(retained_ids),
+            "identity_hash": overlap.get("retained_identity_hash"),
+            "trimmed_ids": [str(value) for value in overlap.get("trimmed_ids", [])],
+            "trimmed_count": int(overlap.get("trimmed_count", 0)),
+            "overall_trim_rate": overlap.get("overall_trim_rate"),
+            "arm_trim_rates": deepcopy(overlap.get("arm_trim_rates", {})),
+            "support_interval": deepcopy(overlap.get("support_interval", {})),
+        },
+    }
+
+
+def materialize_propensity_and_s9(
+    value: Mapping[str, Any] | ValidatedSuiteRequest,
+) -> dict[str, Any]:
+    """Fit the authoritative propensity stage and materialize S9 exactly once.
+
+    This is the public engine seam for Core 16. It never fits an effect model
+    or calls DoubleML; its external prediction slots are the handoff for the
+    subsequent estimator ticket.
+    """
+
+    validated = (
+        value
+        if isinstance(value, ValidatedSuiteRequest)
+        else validate_suite_request(value)
+    )
+    request = validated.request
+    source_variants = {
+        variant_id: variant
+        for variant_id, variant in zip(
+            VARIANT_ORDER,
+            request["variant_inputs"],
+            strict=True,
+        )
+    }
+    variants: dict[str, dict[str, Any]] = {}
+    failures: list[dict[str, Any]] = []
+    has_released_variant = False
+    for variant_id in VARIANT_ORDER:
+        source_variant = source_variants[variant_id]
+        if source_variant["upstream_status"] == "scientifically_unavailable":
+            variants[variant_id] = {
+                "variant_id": variant_id,
+                "state": "scientifically_unavailable",
+                "reason_code": source_variant.get("scientific_code"),
+                "s8_count": 0,
+                "component_failures": [],
+            }
+            continue
+        has_released_variant = True
+        try:
+            variants[variant_id] = _materialize_propensity_variant(
+                request,
+                source_variant,
+            )
+        except PropensityStageError as error:
+            failure = {
+                "component": "propensity_ensemble",
+                "variant_id": variant_id,
+                "code": error.code,
+            }
+            failures.append(failure)
+            variants[variant_id] = {
+                "variant_id": variant_id,
+                "state": "failed",
+                "reason_code": error.code,
+                "s8_count": len(source_variant.get("rows", [])),
+                "component_failures": [failure],
+            }
+        except Exception:
+            failure = {
+                "component": "propensity_ensemble",
+                "variant_id": variant_id,
+                "code": "ENGINE_INTERNAL_ERROR",
+            }
+            failures.append(failure)
+            variants[variant_id] = {
+                "variant_id": variant_id,
+                "state": "failed",
+                "reason_code": "ENGINE_INTERNAL_ERROR",
+                "s8_count": len(source_variant.get("rows", [])),
+                "component_failures": [failure],
+            }
+    status = "failed" if failures else "abstained"
+    reason_code = (
+        failures[0]["code"]
+        if failures
+        else next(
+            (
+                variant.get("reason_code")
+                for variant in variants.values()
+                if variant.get("reason_code") in PROPENSITY_ABSTENTION_CODES
+            ),
+            "ENGINE_EXECUTION_DEFERRED",
+        )
+    )
+    safe_detail = _safe_detail(request, source_variants, variants, failures)
+    return {
+        "schema_version": PROPENSITY_RESULT_SCHEMA_VERSION,
+        "scientific_request_digest": validated.scientific_request_digest,
+        "status": status,
+        "scientific_outcome": "failed" if status == "failed" else "abstained",
+        "reason_code": reason_code,
+        "estimator_executed": False,
+        "scope": "propensity_and_overlap_only",
+        "has_released_variant": has_released_variant,
+        "variants": variants,
+        "component_failures": failures,
+        "safe_detail": safe_detail,
+    }
+
+
 def analysis_run_id_for_operation(operation_id: str) -> str:
     if not operation_id.startswith("operation-"):
         raise ValueError("operation identity is invalid")
@@ -1072,8 +1939,78 @@ def analysis_run_id_for_operation(operation_id: str) -> str:
     return "analysis-run-" + suffix
 
 
-def analysis_run_status(operation: Any, payload: Mapping[str, Any]) -> dict[str, Any]:
+def _admission_safe_detail(payload: Mapping[str, Any]) -> dict[str, Any]:
+    request = payload.get("suite_request")
+    variants: list[dict[str, Any]] = []
+    if isinstance(request, Mapping) and isinstance(request.get("variant_inputs"), list):
+        for variant in request["variant_inputs"]:
+            if not isinstance(variant, Mapping):
+                continue
+            variant_id = variant.get("variant_id")
+            if not isinstance(variant_id, str):
+                continue
+            released = variant.get("upstream_status") == "released"
+            variants.append(
+                {
+                    "variant_id": variant_id,
+                    "s8_status": "released" if released else "scientifically_unavailable",
+                    "s8_count": len(variant.get("rows", [])) if released else 0,
+                    "propensity_status": "pending" if released else "not_run",
+                    "overlap_status": "pending" if released else "not_run",
+                    "s9_status": "pending" if released else "not_run",
+                    "s9_count": 0,
+                    "reason_code": variant.get("scientific_code") if not released else None,
+                    "component_failures": [],
+                }
+            )
+    return {
+        "schema_version": "analysis-run-safe-detail.v1",
+        "execution_state": "pending",
+        "last_completed_stage": "S8_OUTCOME",
+        "variants": variants,
+        "component_failures": [],
+        "estimator_executed": False,
+        "scope": "propensity_and_overlap_only",
+    }
+
+
+def load_fresh_analysis_result(layout: Any, operation_id: str) -> dict[str, Any] | None:
+    """Read only the worker's typed, redacted result projection."""
+
+    if layout is None or not isinstance(operation_id, str) or not operation_id.startswith(
+        "operation-"
+    ):
+        return None
+    result_path = Path(layout.run_root) / operation_id / "analysis-run-result.json"
+    try:
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, TypeError, ValueError):
+        return None
+    if not isinstance(result, Mapping) or result.get("schema_version") != (
+        "analysis-run-execution-result.v1"
+    ):
+        return None
+    safe_detail = result.get("safe_detail")
+    if not isinstance(safe_detail, Mapping):
+        return None
+    status = result.get("status")
+    if status not in {"abstained", "failed"}:
+        return None
+    return {
+        "status": status,
+        "reason_code": result.get("reason_code"),
+        "failure_code": result.get("failure_code"),
+        "safe_detail": deepcopy(dict(safe_detail)),
+    }
+
+
+def analysis_run_status(
+    operation: Any,
+    payload: Mapping[str, Any],
+    execution_result: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     state = str(operation.state)
+    result_status = execution_result.get("status") if execution_result else None
     if state in {"QUEUED", "CANCELLING"}:
         status = "PENDING"
         lifecycle = "executing"
@@ -1088,6 +2025,13 @@ def analysis_run_status(operation: Any, payload: Mapping[str, Any]) -> dict[str,
         verification = "pending"
         availability = "suppressed"
         reason_code = None
+    elif state == "SUCCEEDED" and result_status == "failed":
+        status = "FAILED"
+        lifecycle = "failed"
+        outcome = "failed"
+        verification = "invalid"
+        availability = "suppressed"
+        reason_code = execution_result.get("reason_code") or "ENGINE_INTERNAL_ERROR"
     elif state == "SUCCEEDED":
         status = "ABSTAINED"
         lifecycle = "sealed"
@@ -1109,6 +2053,16 @@ def analysis_run_status(operation: Any, payload: Mapping[str, Any]) -> dict[str,
         verification = "invalid"
         availability = "suppressed"
         reason_code = operation.failure_code or "ENGINE_EXECUTION_FAILED"
+    fresh_run_detail = (
+        deepcopy(dict(execution_result["safe_detail"]))
+        if execution_result and isinstance(execution_result.get("safe_detail"), Mapping)
+        else _admission_safe_detail(payload)
+    )
+    execution_failure_code = (
+        execution_result.get("failure_code")
+        if execution_result and isinstance(execution_result.get("failure_code"), str)
+        else None
+    )
     return {
         "schema_version": "analysis-run-status.v1",
         "analysis_run_id": analysis_run_id_for_operation(operation.operation_id),
@@ -1121,7 +2075,7 @@ def analysis_run_status(operation: Any, payload: Mapping[str, Any]) -> dict[str,
         "availability_state": availability,
         "delivery_mode": "fresh_execution",
         "reason_code": reason_code,
-        "failure_code": operation.failure_code,
+        "failure_code": operation.failure_code or execution_failure_code,
         "recovery_action": operation.recovery_action,
         "estimator_executed": False,
         "request_schema_version": payload["suite_request"]["engine_input_schema_version"],
@@ -1133,6 +2087,7 @@ def analysis_run_status(operation: Any, payload: Mapping[str, Any]) -> dict[str,
         "estimator_descriptor": deepcopy(payload["estimator_descriptor"]),
         "feature_descriptor": deepcopy(payload["feature_descriptor"]),
         "fold_descriptor": deepcopy(payload["fold_descriptor"]),
+        "fresh_run_detail": fresh_run_detail,
     }
 
 

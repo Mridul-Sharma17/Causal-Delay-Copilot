@@ -739,6 +739,7 @@ class AnalysisRunStatusResponse(BaseModel):
     estimator_descriptor: dict[str, Any]
     feature_descriptor: dict[str, Any]
     fold_descriptor: dict[str, Any]
+    fresh_run_detail: dict[str, Any]
 
 
 class OperationResponse(BaseModel):

@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from backend.app.analysis_runs import (
     ENGINE_INPUT_SCHEMA_VERSION,
     analysis_run_id_for_operation,
+    materialize_propensity_and_s9,
     scientific_json,
     scientific_sha256,
     validate_suite_request,
@@ -315,3 +316,216 @@ def test_validation_only_worker_ends_in_typed_abstention_without_an_estimate(
     assert terminal["analysis_run"]["status"] == "ABSTAINED"
     assert terminal["analysis_run"]["scientific_outcome"] == "abstained"
     assert terminal["analysis_run"]["estimator_executed"] is False
+    detail = terminal["analysis_run"]["fresh_run_detail"]
+    assert detail["schema_version"] == "analysis-run-safe-detail.v1"
+    assert detail["execution_state"] == "complete"
+    assert detail["component_failures"] == []
+    assert "lineage:dataset-1" not in str(detail)
+
+
+def _released_propensity_rows(request: dict[str, object]) -> list[dict[str, object]]:
+    adjustment_set = request["adjustment_set"]
+    assert isinstance(adjustment_set, dict)
+    fields = adjustment_set["fields"]
+    assert isinstance(fields, list)
+    rows: list[dict[str, object]] = []
+    for supplier_index in range(30):
+        for within_supplier in range(2):
+            row_index = supplier_index * 2 + within_supplier
+            rows.append(
+                {
+                    "order_line_id": f"line-{row_index:03d}",
+                    "supplier_id": f"supplier-{supplier_index:03d}",
+                    "high_load_exposure": bool((supplier_index + within_supplier) % 2),
+                    "supplier_milestone_slippage_days": float(row_index % 17),
+                    "supplier_milestone_slippage_duration_basis": "CALENDAR_DAY",
+                    "supplier_milestone_late": bool(row_index % 3),
+                    "load_percentile": (row_index % 10) / 10,
+                    "covariates": {
+                        field: {"state": "present", "value": float(row_index + offset)}
+                        for offset, field in enumerate(fields)
+                    },
+                    "lineage_refs": [f"lineage:line-{row_index:03d}"],
+                }
+            )
+    return rows
+
+
+def test_propensity_stage_materializes_grouped_oof_mean_s9_and_external_slots() -> None:
+    request = _suite_request()
+    variant = request["variant_inputs"][0]
+    assert isinstance(variant, dict)
+    rows = _released_propensity_rows(request)
+    variant.update(
+        {
+            "upstream_status": "released",
+            "rows": rows,
+            "cohort_stage_summaries": {
+                "S8_OUTCOME": {
+                    "status": "passed",
+                    "selected_count": len(rows),
+                    "selected_identity_hash": scientific_sha256(
+                        [row["order_line_id"] for row in rows]
+                    ),
+                }
+            },
+        }
+    )
+    variant.pop("scientific_code", None)
+    variant.pop("gate_stage", None)
+    variant["selector_refs"] = sorted(variant["selector_refs"])
+    variant["s8_identity_hash"] = scientific_sha256(
+        [row["order_line_id"] for row in rows]
+    )
+    variant["s8_content_hash"] = scientific_sha256(
+        {
+            key: value
+            for key, value in variant.items()
+            if key not in {"s8_identity_hash", "s8_content_hash"}
+        }
+    )
+
+    result = materialize_propensity_and_s9(request)
+    primary = result["variants"]["primary"]
+
+    assert result["schema_version"] == "analysis-run-propensity-result.v1"
+    assert result["status"] == "abstained"
+    assert result["reason_code"] == "OVERLAP_COHORT_INSUFFICIENT"
+    assert primary["state"] == "materialized"
+    assert primary["folds"]["outer_repeats"] == 2
+    assert primary["folds"]["outer_folds_per_repeat"] == 5
+    assert len(primary["propensity_predictions"]) == len(rows)
+    for repeat_index in range(2):
+        repeat_folds = [
+            item
+            for item in primary["fold_assignments"]
+            if item["repeat_index"] == repeat_index
+        ]
+        assert len(repeat_folds) == 5
+        assert sorted(
+            row_id
+            for item in repeat_folds
+            for row_id in item["test_ids"]
+        ) == [f"line-{index:03d}" for index in range(len(rows))]
+        assert all(
+            set(item["train_supplier_ids"]).isdisjoint(item["test_supplier_ids"])
+            for item in repeat_folds
+        )
+    assert primary["s9"]["retained_ids"] == [
+        item["row_id"]
+        for item in primary["propensity_predictions"]
+        if 0.10 <= item["mean"] <= 0.90
+    ]
+    assert all(
+        item["external_prediction_slots"] == [item["mean"], item["mean"]]
+        for item in primary["propensity_predictions"]
+        if item["row_id"] in primary["s9"]["retained_ids"]
+    )
+    assert result["safe_detail"]["component_failures"] == []
+    assert "line-000" not in str(result["safe_detail"])
+
+
+def _released_primary_request(*, subject: bool = False) -> dict[str, object]:
+    request = _suite_request()
+    variant = request["variant_inputs"][0]
+    assert isinstance(variant, dict)
+    rows = _released_propensity_rows(request)
+    variant.update(
+        {
+            "upstream_status": "released",
+            "rows": rows,
+            "cohort_stage_summaries": {
+                "S8_OUTCOME": {
+                    "status": "passed",
+                    "selected_count": len(rows),
+                    "selected_identity_hash": scientific_sha256(
+                        [row["order_line_id"] for row in rows]
+                    ),
+                }
+            },
+        }
+    )
+    variant.pop("scientific_code", None)
+    variant.pop("gate_stage", None)
+    variant["selector_refs"] = sorted(variant["selector_refs"])
+    variant["s8_identity_hash"] = scientific_sha256(
+        [row["order_line_id"] for row in rows]
+    )
+    variant["s8_content_hash"] = scientific_sha256(
+        {
+            key: value
+            for key, value in variant.items()
+            if key not in {"s8_identity_hash", "s8_content_hash"}
+        }
+    )
+    if subject:
+        fields = request["adjustment_set"]["fields"]
+        assert isinstance(fields, list)
+        request["subject"] = {
+            "state": "eligible",
+            "subject_id": "current-subject",
+            "profile": {
+                "adjustment_inputs": {
+                    field: {"state": "present", "value": float(offset)}
+                    for offset, field in enumerate(fields)
+                }
+            },
+        }
+    return request
+
+
+def test_propensity_stage_subject_score_uses_all_ten_primary_outer_models() -> None:
+    result = materialize_propensity_and_s9(_released_primary_request(subject=True))
+    subject = result["variants"]["primary"]["subject_propensity"]
+
+    assert subject["state"] == "present"
+    assert len(subject["repeat_fold_predictions"]) == 10
+    assert 0.0 <= subject["value"] <= 1.0
+    assert subject["aggregation"] == "arithmetic_mean_of_ten_primary_outer_fold_models"
+
+
+def test_propensity_stage_is_deterministic_for_identical_request() -> None:
+    request = _released_primary_request()
+    first = materialize_propensity_and_s9(request)
+    second = materialize_propensity_and_s9(request)
+
+    first_primary = first["variants"]["primary"]
+    second_primary = second["variants"]["primary"]
+    assert first["scientific_request_digest"] == second["scientific_request_digest"]
+    assert first_primary["fold_assignments"] == second_primary["fold_assignments"]
+    assert first_primary["propensity_predictions"] == second_primary["propensity_predictions"]
+    assert first_primary["s9"] == second_primary["s9"]
+
+
+def test_propensity_stage_returns_safe_component_failure_without_partial_s9() -> None:
+    request = _released_primary_request()
+    variant = request["variant_inputs"][0]
+    assert isinstance(variant, dict)
+    rows = variant["rows"]
+    assert isinstance(rows, list)
+    for row in rows:
+        assert isinstance(row, dict)
+        row["high_load_exposure"] = False
+    variant["s8_content_hash"] = scientific_sha256(
+        {
+            key: value
+            for key, value in variant.items()
+            if key not in {"s8_identity_hash", "s8_content_hash"}
+        }
+    )
+
+    result = materialize_propensity_and_s9(request)
+    primary = result["variants"]["primary"]
+
+    assert result["status"] == "failed"
+    assert primary["state"] == "failed"
+    assert primary["reason_code"] == "ENGINE_SPLIT_INFEASIBLE"
+    assert primary["component_failures"] == [
+        {
+            "component": "propensity_ensemble",
+            "variant_id": "primary",
+            "code": "ENGINE_SPLIT_INFEASIBLE",
+        }
+    ]
+    assert primary.get("s9") is None
+    assert "line-000" not in str(result["safe_detail"])

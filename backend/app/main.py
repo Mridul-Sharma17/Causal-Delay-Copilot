@@ -59,6 +59,7 @@ from .analysis_runs import (
     analysis_run_status,
     build_fresh_analysis_payload,
     is_strict_fresh_analysis_request,
+    load_fresh_analysis_result,
 )
 from .governance import (
     DecisionBriefUnavailable,
@@ -578,7 +579,14 @@ def create_app(
             and operation_request.get("schema_version") == "analysis-run-admission.v1"
         ):
             analysis_run = AnalysisRunStatusResponse(
-                **analysis_run_status(operation, operation_request)
+                **analysis_run_status(
+                    operation,
+                    operation_request,
+                    load_fresh_analysis_result(
+                        getattr(app.state, "state_layout", None),
+                        operation.operation_id,
+                    ),
+                )
             )
         return OperationResponse(
             schema_version="durable-operation.v1",
@@ -749,7 +757,14 @@ def create_app(
         ):
             return attach_workspace_cookie(workspace_resource_unavailable(), resolution)
         response = AnalysisRunStatusResponse(
-            **analysis_run_status(operation, operation_request)
+            **analysis_run_status(
+                operation,
+                operation_request,
+                load_fresh_analysis_result(
+                    getattr(app.state, "state_layout", None),
+                    operation.operation_id,
+                ),
+            )
         )
         return attach_workspace_cookie(
             JSONResponse(status_code=200, content=response.model_dump(mode="json")),

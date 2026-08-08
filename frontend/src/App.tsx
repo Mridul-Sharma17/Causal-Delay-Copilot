@@ -631,6 +631,55 @@ function DecisionBriefPanel({
   );
 }
 
+function FreshRunDetailPanel({
+  detail,
+}: {
+  detail: Record<string, unknown> | null | undefined;
+}) {
+  if (detail === null || detail === undefined) {
+    return null;
+  }
+  const variants = Array.isArray(detail.variants)
+    ? detail.variants.filter(
+        (value): value is Record<string, unknown> =>
+          typeof value === "object" && value !== null && !Array.isArray(value),
+      )
+    : [];
+  const failures = Array.isArray(detail.component_failures)
+    ? detail.component_failures.length
+    : 0;
+  return (
+    <section className="operation-detail" aria-label="Fresh run detail">
+      <p className="eyebrow">Safe engine detail</p>
+      <dl className="risk-facts">
+        <div>
+          <dt>Execution state</dt>
+          <dd>{String(detail.execution_state ?? "unavailable")}</dd>
+        </div>
+        <div>
+          <dt>Last completed stage</dt>
+          <dd>{String(detail.last_completed_stage ?? "unavailable")}</dd>
+        </div>
+        <div>
+          <dt>Component failures</dt>
+          <dd>{failures}</dd>
+        </div>
+      </dl>
+      {variants.length > 0 && (
+        <ul className="status-list">
+          {variants.map((variant) => (
+            <li key={String(variant.variant_id)}>
+              <strong>{String(variant.variant_id)}</strong>: S8 {String(variant.s8_status)} ·
+              overlap {String(variant.overlap_status)} · S9 {String(variant.s9_status)} (
+              {String(variant.s9_count ?? 0)} rows)
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
 function App() {
   const [journeyState, setJourneyState] = useState<JourneyState>("loading");
   const [health, setHealth] = useState<HealthResponse | null>(null);
@@ -1107,15 +1156,20 @@ function App() {
                       </p>
                     )}
                     {freshOperationState === "terminal" && freshOperation !== null && (
-                      <p className="supporting-copy" role="status">
-                        {freshOperation.analysis_run?.status === "ABSTAINED"
-                          ? `Fresh request validated and abstained before estimator execution. ${freshOperation.analysis_run.reason_code ?? "No scientific result was published."}`
-                          : freshOperation.analysis_run?.status === "FAILED"
-                            ? `Fresh request failed safely. ${freshOperation.analysis_run.failure_code ?? "No result was published."}`
-                            : freshOperation.state === "SUCCEEDED"
-                              ? "Fresh request is durably sealed without a fabricated estimate."
-                              : `Fresh operation ended ${freshOperation.state}. ${freshOperation.failure_code ?? "No result was published."}`}
-                      </p>
+                      <>
+                        <p className="supporting-copy" role="status">
+                          {freshOperation.analysis_run?.status === "ABSTAINED"
+                            ? `Fresh request validated and abstained before estimator execution. ${freshOperation.analysis_run.reason_code ?? "No scientific result was published."}`
+                            : freshOperation.analysis_run?.status === "FAILED"
+                              ? `Fresh request failed safely. ${freshOperation.analysis_run.failure_code ?? "No result was published."}`
+                              : freshOperation.state === "SUCCEEDED"
+                                ? "Fresh request is durably sealed without a fabricated estimate."
+                                : `Fresh operation ended ${freshOperation.state}. ${freshOperation.failure_code ?? "No result was published."}`}
+                        </p>
+                        <FreshRunDetailPanel
+                          detail={freshOperation.analysis_run?.fresh_run_detail}
+                        />
+                      </>
                     )}
                   </section>
                 </>

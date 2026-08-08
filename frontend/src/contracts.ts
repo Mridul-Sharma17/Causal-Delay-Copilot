@@ -128,6 +128,7 @@ export type AnalysisRunStatus = {
   estimator_descriptor: Record<string, unknown>;
   feature_descriptor: Record<string, unknown>;
   fold_descriptor: Record<string, unknown>;
+  fresh_run_detail: Record<string, unknown> | null;
 };
 
 export type DurableOperation = {
@@ -826,7 +827,10 @@ function parseAnalysisRunStatus(value: unknown): AnalysisRunStatus {
     !value.derived_seed_registry.every(isRecord) ||
     !isRecord(value.estimator_descriptor) ||
     !isRecord(value.feature_descriptor) ||
-    !isRecord(value.fold_descriptor)
+    !isRecord(value.fold_descriptor) ||
+    (value.fresh_run_detail !== undefined &&
+      value.fresh_run_detail !== null &&
+      !isRecord(value.fresh_run_detail))
   ) {
     throw new Error("invalid analysis run response");
   }
@@ -854,6 +858,10 @@ function parseAnalysisRunStatus(value: unknown): AnalysisRunStatus {
     estimator_descriptor: value.estimator_descriptor,
     feature_descriptor: value.feature_descriptor,
     fold_descriptor: value.fold_descriptor,
+    fresh_run_detail:
+      value.fresh_run_detail === undefined || value.fresh_run_detail === null
+        ? null
+        : value.fresh_run_detail,
   };
 }
 
