@@ -9,9 +9,11 @@ async function expectNoPublicLeakage(page: Page) {
 test("fails closed when no validated reference is installed", async ({ page }) => {
   await page.goto("/");
 
-  await expect(page.getByRole("status")).toContainText(
-    "Core ready with Gemini-only drafting unavailable",
-  );
+  await expect(
+    page.getByText("Core ready with Gemini-only drafting unavailable", {
+      exact: true,
+    }),
+  ).toBeVisible();
   await expect(page.getByText(/Demo Workspace active/)).toBeVisible();
   await expect(page.getByText("Process liveness")).toBeVisible();
   await expect(page.getByText("Core readiness")).toBeVisible();
@@ -110,6 +112,7 @@ test("creates isolated browser workspaces with idempotent boot and fail-closed e
       "occurrence_id",
       "occurrence_kind",
       "outcome_code",
+      "source_role_ceiling",
     ]);
 
     const retryResponse = await pageA.request.post("/api/audit/occurrences", {
