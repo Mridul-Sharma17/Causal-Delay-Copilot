@@ -5,6 +5,7 @@ import {
   getHealth,
   getProactiveProposals,
   getRiskSignals,
+  getValidatedReference,
   getWorkspace,
   importHeroDataset,
   recordBootOccurrence,
@@ -25,12 +26,14 @@ import {
   type ReactiveIngressAttempt,
   type RiskSignalFixture,
   type SupplierMilestoneOutcome,
+  type ValidatedReferenceDelivery,
 } from "./contracts";
 import "./styles.css";
 
 type JourneyState = "loading" | "healthy" | "unavailable";
 type AuditState = "pending" | "recorded" | "failed";
 type WorkspaceState = "pending" | "created" | "failed";
+type ReferenceState = "pending" | "loading" | "ready" | "failed";
 type LineageState = "pending" | "loading" | "ready" | "failed";
 type RiskState = "pending" | "loading" | "ready" | "failed";
 
@@ -267,6 +270,8 @@ function App() {
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [workspaceState, setWorkspaceState] = useState<WorkspaceState>("pending");
   const [workspace, setWorkspace] = useState<DemoWorkspace | null>(null);
+  const [referenceState, setReferenceState] = useState<ReferenceState>("pending");
+  const [reference, setReference] = useState<ValidatedReferenceDelivery | null>(null);
   const [auditState, setAuditState] = useState<AuditState>("pending");
   const [auditOccurrence, setAuditOccurrence] =
     useState<AuditOccurrenceResponse | null>(null);
@@ -293,6 +298,8 @@ function App() {
       setJourneyState("healthy");
       setWorkspace(null);
       setWorkspaceState("pending");
+      setReference(null);
+      setReferenceState("pending");
       setAuditState("pending");
       setLineage(null);
       setLineageState("pending");
@@ -317,6 +324,17 @@ function App() {
         setLineageState("failed");
         return;
       }
+
+      setReferenceState("loading");
+      void getValidatedReference()
+        .then((validatedReference) => {
+          setReference(validatedReference);
+          setReferenceState("ready");
+        })
+        .catch(() => {
+          setReference(null);
+          setReferenceState("failed");
+        });
 
       try {
         const outcomeCode = auditOutcomeCode(nextHealth);
@@ -395,6 +413,8 @@ function App() {
       setHealth(null);
       setWorkspace(null);
       setWorkspaceState("failed");
+      setReference(null);
+      setReferenceState("failed");
       setJourneyState("unavailable");
       setAuditState("failed");
       setLineageState("failed");
@@ -527,6 +547,51 @@ function App() {
                   ? "Audit occurrence unavailable"
                   : "Recording the boot occurrence"}
             </p>
+
+            <section className="reference-status" aria-labelledby="reference-heading">
+              <div className="record-heading">
+                <div>
+                  <p className="eyebrow">Evidence delivery</p>
+                  <h2 id="reference-heading">Ordinary demo evidence</h2>
+                </div>
+                <span>{reference?.delivery_badge ?? "Reference unavailable"}</span>
+              </div>
+              {referenceState === "loading" && (
+                <p className="supporting-copy" aria-live="polite">
+                  Verifying the current-release Validated Reference.
+                </p>
+              )}
+              {referenceState === "failed" && (
+                <p className="lineage-warning" aria-live="polite">
+                  Validated Reference unavailable. No ordinary evidence was substituted.
+                </p>
+              )}
+              {referenceState === "ready" && reference !== null && (
+                <>
+                  <p className="supporting-copy" aria-live="polite">
+                    Existing run reused. No fresh scientific execution occurred.
+                  </p>
+                  <dl className="risk-facts">
+                    <div>
+                      <dt>Reference identity</dt>
+                      <dd><code>{reference.reference_slot_id}</code></dd>
+                    </div>
+                    <div>
+                      <dt>Analysis run</dt>
+                      <dd><code>{reference.analysis_run_id}</code></dd>
+                    </div>
+                    <div>
+                      <dt>Release identity</dt>
+                      <dd><code>{reference.release_candidate_id}</code></dd>
+                    </div>
+                    <div>
+                      <dt>Validation attestation</dt>
+                      <dd><code>{reference.validation_attestation_ref}</code></dd>
+                    </div>
+                  </dl>
+                </>
+              )}
+            </section>
           </>
         )}
       </section>

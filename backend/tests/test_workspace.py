@@ -306,7 +306,7 @@ def test_workspace_capability_is_release_bound_without_recovery(tmp_path: Path) 
     assert failure.value.code.value == "DEMO_WORKSPACE_UNAVAILABLE"
 
 
-def test_validated_references_are_global_read_only_state(tmp_path: Path) -> None:
+def test_unverified_sqlite_references_are_not_exposed(tmp_path: Path) -> None:
     state_root = tmp_path / "state"
     with TestClient(create_app(local_settings(state_root))) as client:
         client.get("/api/workspace")
@@ -324,25 +324,19 @@ def test_validated_references_are_global_read_only_state(tmp_path: Path) -> None
             ("reference-1", "bundle-1", "attestation-1", "local-local_fallback"),
         )
 
-    client_a = TestClient(create_app(local_settings(state_root)))
-    client_b = TestClient(create_app(local_settings(state_root)))
-    with client_a, client_b:
-        listed_a = client_a.get("/api/validated-references")
-        listed_b = client_b.get("/api/validated-references")
-        detail = client_a.get("/api/validated-references/reference-1")
+    with TestClient(create_app(local_settings(state_root))) as client:
+        listed = client.get("/api/validated-references")
+        detail = client.get("/api/validated-references/reference-1")
 
-    expected = {
-        "reference_id": "reference-1",
-        "bundle_ref": "bundle-1",
-        "validation_attestation_ref": "attestation-1",
-        "release_candidate_id": "local-local_fallback",
+    assert listed.json() == {"items": []}
+    assert detail.status_code == 404
+    assert detail.json() == {
+        "code": "DEMO_WORKSPACE_RESOURCE_UNAVAILABLE",
+        "recovery_action": "CHECK_WORKSPACE_AND_RETRY",
     }
-    assert listed_a.json() == {"items": [expected]}
-    assert listed_b.json() == {"items": [expected]}
-    assert detail.json() == expected
 
 
-def test_copied_selection_is_workspace_owned_and_idempotent(tmp_path: Path) -> None:
+def test_unverified_sqlite_references_cannot_be_selected(tmp_path: Path) -> None:
     state_root = tmp_path / "state"
     with TestClient(create_app(local_settings(state_root))) as bootstrap:
         bootstrap.get("/api/workspace")
@@ -359,29 +353,19 @@ def test_copied_selection_is_workspace_owned_and_idempotent(tmp_path: Path) -> N
             ("reference-1", "bundle-1", "attestation-1", "local-local_fallback"),
         )
 
-    client_a = TestClient(create_app(local_settings(state_root)))
-    client_b = TestClient(create_app(local_settings(state_root)))
     request = {
         "selection_id": "selection-1",
         "reference_id": "reference-1",
         "idempotency_key": "selection-key-1",
     }
-    with client_a, client_b:
-        created = client_a.post("/api/workspace/selections", json=request)
-        replay = client_a.post("/api/workspace/selections", json=request)
-        cross_workspace = client_b.get("/api/workspace/selections/selection-1")
-        own = client_a.get("/api/workspace/selections/selection-1")
+    with TestClient(create_app(local_settings(state_root))) as client:
+        response = client.post("/api/workspace/selections", json=request)
 
-    assert created.status_code == 201
-    assert replay.status_code == 200
-    assert replay.json()["result"] == "IDEMPOTENT_REPLAY"
-    assert cross_workspace.status_code == 404
-    assert cross_workspace.json() == {
+    assert response.status_code == 404
+    assert response.json() == {
         "code": "DEMO_WORKSPACE_RESOURCE_UNAVAILABLE",
         "recovery_action": "CHECK_WORKSPACE_AND_RETRY",
     }
-    assert own.status_code == 200
-    assert own.json()["reference_id"] == "reference-1"
 
 
 def test_workspace_operation_and_fresh_result_are_partitioned_and_quota_counted(

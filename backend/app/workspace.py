@@ -9,6 +9,7 @@ from pathlib import Path
 import secrets
 import sqlite3
 from threading import RLock
+from typing import Callable
 from uuid import uuid4
 
 from .canonical import timestamp as _timestamp
@@ -841,6 +842,7 @@ class WorkspaceStore:
         selection_id: str,
         reference_id: str,
         idempotency_key: str,
+        reference_exists: Callable[[str], bool],
         now: datetime | None = None,
     ) -> MutationReceipt:
         current_time = _as_utc(now or _utc_now())
@@ -849,14 +851,8 @@ class WorkspaceStore:
             connection = self._connection_or_raise()
             try:
                 connection.execute("BEGIN IMMEDIATE")
-                reference = connection.execute(
-                    """
-                    SELECT 1 FROM validated_references
-                    WHERE reference_id = ? AND release_candidate_id = ?
-                    """,
-                    (reference_id, self._release_candidate_id),
-                ).fetchone()
-                if reference is None:
+                reference_is_available = reference_exists(reference_id)
+                if not reference_is_available:
                     raise WorkspaceRequestError(
                         SafeErrorCode.DEMO_WORKSPACE_RESOURCE_UNAVAILABLE,
                         "CHECK_WORKSPACE_AND_RETRY",

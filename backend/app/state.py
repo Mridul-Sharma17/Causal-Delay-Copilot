@@ -51,6 +51,12 @@ class StateLayout:
     database_path: Path
     artifact_root: Path
     validated_reference_root: Path
+    object_root: Path
+    run_root: Path
+    attestation_root: Path
+    release_root: Path
+    temporary_root: Path
+    quarantine_root: Path
     runtime_root: Path
     release_identity_path: Path
     quota_policy_path: Path
@@ -84,6 +90,12 @@ class StateRoot:
             database_path=settings.database_path,
             artifact_root=settings.artifact_root,
             validated_reference_root=settings.validated_reference_root,
+            object_root=settings.artifact_root / "objects",
+            run_root=settings.artifact_root / "runs",
+            attestation_root=settings.artifact_root / "attestations",
+            release_root=settings.artifact_root / "releases",
+            temporary_root=settings.artifact_root / "temporary",
+            quarantine_root=settings.artifact_root / "quarantine",
             runtime_root=settings.state_root / "runtime",
             release_identity_path=settings.state_root
             / "runtime"
@@ -147,6 +159,15 @@ class StateRoot:
                 self._layout.validated_reference_root,
                 created_directories,
             )
+            for directory in (
+                self._layout.object_root,
+                self._layout.run_root,
+                self._layout.attestation_root,
+                self._layout.release_root,
+                self._layout.temporary_root,
+                self._layout.quarantine_root,
+            ):
+                self._create_directory(directory, created_directories)
             self._create_directory(self._layout.runtime_root, created_directories)
 
             self._create_database(created_files)
@@ -255,6 +276,12 @@ class StateRoot:
         required_directories = [
             self._layout.artifact_root,
             self._layout.validated_reference_root,
+            self._layout.object_root,
+            self._layout.run_root,
+            self._layout.attestation_root,
+            self._layout.release_root,
+            self._layout.temporary_root,
+            self._layout.quarantine_root,
             self._layout.runtime_root,
         ]
         required_files = [

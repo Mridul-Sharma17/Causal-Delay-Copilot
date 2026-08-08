@@ -8,6 +8,7 @@ import {
   parseProactiveProposalListResponse,
   parseReactiveInvestigationResponse,
   parseRiskSignalListResponse,
+  parseValidatedReferenceDelivery,
   type AuditOccurrenceRequest,
   type AuditOccurrenceResponse,
   type DemoWorkspace,
@@ -18,6 +19,7 @@ import {
   type ProactiveProposalListResponse,
   type ReactiveInvestigationResponse,
   type RiskSignalListResponse,
+  type ValidatedReferenceDelivery,
 } from "./contracts";
 
 export class SafeApiError extends Error {
@@ -73,6 +75,17 @@ export function getWorkspace(): Promise<DemoWorkspace> {
       credentials: "same-origin",
     },
     parseDemoWorkspaceResponse,
+  );
+}
+
+export function getValidatedReference(): Promise<ValidatedReferenceDelivery> {
+  return requestJson(
+    "/api/evidence/reference",
+    {
+      headers: { accept: "application/json" },
+      credentials: "same-origin",
+    },
+    parseValidatedReferenceDelivery,
   );
 }
 
