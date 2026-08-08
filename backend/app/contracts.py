@@ -720,7 +720,7 @@ class AnalysisRunStatusResponse(BaseModel):
     analysis_run_id: str
     occurrence_id: str
     operation_id: str
-    status: Literal["PENDING", "RUNNING", "ABSTAINED", "FAILED"]
+    status: Literal["PENDING", "RUNNING", "ESTIMATED", "ABSTAINED", "FAILED"]
     lifecycle: Literal["executing", "sealed", "failed", "quarantined"]
     scientific_outcome: Literal["pending", "estimated", "abstained", "failed"]
     verification_state: Literal["pending", "machine_verified", "reference_validated", "invalid"]
@@ -740,6 +740,7 @@ class AnalysisRunStatusResponse(BaseModel):
     feature_descriptor: dict[str, Any]
     fold_descriptor: dict[str, Any]
     fresh_run_detail: dict[str, Any]
+    primary_result: dict[str, Any] | None = None
 
 
 class OperationResponse(BaseModel):

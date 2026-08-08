@@ -4,7 +4,11 @@ import json
 from pathlib import Path
 import sys
 
-from .analysis_runs import materialize_propensity_and_s9
+from .analysis_runs import (
+    estimate_primary_atte_and_context,
+    materialize_propensity_and_s9,
+    _public_primary_result,
+)
 
 
 def main() -> int:
@@ -22,18 +26,23 @@ def main() -> int:
             return 78
         try:
             stage_result = materialize_propensity_and_s9(request["suite_request"])
+            engine_result = estimate_primary_atte_and_context(
+                request["suite_request"],
+                stage_result,
+            )
             result = {
                 "schema_version": "analysis-run-execution-result.v1",
                 "scientific_request_digest": request["scientific_request_digest"],
-                "status": stage_result["status"],
-                "reason_code": stage_result["reason_code"],
+                "status": engine_result["status"],
+                "reason_code": engine_result["reason_code"],
                 "failure_code": (
-                    stage_result["reason_code"]
-                    if stage_result["status"] == "failed"
+                    engine_result["reason_code"]
+                    if engine_result["status"] == "failed"
                     else None
                 ),
-                "estimator_executed": False,
-                "safe_detail": stage_result["safe_detail"],
+                "estimator_executed": engine_result["estimator_executed"],
+                "primary_result": _public_primary_result(engine_result),
+                "safe_detail": engine_result["safe_detail"],
             }
         except Exception:
             result = {
@@ -43,6 +52,7 @@ def main() -> int:
                 "reason_code": "ENGINE_INTERNAL_ERROR",
                 "failure_code": "ENGINE_INTERNAL_ERROR",
                 "estimator_executed": False,
+                "primary_result": None,
                 "safe_detail": {
                     "schema_version": "analysis-run-safe-detail.v1",
                     "execution_state": "failed",

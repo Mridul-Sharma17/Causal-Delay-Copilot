@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import re
 from pathlib import Path
 import time
@@ -9,6 +10,7 @@ from fastapi.testclient import TestClient
 from backend.app.analysis_runs import (
     ENGINE_INPUT_SCHEMA_VERSION,
     analysis_run_id_for_operation,
+    estimate_primary_atte_and_context,
     materialize_propensity_and_s9,
     scientific_json,
     scientific_sha256,
@@ -529,3 +531,199 @@ def test_propensity_stage_returns_safe_component_failure_without_partial_s9() ->
     ]
     assert primary.get("s9") is None
     assert "line-000" not in str(result["safe_detail"])
+
+
+def _released_supported_primary_request() -> dict[str, object]:
+    request = _suite_request()
+    variant = request["variant_inputs"][0]
+    assert isinstance(variant, dict)
+    fields = request["adjustment_set"]["fields"]
+    assert isinstance(fields, list)
+    rows: list[dict[str, object]] = []
+    categorical_values = {
+        "material_class": ("class-a", "class-b"),
+        "complexity_class": ("standard", "complex"),
+        "project_id": ("project-a", "project-b"),
+        "project_phase": ("substructure", "fitout"),
+        "urgency_class": ("normal", "urgent"),
+        "geography_code": ("north", "south"),
+        "contract_form": ("lump-sum", "remeasure"),
+    }
+    for supplier_index in range(50):
+        for within_supplier in range(20):
+            row_index = supplier_index * 20 + within_supplier
+            exposed = within_supplier % 2 == 1
+            covariates: dict[str, object] = {}
+            for field in fields:
+                if field in {"quantity", "value"}:
+                    covariates[field] = {
+                        "state": "present",
+                        "value": float((supplier_index * 7 + (field == "value")) % 19),
+                    }
+                else:
+                    values = categorical_values[field]
+                    covariates[field] = {
+                        "state": "present",
+                        "value": values[supplier_index % 2],
+                    }
+            rows.append(
+                {
+                    "order_line_id": f"line-supported-{row_index:04d}",
+                    "supplier_id": f"supplier-supported-{supplier_index:03d}",
+                    "high_load_exposure": exposed,
+                    "supplier_milestone_slippage_days": float(
+                        1.5 * exposed
+                        + (supplier_index % 5) * 0.1
+                        + (within_supplier % 7) * 0.07
+                    ),
+                    "supplier_milestone_slippage_duration_basis": "CALENDAR_DAY",
+                    "supplier_milestone_late": exposed,
+                    "load_percentile": 0.25 + (supplier_index % 10) / 20,
+                    "covariates": covariates,
+                    "lineage_refs": [f"lineage:line-supported-{row_index:04d}"],
+                }
+            )
+    variant.update(
+        {
+            "upstream_status": "released",
+            "rows": rows,
+            "cohort_stage_summaries": {
+                "S8_OUTCOME": {
+                    "status": "passed",
+                    "selected_count": len(rows),
+                    "selected_identity_hash": scientific_sha256(
+                        [row["order_line_id"] for row in rows]
+                    ),
+                }
+            },
+        }
+    )
+    variant.pop("scientific_code", None)
+    variant.pop("gate_stage", None)
+    variant["selector_refs"] = sorted(variant["selector_refs"])
+    variant["s8_identity_hash"] = scientific_sha256(
+        [row["order_line_id"] for row in rows]
+    )
+    variant["s8_content_hash"] = scientific_sha256(
+        {
+            key: value
+            for key, value in variant.items()
+            if key not in {"s8_identity_hash", "s8_content_hash"}
+        }
+    )
+    return request
+
+
+def test_primary_atte_and_context_ate_share_clustered_nuisance_and_are_deterministic() -> None:
+    request = _released_supported_primary_request()
+    propensity_stage = materialize_propensity_and_s9(request)
+    assert propensity_stage["variants"]["primary"]["s9"]["state"] == "supported"
+
+    first = estimate_primary_atte_and_context(request, propensity_stage)
+    second = estimate_primary_atte_and_context(request, propensity_stage)
+
+    assert first["status"] == "estimated"
+    assert first["estimator_executed"] is True
+    assert first["result_identity_digest"] == second["result_identity_digest"]
+    primary = first["primary_atte"]
+    context = first["context_ate"]
+    assert primary["estimand_id"] == "primary_atte_slippage"
+    assert primary["score"] == "ATTE"
+    assert context["estimand_id"] == "context_ate_slippage"
+    assert context["score"] == "ATE"
+    assert context["label"] == "overlap_trimmed_context"
+    assert primary["estimator_class"] == context["estimator_class"] == "DoubleMLIRM"
+    assert primary["nuisance_refs"] == context["nuisance_refs"]
+    assert primary["fold_ref"] == context["fold_ref"]
+    assert primary["cohort_identity_hash"] == context["cohort_identity_hash"]
+    assert primary["cluster_key"] == context["cluster_key"] == "supplier_id"
+    assert primary["cluster_count"] == context["cluster_count"] == 50
+    assert primary["ci_level"] == context["ci_level"] == 0.95
+    assert primary["ci_lower"] < primary["estimate"] < primary["ci_upper"]
+    assert context["ci_lower"] < context["estimate"] < context["ci_upper"]
+    assert len(primary["repeat_results"]) == len(context["repeat_results"]) == 2
+    assert first["shared_nuisance"]["external_prediction_shapes"] == {
+        "ml_g0": [1000, 2],
+        "ml_g1": [1000, 2],
+        "ml_m": [1000, 2],
+    }
+    assert first["shared_nuisance"]["external_predictions"][
+        "high_load_exposure"
+    ]["ml_m"][0][0] == first["shared_nuisance"]["external_predictions"][
+        "high_load_exposure"
+    ]["ml_m"][0][1]
+    assert first["shared_nuisance"]["doubleml_refit_nuisance"] is False
+    assert first["safe_detail"]["scope"] == "primary_atte_and_context_ate"
+    assert "line-supported-0000" not in str(first["safe_detail"])
+
+
+def test_primary_estimator_abstains_without_consumable_effect_when_primary_s9_is_unsupported() -> None:
+    result = estimate_primary_atte_and_context(_released_primary_request())
+
+    assert result["status"] == "abstained"
+    assert result["reason_code"] == "OVERLAP_COHORT_INSUFFICIENT"
+    assert result["estimator_executed"] is False
+    assert "primary_atte" not in result
+    assert "context_ate" not in result
+    assert "line-000" not in str(result["safe_detail"])
+
+
+def test_primary_estimator_fails_closed_on_tampered_external_prediction_identity() -> None:
+    request = _released_supported_primary_request()
+    propensity_stage = materialize_propensity_and_s9(request)
+    tampered_stage = deepcopy(propensity_stage)
+    tampered_stage["variants"]["primary"]["propensity_predictions"][0][
+        "row_id"
+    ] = "unknown-row"
+
+    result = estimate_primary_atte_and_context(request, tampered_stage)
+
+    assert result["status"] == "failed"
+    assert result["reason_code"] == "ENGINE_NUISANCE_PREDICTION_INVALID"
+    assert result["estimator_executed"] is True
+    assert "primary_atte" not in result
+    assert "context_ate" not in result
+    assert "unknown-row" not in str(result["safe_detail"])
+
+
+def test_fresh_worker_publishes_provisional_primary_result_without_permission(
+    tmp_path: Path,
+) -> None:
+    request = _released_supported_primary_request()
+    with _client(tmp_path / "state", start_operation_runner=True) as client:
+        response = client.post(
+            "/api/operations",
+            json={
+                "idempotency_key": "fresh-analysis-estimated-test",
+                "operation_kind": "FRESH_ANALYSIS",
+                "memory_required_bytes": 1024,
+                "request": {"suite_request": request},
+            },
+        )
+        operation_id = response.json()["operation"]["operation_id"]
+        terminal = response.json()["operation"]
+        for _ in range(300):
+            terminal = client.get(f"/api/operations/{operation_id}").json()
+            if terminal["state"] in {
+                "SUCCEEDED",
+                "FAILED",
+                "CANCELLED",
+                "TIMED_OUT",
+                "INTERRUPTED",
+                "REJECTED",
+            }:
+                break
+            time.sleep(0.1)
+
+    assert terminal["state"] == "SUCCEEDED"
+    analysis_run = terminal["analysis_run"]
+    assert analysis_run["status"] == "ESTIMATED"
+    assert analysis_run["scientific_outcome"] == "estimated"
+    assert analysis_run["estimator_executed"] is True
+    assert analysis_run["primary_result"]["schema_version"] == "fresh-primary-result.v1"
+    assert analysis_run["primary_result"]["state"] == "provisional"
+    assert analysis_run["primary_result"]["permission"] == {
+        "evidence_verdict": False,
+        "action_permission": False,
+        "state": "provisional_run_output_only",
+    }

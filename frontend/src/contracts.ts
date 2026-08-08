@@ -105,7 +105,7 @@ export type AnalysisRunStatus = {
   analysis_run_id: string;
   occurrence_id: string;
   operation_id: string;
-  status: "PENDING" | "RUNNING" | "ABSTAINED" | "FAILED";
+  status: "PENDING" | "RUNNING" | "ESTIMATED" | "ABSTAINED" | "FAILED";
   lifecycle: "executing" | "sealed" | "failed" | "quarantined";
   scientific_outcome: "pending" | "estimated" | "abstained" | "failed";
   verification_state:
@@ -129,6 +129,7 @@ export type AnalysisRunStatus = {
   feature_descriptor: Record<string, unknown>;
   fold_descriptor: Record<string, unknown>;
   fresh_run_detail: Record<string, unknown> | null;
+  primary_result: Record<string, unknown> | null;
 };
 
 export type DurableOperation = {
@@ -796,6 +797,7 @@ function parseAnalysisRunStatus(value: unknown): AnalysisRunStatus {
     typeof value.operation_id !== "string" ||
     (value.status !== "PENDING" &&
       value.status !== "RUNNING" &&
+      value.status !== "ESTIMATED" &&
       value.status !== "ABSTAINED" &&
       value.status !== "FAILED") ||
     (value.lifecycle !== "executing" &&
@@ -830,7 +832,10 @@ function parseAnalysisRunStatus(value: unknown): AnalysisRunStatus {
     !isRecord(value.fold_descriptor) ||
     (value.fresh_run_detail !== undefined &&
       value.fresh_run_detail !== null &&
-      !isRecord(value.fresh_run_detail))
+      !isRecord(value.fresh_run_detail)) ||
+    (value.primary_result !== undefined &&
+      value.primary_result !== null &&
+      !isRecord(value.primary_result))
   ) {
     throw new Error("invalid analysis run response");
   }
@@ -862,6 +867,10 @@ function parseAnalysisRunStatus(value: unknown): AnalysisRunStatus {
       value.fresh_run_detail === undefined || value.fresh_run_detail === null
         ? null
         : value.fresh_run_detail,
+    primary_result:
+      value.primary_result === undefined || value.primary_result === null
+        ? null
+        : value.primary_result,
   };
 }
 

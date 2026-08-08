@@ -1,6 +1,7 @@
 import { afterEach, expect, test, vi } from "vitest";
 
 import { pollOperation } from "./api";
+import { parseOperationResponse } from "./contracts";
 
 function operation(state: string) {
   return {
@@ -74,4 +75,48 @@ test("pollOperation uses bounded backoff and stops at a terminal state", async (
   expect(
     fetchMock.mock.calls.every(([url]) => url === "/api/operations/operation-1"),
   ).toBe(true);
+});
+
+test("parseOperationResponse accepts an estimated provisional fresh result", () => {
+  const parsed = parseOperationResponse({
+    ...operation("SUCCEEDED"),
+    analysis_run: {
+      schema_version: "analysis-run-status.v1",
+      analysis_run_id: "analysis-run-1",
+      occurrence_id: "operation-1",
+      operation_id: "operation-1",
+      status: "ESTIMATED",
+      lifecycle: "sealed",
+      scientific_outcome: "estimated",
+      verification_state: "machine_verified",
+      availability_state: "available",
+      delivery_mode: "fresh_execution",
+      reason_code: null,
+      failure_code: null,
+      recovery_action: null,
+      estimator_executed: true,
+      request_schema_version: "causal-engine-suite-request.v2",
+      scientific_request_digest: "sha256:request",
+      runtime_fingerprint: {},
+      runtime_fingerprint_digest: "sha256:runtime",
+      root_seed: 0,
+      derived_seed_registry: [],
+      estimator_descriptor: {},
+      feature_descriptor: {},
+      fold_descriptor: {},
+      fresh_run_detail: {},
+      primary_result: {
+        schema_version: "fresh-primary-result.v1",
+        state: "provisional",
+        permission: {
+          evidence_verdict: false,
+          action_permission: false,
+          state: "provisional_run_output_only",
+        },
+      },
+    },
+  });
+
+  expect(parsed.analysis_run?.status).toBe("ESTIMATED");
+  expect(parsed.analysis_run?.primary_result?.state).toBe("provisional");
 });

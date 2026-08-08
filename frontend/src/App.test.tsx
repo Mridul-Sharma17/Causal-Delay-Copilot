@@ -769,6 +769,87 @@ describe("Core health journey", () => {
         });
       }
 
+      if (input === "/api/operations") {
+        expect(init?.method).toBe("POST");
+        return new Response(
+          JSON.stringify({
+            result: "CREATED",
+            operation: {
+              schema_version: "durable-operation.v1",
+              operation_id: "operation-fresh-estimated",
+              operation_kind: "FRESH_ANALYSIS",
+              state: "SUCCEEDED",
+              status: "SUCCEEDED",
+              queue_position: null,
+              created_at: "2026-08-05T00:00:04Z",
+              queued_at: "2026-08-05T00:00:04Z",
+              started_at: "2026-08-05T00:00:04Z",
+              finished_at: "2026-08-05T00:00:05Z",
+              cancel_requested_at: null,
+              retry_of_operation_id: null,
+              failure_code: null,
+              recovery_action: null,
+              resource_warnings: [],
+              artifact_state: "PUBLISHED",
+              retryable: false,
+              timeout_seconds: 300,
+              thread_cap: 1,
+              memory_required_bytes: 1024,
+              memory_available_bytes: 2048,
+              disk_free_bytes: 2 * 1024 * 1024 * 1024,
+              analysis_run: {
+                schema_version: "analysis-run-status.v1",
+                analysis_run_id: "analysis-run-fresh-estimated",
+                occurrence_id: "operation-fresh-estimated",
+                operation_id: "operation-fresh-estimated",
+                status: "ESTIMATED",
+                lifecycle: "sealed",
+                scientific_outcome: "estimated",
+                verification_state: "machine_verified",
+                availability_state: "available",
+                delivery_mode: "fresh_execution",
+                reason_code: null,
+                failure_code: null,
+                recovery_action: null,
+                estimator_executed: true,
+                request_schema_version: "causal-engine-suite-request.v2",
+                scientific_request_digest: "sha256:fresh-request",
+                runtime_fingerprint: {},
+                runtime_fingerprint_digest: "sha256:fresh-runtime",
+                root_seed: 0,
+                derived_seed_registry: [],
+                estimator_descriptor: {},
+                feature_descriptor: {},
+                fold_descriptor: {},
+                fresh_run_detail: {},
+                primary_result: {
+                  schema_version: "fresh-primary-result.v1",
+                  state: "provisional",
+                  primary_atte: {
+                    estimate: 1.5,
+                    ci_lower: 0.4,
+                    ci_upper: 2.6,
+                    duration_basis: "CALENDAR_DAY",
+                  },
+                  context_ate: {
+                    estimate: 1.2,
+                    ci_lower: 0.3,
+                    ci_upper: 2.1,
+                    duration_basis: "CALENDAR_DAY",
+                  },
+                  permission: {
+                    evidence_verdict: false,
+                    action_permission: false,
+                    state: "provisional_run_output_only",
+                  },
+                },
+              },
+            },
+          }),
+          { status: 202, headers: { "content-type": "application/json" } },
+        );
+      }
+
       expect(input).toBe("/api/audit/occurrences");
       expect(init?.method).toBe("POST");
       const request = JSON.parse(String(init?.body)) as {
@@ -828,6 +909,13 @@ describe("Core health journey", () => {
     expect(screen.getAllByText("CALENDAR_DAY")).toHaveLength(3);
     expect(screen.getAllByText("OUTCOME_NOT_REQUIRED_FOR_SUBJECT")).toHaveLength(2);
     expect(screen.getAllByText(/No slippage estimate is displayed/)).toHaveLength(2);
+    fireEvent.click(screen.getByRole("button", { name: "Request fresh analysis" }));
+    expect(
+      await screen.findByText(/Fresh request completed with provisional primary ATTE/),
+    ).toBeInTheDocument();
+    expect(await screen.findByText("Provisional fresh-run result")).toBeInTheDocument();
+    expect(screen.getByText("Primary ATTE")).toBeInTheDocument();
+    expect(screen.getByText("Provisional only · verdict and action unavailable")).toBeInTheDocument();
     expect(screen.getByText("PROACTIVE · PREVIEW-ONLY")).toBeInTheDocument();
     expect(
       screen.getByText(/No canonical Order Line, commitment event, actual milestone/),
@@ -847,7 +935,7 @@ describe("Core health journey", () => {
       await screen.findByText("Source observation register (3)"),
     ).toBeInTheDocument();
     expect(screen.getAllByText("SOURCE_DUPLICATE_DEDUPED").length).toBeGreaterThan(0);
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(12));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(13));
   });
 
   test("does not expose an internal error when health is unavailable", async () => {

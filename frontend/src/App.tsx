@@ -633,50 +633,111 @@ function DecisionBriefPanel({
 
 function FreshRunDetailPanel({
   detail,
+  primaryResult,
 }: {
   detail: Record<string, unknown> | null | undefined;
+  primaryResult: Record<string, unknown> | null | undefined;
 }) {
-  if (detail === null || detail === undefined) {
+  if (
+    (detail === null || detail === undefined) &&
+    (primaryResult === null || primaryResult === undefined)
+  ) {
     return null;
   }
-  const variants = Array.isArray(detail.variants)
+  const variants = detail !== null && detail !== undefined && Array.isArray(detail.variants)
     ? detail.variants.filter(
         (value): value is Record<string, unknown> =>
           typeof value === "object" && value !== null && !Array.isArray(value),
       )
     : [];
-  const failures = Array.isArray(detail.component_failures)
+  const failures =
+    detail !== null && detail !== undefined && Array.isArray(detail.component_failures)
     ? detail.component_failures.length
     : 0;
+  const primaryEffect =
+    primaryResult !== null &&
+    primaryResult !== undefined &&
+    typeof primaryResult.primary_atte === "object" &&
+    primaryResult.primary_atte !== null
+      ? (primaryResult.primary_atte as Record<string, unknown>)
+      : null;
+  const contextEffect =
+    primaryResult !== null &&
+    primaryResult !== undefined &&
+    typeof primaryResult.context_ate === "object" &&
+    primaryResult.context_ate !== null
+      ? (primaryResult.context_ate as Record<string, unknown>)
+      : null;
+  const effectInterval = (effect: Record<string, unknown> | null) =>
+    effect === null
+      ? "Unavailable"
+      : `${String(effect.ci_lower ?? "Unavailable")} to ${String(effect.ci_upper ?? "Unavailable")}`;
   return (
-    <section className="operation-detail" aria-label="Fresh run detail">
-      <p className="eyebrow">Safe engine detail</p>
-      <dl className="risk-facts">
-        <div>
-          <dt>Execution state</dt>
-          <dd>{String(detail.execution_state ?? "unavailable")}</dd>
-        </div>
-        <div>
-          <dt>Last completed stage</dt>
-          <dd>{String(detail.last_completed_stage ?? "unavailable")}</dd>
-        </div>
-        <div>
-          <dt>Component failures</dt>
-          <dd>{failures}</dd>
-        </div>
-      </dl>
-      {variants.length > 0 && (
-        <ul className="status-list">
-          {variants.map((variant) => (
-            <li key={String(variant.variant_id)}>
-              <strong>{String(variant.variant_id)}</strong>: S8 {String(variant.s8_status)} ·
-              overlap {String(variant.overlap_status)} · S9 {String(variant.s9_status)} (
-              {String(variant.s9_count ?? 0)} rows)
-            </li>
-          ))}
-        </ul>
+    <>
+      {detail !== null && detail !== undefined && (
+        <section className="operation-detail" aria-label="Fresh run detail">
+          <p className="eyebrow">Safe engine detail</p>
+          <dl className="risk-facts">
+            <div>
+              <dt>Execution state</dt>
+              <dd>{String(detail.execution_state ?? "unavailable")}</dd>
+            </div>
+            <div>
+              <dt>Last completed stage</dt>
+              <dd>{String(detail.last_completed_stage ?? "unavailable")}</dd>
+            </div>
+            <div>
+              <dt>Component failures</dt>
+              <dd>{failures}</dd>
+            </div>
+          </dl>
+          {variants.length > 0 && (
+            <ul className="status-list">
+              {variants.map((variant) => (
+                <li key={String(variant.variant_id)}>
+                  <strong>{String(variant.variant_id)}</strong>: S8 {String(variant.s8_status)} ·
+                  overlap {String(variant.overlap_status)} · S9 {String(variant.s9_status)} (
+                  {String(variant.s9_count ?? 0)} rows)
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
       )}
-    </section>
+      {primaryResult !== null && primaryResult !== undefined && (
+        <section className="operation-detail" aria-label="Provisional fresh-run result">
+          <p className="eyebrow">Provisional fresh-run result</p>
+          <p className="supporting-copy">
+            This is provisional run output only. It grants no Evidence Verdict and no action
+            permission.
+          </p>
+          <dl className="risk-facts">
+            <div>
+              <dt>Primary ATTE</dt>
+              <dd>
+                {String(primaryEffect?.estimate ?? "Unavailable")} days · 95% interval{" "}
+                {effectInterval(primaryEffect)}
+              </dd>
+            </div>
+            <div>
+              <dt>Contextual ATE</dt>
+              <dd>
+                {String(contextEffect?.estimate ?? "Unavailable")} days · 95% interval{" "}
+                {effectInterval(contextEffect)}
+              </dd>
+            </div>
+            <div>
+              <dt>Duration basis</dt>
+              <dd>{String(primaryEffect?.duration_basis ?? "Unavailable")}</dd>
+            </div>
+            <div>
+              <dt>Permission state</dt>
+              <dd>Provisional only · verdict and action unavailable</dd>
+            </div>
+          </dl>
+        </section>
+      )}
+    </>
   );
 }
 
@@ -1158,7 +1219,9 @@ function App() {
                     {freshOperationState === "terminal" && freshOperation !== null && (
                       <>
                         <p className="supporting-copy" role="status">
-                          {freshOperation.analysis_run?.status === "ABSTAINED"
+                          {freshOperation.analysis_run?.status === "ESTIMATED"
+                            ? "Fresh request completed with provisional primary ATTE and contextual ATE. No Evidence Verdict or action permission was granted."
+                            : freshOperation.analysis_run?.status === "ABSTAINED"
                             ? `Fresh request validated and abstained before estimator execution. ${freshOperation.analysis_run.reason_code ?? "No scientific result was published."}`
                             : freshOperation.analysis_run?.status === "FAILED"
                               ? `Fresh request failed safely. ${freshOperation.analysis_run.failure_code ?? "No result was published."}`
@@ -1168,6 +1231,7 @@ function App() {
                         </p>
                         <FreshRunDetailPanel
                           detail={freshOperation.analysis_run?.fresh_run_detail}
+                          primaryResult={freshOperation.analysis_run?.primary_result}
                         />
                       </>
                     )}
