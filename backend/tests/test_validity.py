@@ -6,13 +6,16 @@ from backend.app.diagnostics import evaluate_primary_interval
 from backend.app.validity import (
     ValidityIntegrityError,
     derive_evidence_verdict,
+    derive_subject_evidence_verdict,
     evaluate_comparison_triangulation,
     evaluate_cross_form_direction,
     evaluate_complete_validity,
     evaluate_repeat_stability,
     evaluate_robustness_grade,
     evaluate_specification_stability,
+    render_subject_evidence_verdict,
     render_evidence_verdict,
+    verify_subject_evidence_verdict,
 )
 
 
@@ -302,3 +305,66 @@ def test_complete_validity_composes_the_new_diagnostics_and_verdict() -> None:
     assert len(complete["diagnostics"]) == 6
     assert complete["robustness_grade"]["grade"] == "STRONG"
     assert complete["evidence_verdict"]["verdict_code"] == "SUPPORTED_UNDER_ASSUMPTIONS"
+
+
+def _supported_population_verdict() -> dict[str, object]:
+    effect = _effect(1.5, standard_error=0.1, lower=1.2, upper=1.8)
+    verdict = derive_evidence_verdict(
+        {
+            "status": "estimated",
+            "primary_effect": effect,
+            "effect_result_ref": "engine_result:primary",
+        },
+        [evaluate_primary_interval(effect, **IDENTITY)],
+        intended_role="semi_synthetic_hero",
+        scope="population",
+        **IDENTITY,
+    )
+    assert verdict is not None
+    return verdict
+
+
+def test_subject_verdict_requires_profile_propensity_distribution_and_role_permission() -> None:
+    verdict = derive_subject_evidence_verdict(
+        _supported_population_verdict(),
+        subject_id="order-line-1",
+        subject_profile={
+            "material_class": {"state": "present", "value": "switchgear"},
+            "quantity": {"state": "present", "value": 120},
+        },
+        subject_propensity={"state": "present", "value": 0.5},
+        distribution_support={"state": "supported"},
+        source_role="semi_synthetic_hero",
+    )
+
+    assert verdict["scope"] == "subject"
+    assert verdict["verdict_code"] == "SUPPORTED_UNDER_ASSUMPTIONS"
+    assert verdict["population_verdict_ref"] == _supported_population_verdict()["content_hash"]
+    assert verdict["effect"] == _supported_population_verdict()["effect"]
+    assert verdict["subject_applicability_state"] == "applicable"
+    assert verify_subject_evidence_verdict(verdict)["content_hash"] == verdict["content_hash"]
+
+    rendered = render_subject_evidence_verdict(verdict)
+    rendered_text = f"{rendered['language']} {rendered['next_step']}".lower()
+    for forbidden in ("cate", "individual treatment effect", "proof of this case's cause"):
+        assert forbidden not in rendered_text
+
+
+def test_subject_support_failure_abstains_without_exposing_an_effect() -> None:
+    verdict = derive_subject_evidence_verdict(
+        _supported_population_verdict(),
+        subject_id="order-line-1",
+        subject_profile={
+            "material_class": {"state": "present", "value": "switchgear"},
+        },
+        subject_propensity={"state": "present", "value": 0.95},
+        distribution_support={"state": "supported"},
+        source_role="semi_synthetic_hero",
+    )
+
+    assert verdict["verdict_code"] == "INSUFFICIENT"
+    assert verdict["primary_trigger_code"] == "SUBJECT_OVERLAP_INSUFFICIENT"
+    assert verdict["effect"] is None
+    assert verdict["decision_support_evaluation_permitted"] is False
+    assert verdict["subject_applicability_state"] == "abstained"
+    assert render_subject_evidence_verdict(verdict)["next_step"]

@@ -223,6 +223,65 @@ code {
   border-top: 4px solid #0f62fe;
 }
 
+.decision-brief {
+  display: grid;
+  gap: 16px;
+  margin-top: 24px;
+  padding: 24px;
+  background: #ffffff;
+  border-top: 4px solid #8a3ffc;
+}
+
+.decision-brief h3 {
+  margin: 0;
+  font-size: 1.25rem;
+  font-weight: 500;
+}
+
+.support-gates,
+.action-lane {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  background: #f4f4f4;
+}
+
+.support-gates ul {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.support-gates li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: baseline;
+  justify-content: space-between;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #c6c6c6;
+}
+
+.support-gates li:last-child {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+.support-gates code {
+  display: inline;
+  margin-top: 0;
+}
+
+.replay-status {
+  margin: 0;
+  padding: 16px;
+  border-left: 4px solid #198038;
+  background: #defbe6;
+  line-height: 1.5;
+}
+
 .evidence-verdict h3 {
   margin: 0;
   font-size: 1.25rem;

@@ -2,14 +2,17 @@ import {
   parseLineageSnapshot,
   parseDemoWorkspaceResponse,
   parseAuditOccurrenceResponse,
+  parseDecisionBriefResponse,
   parseHealthResponse,
   parseProactiveInvestigationResponse,
   parseProactiveProposalListResponse,
   parseReactiveInvestigationResponse,
   parseRiskSignalListResponse,
+  parseReplayResponse,
   parseValidatedReferenceDelivery,
   type AuditOccurrenceRequest,
   type AuditOccurrenceResponse,
+  type DecisionBriefResponse,
   type DemoWorkspace,
   type HealthResponse,
   type LineageSnapshot,
@@ -17,6 +20,7 @@ import {
   type ProactiveProposalListResponse,
   type ReactiveInvestigationResponse,
   type RiskSignalListResponse,
+  type ReplayResponse,
   type ValidatedReferenceDelivery,
 } from "./contracts";
 
@@ -113,6 +117,46 @@ export function getDatasetLineage(datasetVersionId: string): Promise<LineageSnap
       credentials: "same-origin",
     },
     parseLineageSnapshot,
+  );
+}
+
+export function publishDecisionBrief(
+  investigationRequestId: string,
+  referenceId: string,
+): Promise<DecisionBriefResponse> {
+  return requestJson(
+    `/api/investigations/${encodeURIComponent(investigationRequestId)}/decision-brief`,
+    {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        "content-type": "application/json",
+      },
+      credentials: "same-origin",
+      body: JSON.stringify({
+        idempotency_key: `decision-brief:${investigationRequestId}:${referenceId}`,
+        reference_id: referenceId,
+      }),
+    },
+    parseDecisionBriefResponse,
+  );
+}
+
+export function replayDecisionBrief(
+  investigationRequestId: string,
+  eventSeq: number,
+): Promise<ReplayResponse> {
+  const params = new URLSearchParams({
+    investigation_request_id: investigationRequestId,
+    event_seq: String(eventSeq),
+  });
+  return requestJson(
+    `/api/audit/replay?${params.toString()}`,
+    {
+      headers: { accept: "application/json" },
+      credentials: "same-origin",
+    },
+    parseReplayResponse,
   );
 }
 

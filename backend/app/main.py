@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import AsyncIterator, Awaitable, Callable
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -19,6 +19,9 @@ from .contracts import (
     AuditOccurrenceListResponse,
     AuditOccurrenceResponse,
     AuditOccurrenceViewResponse,
+    DecisionBriefRequest,
+    DecisionBriefResponse,
+    DecisionBriefSnapshotResponse,
     DemoWorkspaceResponse,
     DatasetVersionListResponse,
     ErrorResponse,
@@ -33,6 +36,7 @@ from .contracts import (
     ProactiveProposalRequest,
     ReactiveInvestigationResponse,
     ReactiveFixtureRequest,
+    ReplayResponse,
     RiskSignalListResponse,
     RiskSignalRequest,
     ValidatedReferenceDeliveryResponse,
@@ -44,6 +48,10 @@ from .contracts import (
     WorkspaceResultViewResponse,
 )
 from .errors import WorkspaceRequestError
+from .governance import (
+    DecisionBriefUnavailable,
+    InvestigationRequestUnavailable,
+)
 from .ingestion import (
     DatasetVersionUnavailable,
     IngestionIdempotencyConflict,
@@ -377,6 +385,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "RESTORE_CORE_STATE_AND_RETRY",
         )
 
+    @app.exception_handler(DecisionBriefUnavailable)
+    async def handle_decision_brief_unavailable(
+        _: Request,
+        __: DecisionBriefUnavailable,
+    ) -> JSONResponse:
+        return _error_response(
+            503,
+            "DECISION_BRIEF_UNAVAILABLE",
+            "SELECT_A_VERIFIED_REFERENCE_FOR_THIS_DATASET_AND_RETRY",
+        )
+
+    @app.exception_handler(InvestigationRequestUnavailable)
+    async def handle_investigation_request_unavailable(
+        _: Request,
+        __: InvestigationRequestUnavailable,
+    ) -> JSONResponse:
+        return _error_response(
+            404,
+            "INVESTIGATION_REQUEST_UNAVAILABLE",
+            "SUBMIT_AN_ACCEPTED_INVESTIGATION_REQUEST_AND_RETRY",
+        )
+
     @app.exception_handler(WorkspaceRequestError)
     async def handle_workspace_error(
         _: Request,
@@ -632,6 +662,112 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             occurrence_kind=occurrence.occurrence_kind,
             outcome_code=occurrence.outcome_code,
             created_at=occurrence.created_at,
+        )
+        return attach_workspace_cookie(
+            JSONResponse(status_code=200, content=response.model_dump(mode="json")),
+            resolution,
+        )
+
+    @app.post(
+        "/api/investigations/{investigation_request_id}/decision-brief",
+        response_model=DecisionBriefResponse,
+        status_code=201,
+    )
+    async def publish_decision_brief(
+        request_context: Request,
+        investigation_request_id: str,
+        request: DecisionBriefRequest,
+    ) -> JSONResponse:
+        resolution = resolve_workspace(request_context)
+        existing = core_store.get_decision_brief_by_idempotency(
+            resolution.snapshot.workspace_id,
+            request.idempotency_key,
+        )
+        if existing is not None:
+            if (
+                existing["investigation_request_id"] != investigation_request_id
+                or existing["reference_id"] != request.reference_id
+            ):
+                raise AuditIdempotencyConflict
+            stored_result = "IDEMPOTENT_REPLAY"
+            snapshot = existing
+        else:
+            reference = reference_store.read_model(request.reference_id)
+            if reference is None:
+                return attach_workspace_cookie(
+                    workspace_resource_unavailable(),
+                    resolution,
+                )
+            stored = core_store.publish_decision_brief(
+                resolution.snapshot.workspace_id,
+                investigation_request_id=investigation_request_id,
+                idempotency_key=request.idempotency_key,
+                reference_id=request.reference_id,
+                reference=reference,
+            )
+            stored_result = stored.result
+            snapshot = stored.snapshot
+        response = DecisionBriefResponse(
+            result=stored_result,
+            snapshot=DecisionBriefSnapshotResponse.model_validate(snapshot),
+        )
+        return attach_workspace_cookie(
+            JSONResponse(
+                status_code=200 if stored_result == "IDEMPOTENT_REPLAY" else 201,
+                content=response.model_dump(mode="json"),
+            ),
+            resolution,
+        )
+
+    @app.get(
+        "/api/investigations/{investigation_request_id}/decision-brief",
+        response_model=DecisionBriefSnapshotResponse,
+    )
+    async def get_decision_brief(
+        request: Request,
+        investigation_request_id: str,
+    ) -> JSONResponse:
+        resolution = resolve_workspace(request)
+        snapshot = core_store.get_decision_brief(
+            resolution.snapshot.workspace_id,
+            investigation_request_id,
+        )
+        if snapshot is None:
+            return attach_workspace_cookie(
+                workspace_resource_unavailable(),
+                resolution,
+            )
+        response = DecisionBriefSnapshotResponse.model_validate(snapshot)
+        return attach_workspace_cookie(
+            JSONResponse(status_code=200, content=response.model_dump(mode="json")),
+            resolution,
+        )
+
+    @app.get("/api/audit/replay", response_model=ReplayResponse)
+    async def replay_audit(
+        request: Request,
+        investigation_request_id: str,
+        event_seq: int = Query(gt=0),
+    ) -> JSONResponse:
+        resolution = resolve_workspace(request)
+        replay = core_store.replay_decision_brief(
+            resolution.snapshot.workspace_id,
+            investigation_request_id,
+            event_seq,
+        )
+        response = ReplayResponse(
+            schema_version="replay.v1",
+            status=replay.status,
+            investigation_request_id=replay.investigation_request_id,
+            requested_event_seq=replay.requested_event_seq,
+            last_verified_event_seq=replay.last_verified_event_seq,
+            snapshot=(
+                None
+                if replay.snapshot is None
+                else DecisionBriefSnapshotResponse.model_validate(replay.snapshot)
+            ),
+            unresolved_references=replay.unresolved_references,
+            recovery_action=replay.recovery_action,
         )
         return attach_workspace_cookie(
             JSONResponse(status_code=200, content=response.model_dump(mode="json")),

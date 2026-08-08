@@ -123,6 +123,57 @@ const referenceDeliveryResponse = {
   },
 };
 
+const decisionBriefSnapshotResponse = {
+  schema_version: "decision-brief-snapshot.v1",
+  snapshot_id: "snapshot-1",
+  investigation_request_id: "ir-1",
+  reference_id: "ordinary-demo",
+  content_hash: "sha256:decision-brief",
+  occurrence_id: "occurrence-decision-brief-1",
+  event_seq: 4,
+  created_at: "2026-08-05T00:00:03Z",
+  subject_applicability: {
+    schema_version: "subject-applicability.v1",
+    state: "abstained",
+    subject_identity: "hero-line-001",
+    subject_profile: { material_class: { state: "present", value: "switchgear" } },
+    subject_profile_hash: "sha256:subject-profile",
+    population_permission: true,
+    source_role_ceiling: true,
+    gates: [
+      { gate: "subject_profile", state: "passed", code: null },
+      { gate: "propensity_support", state: "unavailable", code: "SUBJECT_PROPENSITY_UNAVAILABLE" },
+      { gate: "distribution_support", state: "failed", code: "SUBJECT_DISTRIBUTION_UNSUPPORTED" },
+    ],
+    reason_code: "SUBJECT_PROPENSITY_UNAVAILABLE",
+    reason: "Subject applicability is unavailable because subject propensity unavailable.",
+    next_step: "Supply the frozen subject propensity support before applying population evidence.",
+    claim_scope: "population",
+  },
+  subject_verdict: null,
+  rendered_subject_verdict: null,
+  action_lane: {
+    schema_version: "reference-journey-action-lane.v1",
+    state: "read_only",
+    reason: "Subject applicability is insufficient; no action is authorized from this reference journey.",
+    next_step: "Supply the frozen subject propensity support before applying population evidence.",
+  },
+  presentation: {
+    schema_version: "reference-journey-presentation.v1",
+  },
+};
+
+const replayResponse = {
+  schema_version: "replay.v1",
+  status: "REPLAYED",
+  investigation_request_id: "ir-1",
+  requested_event_seq: 4,
+  last_verified_event_seq: 4,
+  snapshot: decisionBriefSnapshotResponse,
+  unresolved_references: [],
+  recovery_action: "NONE",
+};
+
 const lineageResponse = {
   ingestion_run: {
     ingestion_run_id: "run-1",
@@ -651,6 +702,26 @@ describe("Core health journey", () => {
         });
       }
 
+      if (
+        typeof input === "string" &&
+        input.startsWith("/api/investigations/ir-1/decision-brief")
+      ) {
+        expect(init?.method).toBe("POST");
+        return new Response(
+          JSON.stringify({ result: "CREATED", snapshot: decisionBriefSnapshotResponse }),
+          { status: 201, headers: { "content-type": "application/json" } },
+        );
+      }
+
+      if (typeof input === "string" && input.startsWith("/api/audit/replay?")) {
+        expect(input).toContain("investigation_request_id=ir-1");
+        expect(input).toContain("event_seq=4");
+        return new Response(JSON.stringify(replayResponse), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+
       if (input === "/api/investigations/proactive/fixtures") {
         expect(init?.method).toBe("POST");
         const submitted = JSON.parse(String(init?.body));
@@ -715,6 +786,9 @@ describe("Core health journey", () => {
     expect(screen.getByText("Audit occurrence recorded · event 1")).toBeInTheDocument();
     expect(await screen.findByText("Canonical lineage")).toBeInTheDocument();
     expect(await screen.findByText("Investigation request accepted")).toBeInTheDocument();
+    expect(await screen.findByText("Subject applicability")).toBeInTheDocument();
+    expect(screen.getByText("Insufficient subject support — abstained")).toBeInTheDocument();
+    expect(screen.getByText(/Replay verified from stored state at event 4/)).toBeInTheDocument();
     expect(await screen.findByText("Proactive preview accepted")).toBeInTheDocument();
     expect(screen.getAllByText("Eligibility stage")).toHaveLength(2);
     expect(screen.getAllByText("CALENDAR_DAY")).toHaveLength(3);
@@ -739,7 +813,7 @@ describe("Core health journey", () => {
       await screen.findByText("Source observation register (3)"),
     ).toBeInTheDocument();
     expect(screen.getAllByText("SOURCE_DUPLICATE_DEDUPED").length).toBeGreaterThan(0);
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(10));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(12));
   });
 
   test("does not expose an internal error when health is unavailable", async () => {

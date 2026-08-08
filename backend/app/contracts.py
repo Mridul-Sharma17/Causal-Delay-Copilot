@@ -78,6 +78,7 @@ class AuditOccurrenceViewResponse(BaseModel):
         "LINEAGE_SNAPSHOT_VIEW",
         "REACTIVE_INGRESS",
         "PROACTIVE_INGRESS",
+        "DECISION_BRIEF_SNAPSHOT",
     ]
     outcome_code: Literal[
         "CORE_READY",
@@ -115,6 +116,7 @@ class AuditOccurrenceViewResponse(BaseModel):
         "OUTCOME_UNOBSERVED",
         "OUTCOME_TEMPORALLY_INVALID",
         "CANCELLED_BEFORE_MILESTONE",
+        "DECISION_BRIEF_PUBLISHED",
     ]
     created_at: datetime
 
@@ -123,6 +125,58 @@ class AuditOccurrenceListResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     items: list[AuditOccurrenceViewResponse]
+
+
+class DecisionBriefRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    idempotency_key: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+    )
+    reference_id: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+    )
+
+
+class DecisionBriefSnapshotResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    schema_version: Literal["decision-brief-snapshot.v1"]
+    snapshot_id: str
+    investigation_request_id: str
+    reference_id: str
+    content_hash: str
+    occurrence_id: str
+    event_seq: int = Field(gt=0)
+    created_at: datetime
+    subject_applicability: dict[str, Any]
+    subject_verdict: dict[str, Any] | None
+    rendered_subject_verdict: dict[str, str] | None
+    action_lane: dict[str, Any]
+
+
+class DecisionBriefResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    result: Literal["CREATED", "IDEMPOTENT_REPLAY"]
+    snapshot: DecisionBriefSnapshotResponse
+
+
+class ReplayResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["replay.v1"]
+    status: Literal["REPLAYED", "REPLAY_UNAVAILABLE"]
+    investigation_request_id: str
+    requested_event_seq: int = Field(gt=0)
+    last_verified_event_seq: int = Field(ge=0)
+    snapshot: DecisionBriefSnapshotResponse | None
+    unresolved_references: list[str]
+    recovery_action: str
 
 
 class ValidatedReferenceResponse(BaseModel):

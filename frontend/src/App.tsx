@@ -7,13 +7,16 @@ import {
   getRiskSignals,
   getValidatedReference,
   getWorkspace,
+  publishDecisionBrief,
   recordBootOccurrence,
+  replayDecisionBrief,
   submitReactiveInvestigation,
   submitProactiveInvestigation,
 } from "./api";
 import {
   auditOutcomeCode,
   type AuditOccurrenceResponse,
+  type DecisionBriefSnapshot,
   type DiagnosticResult,
   type DiagnosticSummary,
   type DemoWorkspace,
@@ -29,6 +32,7 @@ import {
   type RiskSignalFixture,
   type RobustnessGrade,
   type RenderedEvidenceVerdict,
+  type ReplayResponse,
   type SupplierMilestoneOutcome,
   type ValidatedReferenceDelivery,
 } from "./contracts";
@@ -40,6 +44,7 @@ type WorkspaceState = "pending" | "created" | "failed";
 type ReferenceState = "pending" | "loading" | "ready" | "failed";
 type LineageState = "pending" | "loading" | "ready" | "failed";
 type RiskState = "pending" | "loading" | "ready" | "failed";
+type DecisionBriefState = "pending" | "publishing" | "ready" | "failed";
 
 function createBootKey(outcomeCode: string): string {
   return `core-boot-health-v1:${outcomeCode}`;
@@ -451,6 +456,148 @@ function EvidenceVerdictPanel({
   );
 }
 
+function subjectApplicabilityLabel(
+  state: DecisionBriefSnapshot["subject_applicability"]["state"],
+): string {
+  switch (state) {
+    case "applicable":
+      return "Applicable under the recorded support gates";
+    case "population_limited":
+      return "Population claim only";
+    case "abstained":
+      return "Insufficient subject support — abstained";
+    case "unavailable":
+      return "Subject applicability unavailable";
+  }
+}
+
+function DecisionBriefPanel({
+  state,
+  snapshot,
+  replay,
+}: {
+  state: DecisionBriefState;
+  snapshot: DecisionBriefSnapshot | null;
+  replay: ReplayResponse | null;
+}) {
+  if (state === "pending") {
+    return null;
+  }
+  if (state === "publishing") {
+    return (
+      <section className="decision-brief" aria-labelledby="decision-brief-heading">
+        <div className="record-heading">
+          <div>
+            <p className="eyebrow">Reference journey</p>
+            <h3 id="decision-brief-heading">Publishing the Decision Brief Snapshot</h3>
+          </div>
+        </div>
+        <p className="supporting-copy" role="status">
+          Capturing the subject support gates and the validated reference state.
+        </p>
+      </section>
+    );
+  }
+  if (state === "failed" || snapshot === null) {
+    return (
+      <section className="decision-brief" aria-labelledby="decision-brief-heading">
+        <div className="record-heading">
+          <div>
+            <p className="eyebrow">Reference journey</p>
+            <h3 id="decision-brief-heading">Decision Brief unavailable</h3>
+          </div>
+          <span>Unavailable</span>
+        </div>
+        <p className="lineage-warning" role="status">
+          No stored subject applicability or current substitute was shown. Restore the verified
+          reference journey and retry.
+        </p>
+      </section>
+    );
+  }
+
+  const applicability = snapshot.subject_applicability;
+  const profile = applicability.subject_profile;
+  const profileCount =
+    typeof profile === "object" && profile !== null ? Object.keys(profile).length : 0;
+  const gates = Array.isArray(applicability.gates)
+    ? applicability.gates.filter(
+        (gate): gate is Record<string, unknown> =>
+          typeof gate === "object" && gate !== null,
+      )
+    : [];
+
+  return (
+    <section className="decision-brief" aria-labelledby="decision-brief-heading">
+      <div className="record-heading">
+        <div>
+          <p className="eyebrow">Reference journey</p>
+          <h3 id="decision-brief-heading">Subject applicability</h3>
+        </div>
+        <span>{subjectApplicabilityLabel(applicability.state)}</span>
+      </div>
+      <dl className="verdict-facts">
+        <div>
+          <dt>Subject identity</dt>
+          <dd><code>{formatValue(applicability.subject_identity)}</code></dd>
+        </div>
+        <div>
+          <dt>Explicit subject profile</dt>
+          <dd>{profileCount > 0 ? `${profileCount} recorded fields` : "Unavailable"}</dd>
+        </div>
+        <div>
+          <dt>Population permission</dt>
+          <dd>{formatValue(applicability.population_permission)}</dd>
+        </div>
+        <div>
+          <dt>Source-role ceiling</dt>
+          <dd>{formatValue(applicability.source_role_ceiling)}</dd>
+        </div>
+      </dl>
+      <div className="support-gates">
+        <strong>Support gates</strong>
+        {gates.length === 0 ? (
+          <span>Unavailable</span>
+        ) : (
+          <ul>
+            {gates.map((gate) => (
+              <li key={String(gate.gate)}>
+                <span>{String(gate.gate ?? "support gate")}</span>
+                <code>{String(gate.state ?? "unavailable")}</code>
+                {gate.code !== null && gate.code !== undefined && (
+                  <code>{String(gate.code)}</code>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+      <p className="verdict-language">{formatValue(applicability.reason)}</p>
+      <p className="verdict-next-step">
+        <strong>Next step:</strong> {formatValue(applicability.next_step)}
+      </p>
+      <div className="action-lane">
+        <strong>Action lane: read-only</strong>
+        <span>{formatValue(snapshot.action_lane.reason)}</span>
+        <span>{formatValue(snapshot.action_lane.next_step)}</span>
+      </div>
+      <p className="audit-status">
+        Immutable snapshot {snapshot.snapshot_id} · event {snapshot.event_seq}
+      </p>
+      {replay?.status === "REPLAYED" && replay.snapshot !== null ? (
+        <p className="replay-status" role="status">
+          Replay verified from stored state at event {replay.requested_event_seq}; no current
+          eligibility or reference state was read.
+        </p>
+      ) : (
+        <p className="lineage-warning" role="status">
+          Historical replay is unavailable. The stored snapshot remains read-only.
+        </p>
+      )}
+    </section>
+  );
+}
+
 function App() {
   const [journeyState, setJourneyState] = useState<JourneyState>("loading");
   const [health, setHealth] = useState<HealthResponse | null>(null);
@@ -467,6 +614,12 @@ function App() {
   const [riskFixtures, setRiskFixtures] = useState<RiskSignalFixture[]>([]);
   const [predictiveStatus, setPredictiveStatus] = useState<PredictiveRiskStatus | null>(null);
   const [riskAttempt, setRiskAttempt] = useState<ReactiveIngressAttempt | null>(null);
+  const [decisionBriefState, setDecisionBriefState] =
+    useState<DecisionBriefState>("pending");
+  const [decisionBrief, setDecisionBrief] =
+    useState<DecisionBriefSnapshot | null>(null);
+  const [decisionBriefReplay, setDecisionBriefReplay] =
+    useState<ReplayResponse | null>(null);
   const [riskFailureAttempt, setRiskFailureAttempt] =
     useState<ReactiveIngressAttempt | null>(null);
   const [riskFailureState, setRiskFailureState] = useState<RiskState>("pending");
@@ -493,6 +646,9 @@ function App() {
       setPredictiveStatus(null);
       setRiskFixtures([]);
       setRiskAttempt(null);
+      setDecisionBriefState("pending");
+      setDecisionBrief(null);
+      setDecisionBriefReplay(null);
       setRiskFailureAttempt(null);
       setRiskFailureState("pending");
       setProactiveState("pending");
@@ -577,6 +733,32 @@ function App() {
             );
             setRiskAttempt(attempt.attempt);
             setRiskState("ready");
+            const investigationRequestId = attempt.attempt.investigation_request_id;
+            if (
+              investigationRequestId === null ||
+              validatedReferenceForJourney === null
+            ) {
+              setDecisionBriefState("failed");
+            } else {
+              setDecisionBriefState("publishing");
+              try {
+                const published = await publishDecisionBrief(
+                  investigationRequestId,
+                  validatedReferenceForJourney.reference_id,
+                );
+                setDecisionBrief(published.snapshot);
+                const replay = await replayDecisionBrief(
+                  investigationRequestId,
+                  published.snapshot.event_seq,
+                );
+                setDecisionBriefReplay(replay);
+                setDecisionBriefState("ready");
+              } catch {
+                setDecisionBrief(null);
+                setDecisionBriefReplay(null);
+                setDecisionBriefState("failed");
+              }
+            }
           }
           setProactiveState("loading");
           try {
@@ -618,6 +800,9 @@ function App() {
       setJourneyState("unavailable");
       setAuditState("failed");
       setLineageState("failed");
+      setDecisionBriefState("failed");
+      setDecisionBrief(null);
+      setDecisionBriefReplay(null);
     }
   }, []);
 
@@ -944,6 +1129,11 @@ function App() {
                 }
                 badge="SUBJECT"
                 headingId="reactive-eligibility-heading"
+              />
+              <DecisionBriefPanel
+                state={decisionBriefState}
+                snapshot={decisionBrief}
+                replay={decisionBriefReplay}
               />
               <p className="supporting-copy">
                 Predictive attribution - not causal evidence. Manual investigation remains

@@ -33,6 +33,41 @@ export type AuditOccurrenceResponse = {
   event_seq: number;
 };
 
+export type DecisionBriefSnapshot = {
+  schema_version: "decision-brief-snapshot.v1";
+  snapshot_id: string;
+  investigation_request_id: string;
+  reference_id: string;
+  content_hash: string;
+  occurrence_id: string;
+  event_seq: number;
+  created_at: string;
+  subject_applicability: Record<string, unknown> & {
+    state: "applicable" | "population_limited" | "abstained" | "unavailable";
+  };
+  subject_verdict: Record<string, unknown> | null;
+  rendered_subject_verdict: Record<string, string> | null;
+  action_lane: Record<string, unknown> & {
+    state: "read_only" | "unavailable";
+  };
+};
+
+export type DecisionBriefResponse = {
+  result: "CREATED" | "IDEMPOTENT_REPLAY";
+  snapshot: DecisionBriefSnapshot;
+};
+
+export type ReplayResponse = {
+  schema_version: "replay.v1";
+  status: "REPLAYED" | "REPLAY_UNAVAILABLE";
+  investigation_request_id: string;
+  requested_event_seq: number;
+  last_verified_event_seq: number;
+  snapshot: DecisionBriefSnapshot | null;
+  unresolved_references: string[];
+  recovery_action: string;
+};
+
 export type DemoWorkspace = {
   workspace_id: string;
   status: "ACTIVE";
@@ -621,6 +656,99 @@ export function parseDemoWorkspaceResponse(value: unknown): DemoWorkspace {
     remaining_mutations: value.remaining_mutations,
     terminal_fresh_bundle_count: value.terminal_fresh_bundle_count,
     remaining_terminal_fresh_bundles: value.remaining_terminal_fresh_bundles,
+  };
+}
+
+function parseDecisionBriefSnapshot(value: unknown): DecisionBriefSnapshot {
+  if (
+    !isRecord(value) ||
+    value.schema_version !== "decision-brief-snapshot.v1" ||
+    typeof value.snapshot_id !== "string" ||
+    typeof value.investigation_request_id !== "string" ||
+    typeof value.reference_id !== "string" ||
+    typeof value.content_hash !== "string" ||
+    typeof value.occurrence_id !== "string" ||
+    !isNonNegativeInteger(value.event_seq) ||
+    value.event_seq < 1 ||
+    typeof value.created_at !== "string" ||
+    !isRecord(value.subject_applicability) ||
+    (value.subject_applicability.state !== "applicable" &&
+      value.subject_applicability.state !== "population_limited" &&
+      value.subject_applicability.state !== "abstained" &&
+      value.subject_applicability.state !== "unavailable") ||
+    (value.subject_verdict !== null && !isRecord(value.subject_verdict)) ||
+    (value.rendered_subject_verdict !== null &&
+      (!isRecord(value.rendered_subject_verdict) ||
+        !Object.values(value.rendered_subject_verdict).every(
+          (item) => typeof item === "string",
+        ))) ||
+    !isRecord(value.action_lane) ||
+    (value.action_lane.state !== "read_only" &&
+      value.action_lane.state !== "unavailable")
+  ) {
+    throw new Error("invalid decision brief response");
+  }
+  return {
+    schema_version: "decision-brief-snapshot.v1",
+    snapshot_id: value.snapshot_id,
+    investigation_request_id: value.investigation_request_id,
+    reference_id: value.reference_id,
+    content_hash: value.content_hash,
+    occurrence_id: value.occurrence_id,
+    event_seq: value.event_seq,
+    created_at: value.created_at,
+    subject_applicability: value.subject_applicability as DecisionBriefSnapshot["subject_applicability"],
+    subject_verdict:
+      value.subject_verdict === null
+        ? null
+        : (value.subject_verdict as Record<string, unknown>),
+    rendered_subject_verdict:
+      value.rendered_subject_verdict === null
+        ? null
+        : (value.rendered_subject_verdict as Record<string, string>),
+    action_lane: value.action_lane as DecisionBriefSnapshot["action_lane"],
+  };
+}
+
+export function parseDecisionBriefResponse(value: unknown): DecisionBriefResponse {
+  if (
+    !isRecord(value) ||
+    (value.result !== "CREATED" && value.result !== "IDEMPOTENT_REPLAY")
+  ) {
+    throw new Error("invalid decision brief response");
+  }
+  return {
+    result: value.result,
+    snapshot: parseDecisionBriefSnapshot(value.snapshot),
+  };
+}
+
+export function parseReplayResponse(value: unknown): ReplayResponse {
+  if (
+    !isRecord(value) ||
+    value.schema_version !== "replay.v1" ||
+    (value.status !== "REPLAYED" && value.status !== "REPLAY_UNAVAILABLE") ||
+    typeof value.investigation_request_id !== "string" ||
+    !isNonNegativeInteger(value.requested_event_seq) ||
+    value.requested_event_seq < 1 ||
+    !isNonNegativeInteger(value.last_verified_event_seq) ||
+    (value.snapshot !== null && !isRecord(value.snapshot)) ||
+    !Array.isArray(value.unresolved_references) ||
+    !value.unresolved_references.every((item) => typeof item === "string") ||
+    typeof value.recovery_action !== "string"
+  ) {
+    throw new Error("invalid replay response");
+  }
+  return {
+    schema_version: "replay.v1",
+    status: value.status,
+    investigation_request_id: value.investigation_request_id,
+    requested_event_seq: value.requested_event_seq,
+    last_verified_event_seq: value.last_verified_event_seq,
+    snapshot:
+      value.snapshot === null ? null : parseDecisionBriefSnapshot(value.snapshot),
+    unresolved_references: value.unresolved_references,
+    recovery_action: value.recovery_action,
   };
 }
 

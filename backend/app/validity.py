@@ -87,6 +87,7 @@ TRIGGER_PRIORITIES: dict[str, int] = {
     "COVARIATE_TEMPORAL_LEAKAGE": 198,
     "REQUIRED_COVARIATE_UNUSABLE": 199,
     "SUBJECT_OVERLAP_INSUFFICIENT": 200,
+    "SUBJECT_PROPENSITY_UNAVAILABLE": 201,
     "SUBJECT_DISTRIBUTION_UNSUPPORTED": 210,
     "PRIMARY_INTERVAL_INCLUDES_NULL": 220,
     "PRIMARY_EFFECT_OPPOSITE_DIRECTION": 230,
@@ -139,6 +140,7 @@ _NEXT_STEPS: dict[str, str] = {
     "COVARIATE_TEMPORAL_LEAKAGE": "Pre-register a strictly pre-treatment covariate derivation and execute a new run; do not use later-known values.",
     "REQUIRED_COVARIATE_UNUSABLE": "Repair the required pre-treatment covariate or its declared missingness handling; do not drop it after seeing results.",
     "SUBJECT_OVERLAP_INSUFFICIENT": "Do not apply the population effect to this order; collect comparable historical cases or use the non-causal risk workflow.",
+    "SUBJECT_PROPENSITY_UNAVAILABLE": "Supply the frozen subject propensity support before applying population evidence; do not infer support from the risk score.",
     "SUBJECT_DISTRIBUTION_UNSUPPORTED": "Do not apply the population effect to this order; add comparable two-arm history for the reported unsupported profile.",
     "PRIMARY_INTERVAL_INCLUDES_NULL": "Treat congestion as an unconfirmed delay driver; gather additional eligible evidence or investigate another pre-specified driver.",
     "PRIMARY_EFFECT_OPPOSITE_DIRECTION": "Do not recommend a congestion-targeted action; review the causal question and investigate an alternative driver or protective mechanism.",
@@ -1482,6 +1484,347 @@ def verify_evidence_verdict(value: Mapping[str, Any]) -> dict[str, Any]:
         raise ValidityIntegrityError("decision-support permission exceeds the verdict ceiling")
     record["content_hash"] = content_hash
     return record
+
+
+def _subject_profile_is_explicit(subject_profile: object) -> bool:
+    if not isinstance(subject_profile, Mapping) or not subject_profile:
+        return False
+    return all(
+        isinstance(field, Mapping)
+        and field.get("state") in {"present", "missing", "not_applicable"}
+        for field in subject_profile.values()
+    )
+
+
+def _subject_propensity_value(subject_propensity: object) -> float | None:
+    if not isinstance(subject_propensity, Mapping):
+        return None
+    if subject_propensity.get("state") != "present":
+        return None
+    return _number(subject_propensity.get("value"))
+
+
+def _subject_gate(
+    name: str,
+    *,
+    state: str,
+    code: str | None = None,
+    detail: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "gate": name,
+        "state": state,
+        "code": code,
+    }
+    if detail:
+        result.update(deepcopy(dict(detail)))
+    return result
+
+
+def derive_subject_evidence_verdict(
+    population_verdict: Mapping[str, Any],
+    *,
+    subject_id: str,
+    subject_profile: Mapping[str, Any],
+    subject_propensity: Mapping[str, Any],
+    distribution_support: Mapping[str, Any],
+    source_role: str | None = None,
+) -> dict[str, Any]:
+    """Publish a subject applicability verdict without estimating a subject effect.
+
+    The subject record is a bounded application of a verified population
+    verdict. It consumes the already-frozen subject profile and support
+    results; it never fits a model, recalculates currentness, or turns a
+    predictive score into causal evidence.
+    """
+
+    population = verify_evidence_verdict(population_verdict)
+    subject_role = source_role or str(population["intended_role"])
+    expected_subject_permission, _, _ = _role_permissions(subject_role)
+    population_permission = (
+        population["scope"] == "population"
+        and population["subject_application_role_permitted"] is True
+        and population["permitted_claim_scope"] == "population_and_subject"
+    )
+    role_permission = subject_role == "semi_synthetic_hero" and expected_subject_permission
+
+    gates = [
+        _subject_gate(
+            "source_role_ceiling",
+            state="passed" if role_permission and population_permission else "failed",
+            code=None if role_permission and population_permission else "SOURCE_SEMANTICS_INELIGIBLE",
+            detail={
+                "source_role": subject_role,
+                "population_subject_permission": population_permission,
+            },
+        ),
+        _subject_gate(
+            "population_permission",
+            state="passed" if population_permission else "failed",
+            code=None if population_permission else "SOURCE_SEMANTICS_INELIGIBLE",
+            detail={
+                "population_verdict_code": population["verdict_code"],
+                "permitted_claim_scope": population["permitted_claim_scope"],
+            },
+        ),
+        _subject_gate(
+            "subject_profile",
+            state="passed" if _subject_profile_is_explicit(subject_profile) else "failed",
+            code=None
+            if _subject_profile_is_explicit(subject_profile)
+            else "SUBJECT_DISTRIBUTION_UNSUPPORTED",
+            detail={"profile_hash": sha256(_plain(subject_profile))},
+        ),
+    ]
+
+    propensity = _subject_propensity_value(subject_propensity)
+    interval = {
+        "lower": 0.10,
+        "upper": 0.90,
+        "inclusive": True,
+    }
+    if propensity is None:
+        gates.append(
+            _subject_gate(
+                "propensity_support",
+                state="unavailable",
+                code="SUBJECT_PROPENSITY_UNAVAILABLE",
+                detail={"support_interval": interval},
+            )
+        )
+    else:
+        gates.append(
+            _subject_gate(
+                "propensity_support",
+                state=(
+                    "passed"
+                    if interval["lower"] <= propensity <= interval["upper"]
+                    else "failed"
+                ),
+                code=(
+                    None
+                    if interval["lower"] <= propensity <= interval["upper"]
+                    else "SUBJECT_OVERLAP_INSUFFICIENT"
+                ),
+                detail={
+                    "support_interval": interval,
+                    "value": propensity,
+                },
+            )
+        )
+
+    distribution_state = (
+        distribution_support.get("state")
+        if isinstance(distribution_support, Mapping)
+        else None
+    )
+    gates.append(
+        _subject_gate(
+            "distribution_support",
+            state="passed" if distribution_state == "supported" else "failed",
+            code=None
+            if distribution_state == "supported"
+            else "SUBJECT_DISTRIBUTION_UNSUPPORTED",
+            detail={
+                "support_hash": sha256(_plain(distribution_support)),
+                "reported_state": distribution_state or "unavailable",
+            },
+        )
+    )
+
+    failure_codes = sorted(
+        {
+            str(gate["code"])
+            for gate in gates
+            if gate.get("state") != "passed" and isinstance(gate.get("code"), str)
+        },
+        key=lambda code: (TRIGGER_PRIORITIES[code], code),
+    )
+    subject_profile_hash = sha256(_plain(subject_profile))
+    subject_support_hash = sha256(_plain(gates))
+    subject_claim_scope = "population_and_subject" if role_permission else "population"
+    common_fields = {
+        "schema_version": EVIDENCE_VERDICT_SCHEMA_VERSION,
+        "scope": "subject",
+        "intended_role": subject_role,
+        "population_verdict_ref": population["content_hash"],
+        "subject_identity": subject_id,
+        "subject_profile_hash": subject_profile_hash,
+        "subject_support_hash": subject_support_hash,
+        "subject_gates": deepcopy(gates),
+        "subject_gate_codes": failure_codes,
+        "subject_applicability_state": "abstained" if failure_codes else (
+            "applicable"
+            if population["verdict_code"] == "SUPPORTED_UNDER_ASSUMPTIONS"
+            else "population_limited"
+        ),
+        "permitted_claim_scope": subject_claim_scope,
+        "claim_scope": subject_claim_scope,
+        "subject_application_role_permitted": role_permission,
+        "decision_support_role_permitted": (
+            population["decision_support_role_permitted"] if not failure_codes else False
+        ),
+        "engine_status_ref": population.get("engine_status_ref"),
+        "artifact_integrity_status_ref": population.get("artifact_integrity_status_ref"),
+        "robustness_grade_ref": population.get("robustness_grade_ref"),
+        "analysis_run_id": population.get("analysis_run_id"),
+        "bundle_manifest_hash": population.get("bundle_manifest_hash"),
+        "evidence_refs": list(population.get("evidence_refs", [])),
+        "input_refs": list(population.get("input_refs", [])),
+        "verdict_policy_id": population["verdict_policy_id"],
+        "verdict_policy_version": population["verdict_policy_version"],
+        "trigger_registry_id": population["trigger_registry_id"],
+        "trigger_registry_version": population["trigger_registry_version"],
+        "next_step_template_registry_id": population["next_step_template_registry_id"],
+        "next_step_template_registry_version": population["next_step_template_registry_version"],
+        "language_policy_id": population["language_policy_id"],
+        "language_policy_version": population["language_policy_version"],
+    }
+
+    if not failure_codes:
+        record = deepcopy(dict(population))
+        record.update(common_fields)
+        record["verdict_code"] = population["verdict_code"]
+        record["insufficient_evidence_reason_class"] = population[
+            "insufficient_evidence_reason_class"
+        ]
+        record["effect_display"] = population["effect_display"]
+        record["effect_result_ref"] = population["effect_result_ref"]
+        record["effect_result_hash"] = population.get("effect_result_hash")
+        record["canonical_unit"] = population["canonical_unit"]
+        record["canonical_slippage_duration_basis"] = population[
+            "canonical_slippage_duration_basis"
+        ]
+        record["effect"] = deepcopy(population["effect"])
+        record["primary_trigger_code"] = population["primary_trigger_code"]
+        record["primary_trigger"] = population["primary_trigger"]
+        record["trigger_codes"] = list(population["trigger_codes"])
+    else:
+        primary_trigger = failure_codes[0]
+        record = {
+            **common_fields,
+            "verdict_code": "INSUFFICIENT",
+            "insufficient_evidence_reason_class": "NOT_ESTIMABLE",
+            "effect_display": "NONE",
+            "effect_result_ref": None,
+            "effect_result_hash": None,
+            "canonical_unit": None,
+            "canonical_slippage_duration_basis": None,
+            "effect": None,
+            "primary_trigger_code": primary_trigger,
+            "primary_trigger": primary_trigger,
+            "trigger_codes": failure_codes,
+            "decision_support_evaluation_permitted": False,
+        }
+
+    record["decision_support_evaluation_permitted"] = bool(
+        record["verdict_code"] == "SUPPORTED_UNDER_ASSUMPTIONS"
+        and record["decision_support_role_permitted"] is True
+        and not failure_codes
+    )
+    record["next_step_template_id"] = (
+        f"{VALIDITY_NEXT_STEP_TEMPLATE_REGISTRY_ID}:{record['primary_trigger_code'].lower()}"
+    )
+    record["next_step_template_ids"] = [
+        f"{VALIDITY_NEXT_STEP_TEMPLATE_REGISTRY_ID}:{code.lower()}"
+        for code in record["trigger_codes"]
+    ]
+    record.pop("content_hash", None)
+    record["content_hash"] = sha256(_plain(record))
+    return verify_subject_evidence_verdict(record)
+
+
+def verify_subject_evidence_verdict(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Verify the subject-scoped extension of the immutable verdict schema."""
+
+    if not isinstance(value, Mapping) or value.get("scope") != "subject":
+        raise ValidityIntegrityError("subject evidence verdict scope is unsupported")
+    record = deepcopy(dict(value))
+    content_hash = record.pop("content_hash", None)
+    if not isinstance(content_hash, str) or sha256(_plain(record)) != content_hash:
+        raise ValidityIntegrityError("subject evidence verdict hash does not match")
+    if not isinstance(record.get("population_verdict_ref"), str) or not record[
+        "population_verdict_ref"
+    ]:
+        raise ValidityIntegrityError("subject verdict is not bound to a population verdict")
+    if not isinstance(record.get("subject_identity"), str) or not record["subject_identity"]:
+        raise ValidityIntegrityError("subject verdict identity is missing")
+    if record.get("subject_applicability_state") not in {
+        "applicable",
+        "population_limited",
+        "abstained",
+    }:
+        raise ValidityIntegrityError("subject applicability state is unsupported")
+    for key in ("subject_profile_hash", "subject_support_hash"):
+        if not isinstance(record.get(key), str) or not record[key]:
+            raise ValidityIntegrityError("subject support binding is missing")
+    gate_codes = record.get("subject_gate_codes")
+    if not isinstance(gate_codes, list) or any(
+        not isinstance(code, str) or code not in TRIGGER_PRIORITIES for code in gate_codes
+    ):
+        raise ValidityIntegrityError("subject gate codes are unsupported")
+    if record.get("subject_applicability_state") == "abstained" and (
+        record.get("verdict_code") != "INSUFFICIENT" or not gate_codes
+    ):
+        raise ValidityIntegrityError("abstained subject applicability is inconsistent")
+    if record.get("subject_applicability_state") != "abstained" and gate_codes:
+        raise ValidityIntegrityError("subject gate codes exceed the applicability state")
+    if record.get("verdict_code") == "INSUFFICIENT" and record.get("effect") is not None:
+        raise ValidityIntegrityError("subject abstention exposes an effect")
+
+    population_projection = deepcopy(record)
+    population_projection["scope"] = "population"
+    population_projection["population_verdict_ref"] = None
+    expected_subject, expected_decision, _ = _role_permissions(
+        str(record["intended_role"])
+    )
+    population_projection["subject_application_role_permitted"] = expected_subject
+    population_projection["decision_support_role_permitted"] = expected_decision
+    population_projection.pop("subject_identity", None)
+    population_projection.pop("subject_profile_hash", None)
+    population_projection.pop("subject_support_hash", None)
+    population_projection.pop("subject_gate_codes", None)
+    population_projection.pop("subject_applicability_state", None)
+    population_projection.pop("content_hash", None)
+    population_projection["content_hash"] = sha256(_plain(population_projection))
+    verify_evidence_verdict(population_projection)
+    record["content_hash"] = content_hash
+    return record
+
+
+def render_subject_evidence_verdict(verdict: Mapping[str, Any]) -> dict[str, str]:
+    """Render subject applicability without individualized causal language."""
+
+    record = verify_subject_evidence_verdict(verdict)
+    state = str(record["subject_applicability_state"])
+    code = str(record["verdict_code"])
+    if state == "applicable" and code == "SUPPORTED_UNDER_ASSUMPTIONS":
+        language = (
+            "Population evidence is applicable to this subject profile under the stated assumptions. "
+            "This is not a case-level causal claim."
+        )
+        next_step = (
+            "The separate Decision Support contract may inspect governed options; no action is authorized here."
+        )
+    elif state == "population_limited":
+        language = (
+            "The population evidence boundary remains in force for this subject profile; "
+            "no stronger subject claim is made."
+        )
+        next_step = "Report the population result within its recorded claim scope; do not strengthen it for this subject."
+    else:
+        label = _trigger_label(str(record["primary_trigger_code"]))
+        language = (
+            f"Subject applicability is unavailable because {label}. "
+            "No subject effect or case-level causal claim is shown."
+        )
+        next_step = _NEXT_STEPS[str(record["primary_trigger_code"])]
+    return {
+        "language": language,
+        "next_step": next_step,
+        "primary_trigger_label": _trigger_label(str(record["primary_trigger_code"])),
+        "next_step_template_id": str(record["next_step_template_id"]),
+    }
 
 
 def _trigger_label(code: str) -> str:
