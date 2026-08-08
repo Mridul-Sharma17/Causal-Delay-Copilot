@@ -75,6 +75,52 @@ const referenceDeliveryResponse = {
     diagnostic_count: 1,
     status_counts: { UNAVAILABLE: 1 },
   },
+  robustness_grade: {
+    schema_version: "robustness-grade.v1",
+    grade: "STRONG",
+    benchmark_group_refs: ["supplier_history"],
+    strongest_group_ref: "supplier_history",
+    median_group_ref: "supplier_history",
+    strongest_adjusted_ci_lower: 0.2,
+    median_adjusted_ci_lower: 0.2,
+    content_hash: "sha256:robustness",
+  },
+  evidence_verdict: {
+    schema_version: "evidence-verdict.v2",
+    scope: "population",
+    verdict_code: "SUPPORTED_UNDER_ASSUMPTIONS",
+    insufficient_evidence_reason_class: null,
+    intended_role: "semi_synthetic_hero",
+    permitted_claim_scope: "population_and_subject",
+    subject_application_role_permitted: true,
+    decision_support_role_permitted: true,
+    decision_support_evaluation_permitted: true,
+    population_verdict_ref: null,
+    robustness_grade_ref: "sha256:robustness",
+    effect_display: "CAUSAL_ESTIMATE",
+    effect_result_ref: "engine_result:primary",
+    canonical_unit: "days",
+    canonical_slippage_duration_basis: "CALENDAR_DAY",
+    effect: {
+      estimate: 1.5,
+      ci_lower: 0.2,
+      ci_upper: 2.8,
+    },
+    primary_trigger_code: "EVIDENCE_POLICY_PASSED",
+    trigger_codes: ["EVIDENCE_POLICY_PASSED"],
+    next_step_template_id: "validity-next-step-templates:evidence_policy_passed",
+    next_step_template_ids: ["validity-next-step-templates:evidence_policy_passed"],
+    language_policy_id: "causal-validity-language-policy",
+    content_hash: "sha256:verdict",
+  },
+  rendered_verdict: {
+    language:
+      "High-Load Exposure is estimated to increase Supplier Milestone Slippage by 1.5 calendar days (95% interval 0.2 to 2.8), under the stated assumptions.",
+    next_step:
+      "Evaluate eligible Intervention Options under the separate Decision Support contract.",
+    primary_trigger_label: "evidence policy passed",
+    next_step_template_id: "validity-next-step-templates:evidence_policy_passed",
+  },
 };
 
 const lineageResponse = {
@@ -655,6 +701,12 @@ describe("Core health journey", () => {
     ).toBeInTheDocument();
     expect(screen.getByText("ordinary-demo")).toBeInTheDocument();
     expect(await screen.findByText("Diagnostic summary")).toBeInTheDocument();
+    expect(screen.getByText("Supported under stated assumptions")).toBeInTheDocument();
+    expect(screen.getByText("population claim scope")).toBeInTheDocument();
+    expect(
+      screen.getByText(/High-Load Exposure is estimated to increase Supplier Milestone Slippage/),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Robustness Grade")).toBeInTheDocument();
     expect(screen.getByText("Limited diagnostic evidence")).toBeInTheDocument();
     const diagnosticSummary = screen.getByText("Open diagnostic details (1)");
     expect(diagnosticSummary.closest("details")).not.toHaveAttribute("open");
@@ -665,7 +717,7 @@ describe("Core health journey", () => {
     expect(await screen.findByText("Investigation request accepted")).toBeInTheDocument();
     expect(await screen.findByText("Proactive preview accepted")).toBeInTheDocument();
     expect(screen.getAllByText("Eligibility stage")).toHaveLength(2);
-    expect(screen.getAllByText("CALENDAR_DAY")).toHaveLength(2);
+    expect(screen.getAllByText("CALENDAR_DAY")).toHaveLength(3);
     expect(screen.getAllByText("OUTCOME_NOT_REQUIRED_FOR_SUBJECT")).toHaveLength(2);
     expect(screen.getAllByText(/No slippage estimate is displayed/)).toHaveLength(2);
     expect(screen.getByText("PROACTIVE · PREVIEW-ONLY")).toBeInTheDocument();

@@ -214,6 +214,68 @@ code {
   overflow-wrap: anywhere;
 }
 
+.evidence-verdict {
+  display: grid;
+  gap: 16px;
+  margin-top: 24px;
+  padding: 24px;
+  background: #ffffff;
+  border-top: 4px solid #0f62fe;
+}
+
+.evidence-verdict h3 {
+  margin: 0;
+  font-size: 1.25rem;
+  font-weight: 500;
+}
+
+.verdict-scope {
+  color: #525252;
+  font-family: "IBM Plex Mono", Consolas, monospace;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+}
+
+.verdict-facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  margin: 0;
+  background: #c6c6c6;
+}
+
+.verdict-facts > div {
+  padding: 16px;
+  background: #f4f4f4;
+}
+
+.verdict-facts dd {
+  overflow-wrap: anywhere;
+}
+
+.verdict-language {
+  margin: 0;
+  font-size: 1rem;
+  line-height: 1.6;
+}
+
+.verdict-next-step {
+  margin: 0;
+  color: #525252;
+  font-size: 0.875rem;
+  line-height: 1.5;
+}
+
+.verdict-effect-details {
+  padding-top: 16px;
+  border-top: 1px solid #c6c6c6;
+}
+
+.verdict-effect-details summary {
+  cursor: pointer;
+  font-weight: 500;
+}
+
 .evidence-diagnostics {
   margin-top: 24px;
   padding: 24px;

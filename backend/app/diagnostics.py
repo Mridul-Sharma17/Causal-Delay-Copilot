@@ -1484,18 +1484,25 @@ def publish_diagnostic_results(
         by_id = {item.get("diagnostic_id"): item for item in verified}
         if len(by_id) != len(verified):
             raise DiagnosticIntegrityError("diagnostic result set is incomplete or duplicated")
-        expected_order: tuple[str, ...] = CORE_DIAGNOSTIC_IDS
-        if set(by_id) != set(CORE_DIAGNOSTIC_IDS):
-            from .refuters import (
-                NEGATIVE_CONTROL_DIAGNOSTIC_ID,
-                REFUTER_DIAGNOSTIC_IDS,
-            )
+        from .refuters import NEGATIVE_CONTROL_DIAGNOSTIC_ID, REFUTER_DIAGNOSTIC_IDS
 
-            expected_order = (
-                *CORE_DIAGNOSTIC_IDS,
-                *REFUTER_DIAGNOSTIC_IDS,
-                NEGATIVE_CONTROL_DIAGNOSTIC_ID,
-            )
+        refuter_order = (
+            *CORE_DIAGNOSTIC_IDS,
+            *REFUTER_DIAGNOSTIC_IDS,
+            NEGATIVE_CONTROL_DIAGNOSTIC_ID,
+        )
+        expected_order: tuple[str, ...]
+        if set(by_id) == set(CORE_DIAGNOSTIC_IDS):
+            expected_order = CORE_DIAGNOSTIC_IDS
+        elif set(by_id) == set(refuter_order):
+            expected_order = refuter_order
+        else:
+            from .validity import VALIDITY_DIAGNOSTIC_IDS
+
+            complete_order = (*refuter_order, *VALIDITY_DIAGNOSTIC_IDS)
+            if set(by_id) != set(complete_order):
+                raise DiagnosticIntegrityError("diagnostic result set is incomplete or unsupported")
+            expected_order = complete_order
         if set(by_id) != set(expected_order):
             raise DiagnosticIntegrityError("diagnostic result set is incomplete or unsupported")
         return [by_id[diagnostic_id] for diagnostic_id in expected_order]
@@ -1590,6 +1597,11 @@ def evaluate_diagnostics(**kwargs: Any) -> list[dict[str, Any]]:
             "negative_control_rows",
             "negative_control",
             "negative_control_spec",
+            "specification_variants",
+            "cross_form_variants",
+            "comparison_results",
+            "benchmark_groups",
+            "repeat_results",
         )
     ):
         return evaluate_validity_diagnostics(**kwargs)
@@ -1651,6 +1663,12 @@ def evaluate_validity_diagnostics(
     negative_control_primary_outer_splits: Sequence[Mapping[str, Any]] | None = None,
     negative_control_primary_propensity_predictions: Mapping[str, Any] | Sequence[Any] | None = None,
     negative_control_primary_artifacts: Mapping[str, Any] | None = None,
+    specification_variants: Mapping[str, Any] | None = None,
+    cross_form_variants: Mapping[str, Any] | None = None,
+    comparison_results: Mapping[str, Any] | None = None,
+    benchmark_groups: Sequence[Mapping[str, Any]] | None = None,
+    repeat_results: Mapping[str, Any] | Sequence[Mapping[str, Any]] | None = None,
+    intended_role: str | None = None,
     **core_kwargs: Any,
 ) -> list[dict[str, Any]]:
     """Publish Core 10 plus refuter and negative-control diagnostics.
@@ -1718,4 +1736,124 @@ def evaluate_validity_diagnostics(
         input_refs=core_kwargs.get("input_refs", ()),
         upstream_trigger=upstream_trigger,
     )
-    return [*core_results, *refuter_results, negative_result]
+    base_results = [*core_results, *refuter_results, negative_result]
+    if not any(
+        value is not None
+        for value in (
+            specification_variants,
+            cross_form_variants,
+            comparison_results,
+            benchmark_groups,
+            repeat_results,
+            intended_role,
+        )
+    ):
+        return base_results
+
+    from .validity import evaluate_complete_validity
+
+    engine_result = core_kwargs.get("engine_result")
+    primary_effect = refuter_primary_effect
+    if primary_effect is None and isinstance(engine_result, Mapping):
+        for key in ("primary_effect", "primary_atte", "primary_atte_slippage", "effect"):
+            candidate = engine_result.get(key)
+            if isinstance(candidate, Mapping):
+                primary_effect = candidate
+                break
+    if primary_effect is None:
+        primary_effect = core_kwargs.get("primary_effect")
+    complete = evaluate_complete_validity(
+        base_diagnostics=base_results,
+        primary_effect=primary_effect,
+        specification_variants=specification_variants,
+        cross_form_variants=cross_form_variants,
+        comparison_results=comparison_results,
+        benchmark_groups=benchmark_groups,
+        repeat_results=repeat_results,
+        engine_result=engine_result if isinstance(engine_result, Mapping) else None,
+        intended_role=intended_role or "semi_synthetic_hero",
+        scope=str(core_kwargs.get("scope", DIAGNOSTIC_SCOPE)),
+        analysis_run_id=core_kwargs.get("analysis_run_id"),
+        bundle_manifest_hash=core_kwargs.get("bundle_manifest_hash"),
+        evidence_refs=core_kwargs.get("evidence_refs", ()),
+        input_refs=core_kwargs.get("input_refs", ()),
+    )
+    return complete["diagnostics"]
+
+
+def evaluate_specification_stability(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    from .validity import evaluate_specification_stability as _evaluate
+
+    return _evaluate(*args, **kwargs)
+
+
+def evaluate_cross_form_direction(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    from .validity import evaluate_cross_form_direction as _evaluate
+
+    return _evaluate(*args, **kwargs)
+
+
+def evaluate_cross_form_stability(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    from .validity import evaluate_cross_form_stability as _evaluate
+
+    return _evaluate(*args, **kwargs)
+
+
+def evaluate_comparison_triangulation(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    from .validity import evaluate_comparison_triangulation as _evaluate
+
+    return _evaluate(*args, **kwargs)
+
+
+def evaluate_robustness_grade(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    from .validity import evaluate_robustness_grade as _evaluate
+
+    return _evaluate(*args, **kwargs)
+
+
+def evaluate_hidden_confounding_benchmark(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    from .validity import evaluate_hidden_confounding_benchmark as _evaluate
+
+    return _evaluate(*args, **kwargs)
+
+
+def evaluate_hidden_confounding(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    from .validity import evaluate_hidden_confounding as _evaluate
+
+    return _evaluate(*args, **kwargs)
+
+
+def evaluate_repeat_stability(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    from .validity import evaluate_repeat_stability as _evaluate
+
+    return _evaluate(*args, **kwargs)
+
+
+def derive_evidence_verdict(*args: Any, **kwargs: Any) -> dict[str, Any] | None:
+    from .validity import derive_evidence_verdict as _derive
+
+    return _derive(*args, **kwargs)
+
+
+def evaluate_evidence_verdict(*args: Any, **kwargs: Any) -> dict[str, Any] | None:
+    from .validity import evaluate_evidence_verdict as _evaluate
+
+    return _evaluate(*args, **kwargs)
+
+
+def render_evidence_verdict(*args: Any, **kwargs: Any) -> dict[str, str]:
+    from .validity import render_evidence_verdict as _render
+
+    return _render(*args, **kwargs)
+
+
+def evaluate_complete_validity(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    from .validity import evaluate_complete_validity as _evaluate
+
+    return _evaluate(*args, **kwargs)
+
+
+def publish_validity_results(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    from .validity import publish_validity_results as _publish
+
+    return _publish(*args, **kwargs)

@@ -164,6 +164,9 @@ class ValidatedReferenceDeliveryResponse(BaseModel):
     validated_at: datetime
     diagnostics: list[dict[str, Any]] = Field(default_factory=list)
     diagnostic_summary: dict[str, Any] = Field(default_factory=dict)
+    robustness_grade: dict[str, Any] | None = None
+    evidence_verdict: dict[str, Any] | None = None
+    rendered_verdict: dict[str, str] | None = None
 
 
 class IngestionRunRequest(BaseModel):

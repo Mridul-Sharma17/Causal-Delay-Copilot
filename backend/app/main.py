@@ -63,6 +63,7 @@ from .references import (
     ValidatedReferenceStore,
 )
 from .diagnostics import diagnostic_summary as build_diagnostic_summary
+from .validity import render_evidence_verdict
 from .workspace import DEMO_WORKSPACE_COOKIE_NAME, WorkspaceResolution
 
 MAX_REACTIVE_REQUEST_BYTES = 64 * 1024
@@ -974,6 +975,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             validated_at=reference.validated_at,
             diagnostics=[dict(item) for item in reference.diagnostic_results],
             diagnostic_summary=build_diagnostic_summary(reference.diagnostic_results),
+            robustness_grade=(
+                None if reference.robustness_grade is None else dict(reference.robustness_grade)
+            ),
+            evidence_verdict=(
+                None if reference.evidence_verdict is None else dict(reference.evidence_verdict)
+            ),
+            rendered_verdict=(
+                None
+                if reference.evidence_verdict is None
+                else render_evidence_verdict(reference.evidence_verdict)
+            ),
         )
         return JSONResponse(status_code=200, content=response.model_dump(mode="json"))
 

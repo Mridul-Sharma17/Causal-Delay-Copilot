@@ -84,6 +84,60 @@ export type DiagnosticSummary = {
   status_counts: Record<string, number>;
 };
 
+export type RobustnessGrade = {
+  schema_version: "robustness-grade.v1";
+  grade: "STRONG" | "MODERATE" | "WEAK" | "UNAVAILABLE";
+  benchmark_group_refs: string[];
+  strongest_group_ref: string | null;
+  median_group_ref: string | null;
+  strongest_adjusted_ci_lower: number | null;
+  median_adjusted_ci_lower: number | null;
+  content_hash: string;
+};
+
+export type EvidenceVerdict = {
+  schema_version: "evidence-verdict.v2";
+  scope: "population" | "subject";
+  verdict_code:
+    | "SUPPORTED_UNDER_ASSUMPTIONS"
+    | "TENTATIVE"
+    | "ASSOCIATION_ONLY"
+    | "INSUFFICIENT";
+  insufficient_evidence_reason_class: "NOT_ESTIMABLE" | "INCONCLUSIVE" | null;
+  intended_role: string;
+  permitted_claim_scope: string;
+  subject_application_role_permitted: boolean;
+  decision_support_role_permitted: boolean;
+  decision_support_evaluation_permitted: boolean;
+  population_verdict_ref: string | null;
+  robustness_grade_ref: string | null;
+  effect_display:
+    | "NONE"
+    | "INCONCLUSIVE_ESTIMATE"
+    | "ADJUSTED_ASSOCIATION"
+    | "CAUSAL_ESTIMATE";
+  effect_result_ref: string | null;
+  canonical_unit: string | null;
+  canonical_slippage_duration_basis:
+    | "CALENDAR_DAY"
+    | "ELAPSED_86400_SECOND_DAY"
+    | null;
+  effect: Record<string, unknown> | null;
+  primary_trigger_code: string;
+  trigger_codes: string[];
+  next_step_template_id: string;
+  next_step_template_ids: string[];
+  language_policy_id: string;
+  content_hash: string;
+};
+
+export type RenderedEvidenceVerdict = {
+  language: string;
+  next_step: string;
+  primary_trigger_label: string;
+  next_step_template_id: string;
+};
+
 export type ValidatedReferenceDelivery = {
   schema_version: "analysis-run-read-model.v1";
   delivery_mode: "existing_run_reuse";
@@ -106,6 +160,9 @@ export type ValidatedReferenceDelivery = {
   validated_at: string;
   diagnostics: DiagnosticResult[];
   diagnostic_summary: DiagnosticSummary;
+  robustness_grade: RobustnessGrade | null;
+  evidence_verdict: EvidenceVerdict | null;
+  rendered_verdict: RenderedEvidenceVerdict | null;
 };
 
 export type IngestionRunResponse = {
@@ -677,6 +734,122 @@ function parseDiagnosticSummary(value: unknown): DiagnosticSummary {
   };
 }
 
+function parseRobustnessGrade(value: unknown): RobustnessGrade {
+  if (
+    !isRecord(value) ||
+    value.schema_version !== "robustness-grade.v1" ||
+    (value.grade !== "STRONG" &&
+      value.grade !== "MODERATE" &&
+      value.grade !== "WEAK" &&
+      value.grade !== "UNAVAILABLE") ||
+    !Array.isArray(value.benchmark_group_refs) ||
+    !value.benchmark_group_refs.every((item) => typeof item === "string") ||
+    (value.strongest_group_ref !== null && typeof value.strongest_group_ref !== "string") ||
+    (value.median_group_ref !== null && typeof value.median_group_ref !== "string") ||
+    (value.strongest_adjusted_ci_lower !== null &&
+      typeof value.strongest_adjusted_ci_lower !== "number") ||
+    (value.median_adjusted_ci_lower !== null &&
+      typeof value.median_adjusted_ci_lower !== "number") ||
+    typeof value.content_hash !== "string"
+  ) {
+    throw new Error("invalid robustness grade response");
+  }
+  return {
+    schema_version: "robustness-grade.v1",
+    grade: value.grade,
+    benchmark_group_refs: value.benchmark_group_refs,
+    strongest_group_ref: value.strongest_group_ref,
+    median_group_ref: value.median_group_ref,
+    strongest_adjusted_ci_lower: value.strongest_adjusted_ci_lower,
+    median_adjusted_ci_lower: value.median_adjusted_ci_lower,
+    content_hash: value.content_hash,
+  };
+}
+
+function parseEvidenceVerdict(value: unknown): EvidenceVerdict {
+  if (
+    !isRecord(value) ||
+    value.schema_version !== "evidence-verdict.v2" ||
+    (value.scope !== "population" && value.scope !== "subject") ||
+    (value.verdict_code !== "SUPPORTED_UNDER_ASSUMPTIONS" &&
+      value.verdict_code !== "TENTATIVE" &&
+      value.verdict_code !== "ASSOCIATION_ONLY" &&
+      value.verdict_code !== "INSUFFICIENT") ||
+    (value.insufficient_evidence_reason_class !== null &&
+      value.insufficient_evidence_reason_class !== "NOT_ESTIMABLE" &&
+      value.insufficient_evidence_reason_class !== "INCONCLUSIVE") ||
+    typeof value.intended_role !== "string" ||
+    typeof value.permitted_claim_scope !== "string" ||
+    typeof value.subject_application_role_permitted !== "boolean" ||
+    typeof value.decision_support_role_permitted !== "boolean" ||
+    typeof value.decision_support_evaluation_permitted !== "boolean" ||
+    (value.population_verdict_ref !== null && typeof value.population_verdict_ref !== "string") ||
+    (value.robustness_grade_ref !== null && typeof value.robustness_grade_ref !== "string") ||
+    (value.effect_display !== "NONE" &&
+      value.effect_display !== "INCONCLUSIVE_ESTIMATE" &&
+      value.effect_display !== "ADJUSTED_ASSOCIATION" &&
+      value.effect_display !== "CAUSAL_ESTIMATE") ||
+    (value.effect_result_ref !== null && typeof value.effect_result_ref !== "string") ||
+    (value.canonical_unit !== null && typeof value.canonical_unit !== "string") ||
+    (value.canonical_slippage_duration_basis !== null &&
+      value.canonical_slippage_duration_basis !== "CALENDAR_DAY" &&
+      value.canonical_slippage_duration_basis !== "ELAPSED_86400_SECOND_DAY") ||
+    (value.effect !== null && (!isRecord(value.effect) || Array.isArray(value.effect))) ||
+    typeof value.primary_trigger_code !== "string" ||
+    !Array.isArray(value.trigger_codes) ||
+    !value.trigger_codes.every((item) => typeof item === "string") ||
+    typeof value.next_step_template_id !== "string" ||
+    !Array.isArray(value.next_step_template_ids) ||
+    !value.next_step_template_ids.every((item) => typeof item === "string") ||
+    typeof value.language_policy_id !== "string" ||
+    typeof value.content_hash !== "string"
+  ) {
+    throw new Error("invalid evidence verdict response");
+  }
+  return {
+    schema_version: "evidence-verdict.v2",
+    scope: value.scope,
+    verdict_code: value.verdict_code,
+    insufficient_evidence_reason_class: value.insufficient_evidence_reason_class,
+    intended_role: value.intended_role,
+    permitted_claim_scope: value.permitted_claim_scope,
+    subject_application_role_permitted: value.subject_application_role_permitted,
+    decision_support_role_permitted: value.decision_support_role_permitted,
+    decision_support_evaluation_permitted: value.decision_support_evaluation_permitted,
+    population_verdict_ref: value.population_verdict_ref,
+    robustness_grade_ref: value.robustness_grade_ref,
+    effect_display: value.effect_display,
+    effect_result_ref: value.effect_result_ref,
+    canonical_unit: value.canonical_unit,
+    canonical_slippage_duration_basis: value.canonical_slippage_duration_basis,
+    effect: value.effect,
+    primary_trigger_code: value.primary_trigger_code,
+    trigger_codes: value.trigger_codes,
+    next_step_template_id: value.next_step_template_id,
+    next_step_template_ids: value.next_step_template_ids,
+    language_policy_id: value.language_policy_id,
+    content_hash: value.content_hash,
+  };
+}
+
+function parseRenderedEvidenceVerdict(value: unknown): RenderedEvidenceVerdict {
+  if (
+    !isRecord(value) ||
+    typeof value.language !== "string" ||
+    typeof value.next_step !== "string" ||
+    typeof value.primary_trigger_label !== "string" ||
+    typeof value.next_step_template_id !== "string"
+  ) {
+    throw new Error("invalid rendered verdict response");
+  }
+  return {
+    language: value.language,
+    next_step: value.next_step,
+    primary_trigger_label: value.primary_trigger_label,
+    next_step_template_id: value.next_step_template_id,
+  };
+}
+
 export function parseValidatedReferenceDelivery(
   value: unknown,
 ): ValidatedReferenceDelivery {
@@ -721,6 +894,18 @@ export function parseValidatedReferenceDelivery(
           status_counts: {},
         }
       : parseDiagnosticSummary(value.diagnostic_summary);
+  const robustnessGrade =
+    value.robustness_grade === undefined || value.robustness_grade === null
+      ? null
+      : parseRobustnessGrade(value.robustness_grade);
+  const evidenceVerdict =
+    value.evidence_verdict === undefined || value.evidence_verdict === null
+      ? null
+      : parseEvidenceVerdict(value.evidence_verdict);
+  const renderedVerdict =
+    value.rendered_verdict === undefined || value.rendered_verdict === null
+      ? null
+      : parseRenderedEvidenceVerdict(value.rendered_verdict);
   return {
     schema_version: "analysis-run-read-model.v1",
     delivery_mode: "existing_run_reuse",
@@ -743,6 +928,9 @@ export function parseValidatedReferenceDelivery(
     validated_at: value.validated_at,
     diagnostics,
     diagnostic_summary: diagnosticSummary,
+    robustness_grade: robustnessGrade,
+    evidence_verdict: evidenceVerdict,
+    rendered_verdict: renderedVerdict,
   };
 }
 

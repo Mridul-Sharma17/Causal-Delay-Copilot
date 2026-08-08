@@ -17,6 +17,7 @@ import {
   type DiagnosticResult,
   type DiagnosticSummary,
   type DemoWorkspace,
+  type EvidenceVerdict,
   type HealthState,
   type HealthResponse,
   type LineageRecord,
@@ -26,6 +27,8 @@ import {
   type ProactiveProposalFixture,
   type ReactiveIngressAttempt,
   type RiskSignalFixture,
+  type RobustnessGrade,
+  type RenderedEvidenceVerdict,
   type SupplierMilestoneOutcome,
   type ValidatedReferenceDelivery,
 } from "./contracts";
@@ -344,6 +347,106 @@ function EvidenceDiagnostics({
           </ul>
         )}
       </details>
+    </section>
+  );
+}
+
+function verdictLabel(verdict: EvidenceVerdict): string {
+  switch (verdict.verdict_code) {
+    case "SUPPORTED_UNDER_ASSUMPTIONS":
+      return "Supported under stated assumptions";
+    case "TENTATIVE":
+      return "Tentative — fragile";
+    case "ASSOCIATION_ONLY":
+      return "Association only";
+    case "INSUFFICIENT":
+      return "Insufficient evidence — abstain";
+  }
+}
+
+function robustnessLabel(grade: RobustnessGrade): string {
+  switch (grade.grade) {
+    case "STRONG":
+      return "Strong";
+    case "MODERATE":
+      return "Moderate";
+    case "WEAK":
+      return "Weak";
+    case "UNAVAILABLE":
+      return "Unavailable";
+  }
+}
+
+function EvidenceVerdictPanel({
+  verdict,
+  grade,
+  rendered,
+}: {
+  verdict: EvidenceVerdict | null;
+  grade: RobustnessGrade | null;
+  rendered: RenderedEvidenceVerdict | null;
+}) {
+  if (verdict === null || rendered === null) {
+    return null;
+  }
+  return (
+    <section className="evidence-verdict" aria-labelledby="evidence-verdict-heading">
+      <div className="record-heading">
+        <div>
+          <p className="eyebrow">Evidence verdict</p>
+          <h3 id="evidence-verdict-heading">{verdictLabel(verdict)}</h3>
+        </div>
+        <span className="verdict-scope">{verdict.scope} claim scope</span>
+      </div>
+      <dl className="verdict-facts">
+        <div>
+          <dt>Permitted claim scope</dt>
+          <dd>{verdict.permitted_claim_scope}</dd>
+        </div>
+        <div>
+          <dt>Decision Support</dt>
+          <dd>
+            {verdict.decision_support_evaluation_permitted
+              ? "Evaluation permitted after separate eligibility checks"
+              : "Prohibited by the evidence permission ceiling"}
+          </dd>
+        </div>
+        <div>
+          <dt>Primary trigger</dt>
+          <dd><code>{verdict.primary_trigger_code}</code></dd>
+        </div>
+        {grade !== null && (
+          <div>
+            <dt>Robustness Grade</dt>
+            <dd>{robustnessLabel(grade)}</dd>
+          </div>
+        )}
+      </dl>
+      <p className="verdict-language">{rendered.language}</p>
+      <p className="verdict-next-step">
+        <strong>Next step:</strong> {rendered.next_step}
+      </p>
+      {verdict.effect_display !== "NONE" && verdict.effect !== null && (
+        <details className="verdict-effect-details">
+          <summary>Open effect detail</summary>
+          <dl className="verdict-facts">
+            <div>
+              <dt>Estimate</dt>
+              <dd>{String(verdict.effect.estimate ?? "Unavailable")}</dd>
+            </div>
+            <div>
+              <dt>95% interval</dt>
+              <dd>
+                {String(verdict.effect.ci_lower ?? "Unavailable")} to {String(verdict.effect.ci_upper ?? "Unavailable")}
+              </dd>
+            </div>
+            <div>
+              <dt>Duration basis</dt>
+              <dd>{verdict.canonical_slippage_duration_basis ?? "Unavailable"}</dd>
+            </div>
+          </dl>
+        </details>
+      )}
     </section>
   );
 }
@@ -686,6 +789,11 @@ function App() {
                       <dd><code>{reference.validation_attestation_ref}</code></dd>
                     </div>
                   </dl>
+                  <EvidenceVerdictPanel
+                    verdict={reference.evidence_verdict}
+                    grade={reference.robustness_grade}
+                    rendered={reference.rendered_verdict}
+                  />
                   <EvidenceDiagnostics
                     diagnostics={reference.diagnostics}
                     summary={reference.diagnostic_summary}

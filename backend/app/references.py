@@ -13,10 +13,8 @@ from typing import Any, Iterable, Mapping
 from uuid import uuid4
 
 from .canonical import canonical_json, sha256
-from .diagnostics import (
-    DiagnosticIntegrityError,
-    publish_diagnostic_results,
-)
+from .diagnostics import DiagnosticIntegrityError
+from .validity import publish_validity_results
 
 
 ARTIFACT_CONTRACT_VERSION = "analysis-run-artifacts.v1"
@@ -218,6 +216,8 @@ class ValidatedReference:
     validated_at: datetime
     completed_at: datetime
     diagnostic_results: tuple[Mapping[str, Any], ...] = ()
+    robustness_grade: Mapping[str, Any] | None = None
+    evidence_verdict: Mapping[str, Any] | None = None
     delivery_mode: str = "existing_run_reuse"
     verification_state: str = "reference_validated"
 
@@ -869,7 +869,7 @@ class ValidatedReferenceStore:
                 diagnostic_payload, (Mapping, list)
             ):
                 raise DiagnosticIntegrityError("diagnostic payload is unsupported")
-            diagnostic_results = publish_diagnostic_results(
+            validity_results = publish_validity_results(
                 diagnostic_payload,
                 analysis_run_id=str(entry["analysis_run_id"]),
                 bundle_manifest_hash=str(entry["bundle_manifest_hash"]),
@@ -878,6 +878,8 @@ class ValidatedReferenceStore:
             )
         except DiagnosticIntegrityError as error:
             raise ReferenceVerificationError("diagnostic artifact is invalid") from error
+        except ValueError as error:
+            raise ReferenceVerificationError("validity artifact is invalid") from error
         return ValidatedReference(
             reference_slot_id=str(entry["reference_slot_id"]),
             analysis_run_id=str(entry["analysis_run_id"]),
@@ -896,7 +898,9 @@ class ValidatedReferenceStore:
             validation_policy_version=str(attestation["validation_policy_version"]),
             validated_at=validated_at,
             completed_at=_require_utc_timestamp(manifest["completed_at"], "bundle completion time"),
-            diagnostic_results=tuple(diagnostic_results),
+            diagnostic_results=tuple(validity_results["diagnostics"]),
+            robustness_grade=validity_results["robustness_grade"],
+            evidence_verdict=validity_results["evidence_verdict"],
         )
 
     def list_verified_references(self) -> list[ValidatedReference]:
