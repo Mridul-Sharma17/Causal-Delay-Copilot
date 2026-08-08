@@ -34,7 +34,30 @@ STAGE_ORDER = (
 
 _SUPPORTED_TARGETS = SUPPORTED_TARGET_MILESTONE_KINDS
 _SUPPORTED_ROLES = frozenset(
-    {"semi_synthetic_hero", "out_of_domain_validation"}
+    {"semi_synthetic_hero", "out_of_domain_validation", "rejection_vignette"}
+)
+_REVIEWED_FIELD_MAPPING_RULE_IDS = frozenset(
+    {
+        "field-state-preserving.v1",
+        "olist.category-preserving.v1",
+        "olist.complexity-not-mapped.v1",
+        "olist.one-order-item-row.v1",
+        "olist.price-brl-preserving.v1",
+        "olist.project-not-mapped.v1",
+        "olist.project-phase-not-mapped.v1",
+        "olist.urgency-not-mapped.v1",
+        "olist.customer-state-preserving.v1",
+        "olist.contract-form-not-mapped.v1",
+        "scms.product-group-preserving.v1",
+        "scms.complexity-not-mapped.v1",
+        "scms.quantity-not-captured.v1",
+        "scms.value-not-captured.v1",
+        "scms.project-not-mapped.v1",
+        "scms.project-phase-not-mapped.v1",
+        "scms.urgency-not-mapped.v1",
+        "scms.geography-not-mapped.v1",
+        "scms.contract-form-not-mapped.v1",
+    }
 )
 _EXPOSURE_VARIANTS = LOAD_EXPOSURE_VARIANTS + (
     ("continuous_load", 0.67, 10, "history-midranks.v1"),
@@ -857,9 +880,12 @@ def _source_semantics(lineage: Mapping[str, Any], target_milestone_kind: str) ->
     dataset = lineage.get("dataset_version", {})
     manifest = lineage.get("mapping_manifest", {})
     role = dataset.get("intended_role") if isinstance(dataset, Mapping) else None
+    source_kind = dataset.get("source_kind") if isinstance(dataset, Mapping) else None
     manifest_role = manifest.get("intended_role") if isinstance(manifest, Mapping) else None
     codes: list[str] = []
     if role not in _SUPPORTED_ROLES or manifest_role != role:
+        codes.append("SOURCE_SEMANTICS_INELIGIBLE")
+    if role == "rejection_vignette":
         codes.append("SOURCE_SEMANTICS_INELIGIBLE")
     if isinstance(manifest, Mapping):
         field_mappings = manifest.get("field_mappings")
@@ -869,7 +895,7 @@ def _source_semantics(lineage: Mapping[str, Any], target_milestone_kind: str) ->
         else:
             if any(
                 not isinstance(mapping, Mapping)
-                or mapping.get("rule_id") != "field-state-preserving.v1"
+                or mapping.get("rule_id") not in _REVIEWED_FIELD_MAPPING_RULE_IDS
                 or mapping.get("rule_version") != "1"
                 for mapping in field_mappings.values()
             ):
@@ -884,10 +910,27 @@ def _source_semantics(lineage: Mapping[str, Any], target_milestone_kind: str) ->
         }.issubset(event_mappings):
             codes.append("SOURCE_SEMANTICS_INELIGIBLE")
         assumptions = manifest.get("mapping_assumptions")
-        if not isinstance(assumptions, list) or not {
+        if not isinstance(assumptions, list):
+            codes.append("SOURCE_SEMANTICS_INELIGIBLE")
+        elif role == "semi_synthetic_hero" and not {
             "semi_synthetic.clocks.v1",
             "semi_synthetic.generated_origin.v1",
         }.issubset(set(assumptions)):
+            codes.append("SOURCE_SEMANTICS_INELIGIBLE")
+        elif role == "out_of_domain_validation" and (
+            source_kind != "olist"
+            or not {
+                "olist.transport_timing.v1",
+                "olist.shipping_limit_known_at_purchase.v1",
+            }.issubset(set(assumptions))
+            or not isinstance(event_mappings, Mapping)
+            or not isinstance(event_mappings.get("transport_timing"), Mapping)
+            or not {"committed", "promised", "reached"}.issubset(
+                event_mappings["transport_timing"]
+            )
+        ):
+            codes.append("SOURCE_SEMANTICS_INELIGIBLE")
+        elif role == "rejection_vignette" and source_kind != "scms":
             codes.append("SOURCE_SEMANTICS_INELIGIBLE")
     if target_milestone_kind not in _SUPPORTED_TARGETS:
         codes.append("SOURCE_SEMANTICS_INELIGIBLE")

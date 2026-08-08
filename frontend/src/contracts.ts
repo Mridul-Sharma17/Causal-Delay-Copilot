@@ -214,14 +214,25 @@ export type IngestionRunResponse = {
 
 export type LineageRecord = Record<string, unknown>;
 
+export type SourceRoleCeiling = {
+  label: string;
+  permitted_claim_scope: string;
+  subject_application_role_permitted: boolean;
+  decision_support_evaluation_permitted: boolean;
+};
+
 export type LineageSnapshot = {
   ingestion_run: LineageRecord;
   dataset_version: {
     dataset_id: string;
     dataset_version_id: string;
-    source_kind: "semi_synthetic";
-    intended_role: "semi_synthetic_hero";
+    source_kind: "semi_synthetic" | "olist" | "scms";
+    intended_role:
+      | "semi_synthetic_hero"
+      | "out_of_domain_validation"
+      | "rejection_vignette";
     mapping_manifest_id: string;
+    source_role_ceiling: SourceRoleCeiling;
     record_counts: {
       order_lines: number;
       order_line_events: number;
@@ -241,6 +252,7 @@ export type LineageSnapshot = {
     event_seq: number;
     content_hash: string;
     created_at: string;
+    source_role_ceiling: SourceRoleCeiling;
   };
 };
 
@@ -1121,13 +1133,27 @@ export function parseLineageSnapshot(value: unknown): LineageSnapshot {
     throw new Error("invalid lineage response");
   }
   const datasetVersion = value.dataset_version;
+  const sourceKind = datasetVersion.source_kind;
+  const intendedRole = datasetVersion.intended_role;
   if (
     typeof datasetVersion.dataset_id !== "string" ||
     typeof datasetVersion.dataset_version_id !== "string" ||
-    datasetVersion.source_kind !== "semi_synthetic" ||
-    datasetVersion.intended_role !== "semi_synthetic_hero" ||
+    (sourceKind !== "semi_synthetic" && sourceKind !== "olist" && sourceKind !== "scms") ||
+    (intendedRole !== "semi_synthetic_hero" &&
+      intendedRole !== "out_of_domain_validation" &&
+      intendedRole !== "rejection_vignette") ||
     typeof datasetVersion.mapping_manifest_id !== "string" ||
     !isRecord(datasetVersion.record_counts)
+  ) {
+    throw new Error("invalid lineage response");
+  }
+  const sourceRoleCeiling = datasetVersion.source_role_ceiling;
+  if (
+    !isRecord(sourceRoleCeiling) ||
+    typeof sourceRoleCeiling.label !== "string" ||
+    typeof sourceRoleCeiling.permitted_claim_scope !== "string" ||
+    typeof sourceRoleCeiling.subject_application_role_permitted !== "boolean" ||
+    typeof sourceRoleCeiling.decision_support_evaluation_permitted !== "boolean"
   ) {
     throw new Error("invalid lineage response");
   }
@@ -1144,6 +1170,7 @@ export function parseLineageSnapshot(value: unknown): LineageSnapshot {
     throw new Error("invalid lineage response");
   }
   const auditBinding = value.audit_binding;
+  const auditSourceRoleCeiling = auditBinding.source_role_ceiling;
   if (
     typeof auditBinding.snapshot_id !== "string" ||
     typeof auditBinding.dataset_version_id !== "string" ||
@@ -1152,7 +1179,12 @@ export function parseLineageSnapshot(value: unknown): LineageSnapshot {
     !Number.isInteger(auditBinding.event_seq) ||
     auditBinding.event_seq < 1 ||
     typeof auditBinding.content_hash !== "string" ||
-    typeof auditBinding.created_at !== "string"
+    typeof auditBinding.created_at !== "string" ||
+    !isRecord(auditSourceRoleCeiling) ||
+    typeof auditSourceRoleCeiling.label !== "string" ||
+    typeof auditSourceRoleCeiling.permitted_claim_scope !== "string" ||
+    typeof auditSourceRoleCeiling.subject_application_role_permitted !== "boolean" ||
+    typeof auditSourceRoleCeiling.decision_support_evaluation_permitted !== "boolean"
   ) {
     throw new Error("invalid lineage response");
   }
@@ -1161,9 +1193,17 @@ export function parseLineageSnapshot(value: unknown): LineageSnapshot {
     dataset_version: {
       dataset_id: datasetVersion.dataset_id,
       dataset_version_id: datasetVersion.dataset_version_id,
-      source_kind: "semi_synthetic",
-      intended_role: "semi_synthetic_hero",
+      source_kind: sourceKind,
+      intended_role: intendedRole,
       mapping_manifest_id: datasetVersion.mapping_manifest_id,
+      source_role_ceiling: {
+        label: sourceRoleCeiling.label,
+        permitted_claim_scope: sourceRoleCeiling.permitted_claim_scope,
+        subject_application_role_permitted:
+          sourceRoleCeiling.subject_application_role_permitted,
+        decision_support_evaluation_permitted:
+          sourceRoleCeiling.decision_support_evaluation_permitted,
+      },
       record_counts: {
         order_lines: parseNonNegativeInteger(counts.order_lines),
         order_line_events: parseNonNegativeInteger(counts.order_line_events),
@@ -1183,6 +1223,14 @@ export function parseLineageSnapshot(value: unknown): LineageSnapshot {
       event_seq: auditBinding.event_seq,
       content_hash: auditBinding.content_hash,
       created_at: auditBinding.created_at,
+      source_role_ceiling: {
+        label: auditSourceRoleCeiling.label,
+        permitted_claim_scope: auditSourceRoleCeiling.permitted_claim_scope,
+        subject_application_role_permitted:
+          auditSourceRoleCeiling.subject_application_role_permitted,
+        decision_support_evaluation_permitted:
+          auditSourceRoleCeiling.decision_support_evaluation_permitted,
+      },
     },
   };
 }

@@ -632,6 +632,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 occurrence_kind=item.occurrence_kind,
                 outcome_code=item.outcome_code,
                 created_at=item.created_at,
+                source_role_ceiling=core_store.get_source_role_ceiling_for_occurrence(
+                    workspace_id=resolution.snapshot.workspace_id,
+                    occurrence_id=item.occurrence_id,
+                ),
             )
             for item in core_store.list_occurrences(resolution.snapshot.workspace_id)
         ]
@@ -662,6 +666,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             occurrence_kind=occurrence.occurrence_kind,
             outcome_code=occurrence.outcome_code,
             created_at=occurrence.created_at,
+            source_role_ceiling=core_store.get_source_role_ceiling_for_occurrence(
+                workspace_id=resolution.snapshot.workspace_id,
+                occurrence_id=occurrence.occurrence_id,
+            ),
         )
         return attach_workspace_cookie(
             JSONResponse(status_code=200, content=response.model_dump(mode="json")),
@@ -780,7 +788,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         status_code=201,
     )
     async def create_ingestion_run(request: IngestionRunRequest) -> JSONResponse:
-        stored = core_store.import_hero(
+        stored = core_store.import_dataset(
             idempotency_key=request.idempotency_key,
             dataset_key=request.dataset_key,
             mapping_manifest_id=request.mapping_manifest_id,
@@ -827,6 +835,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "event_seq": binding.event_seq,
                 "content_hash": binding.content_hash,
                 "created_at": binding.created_at,
+                "source_role_ceiling": lineage["dataset_version"]["source_role_ceiling"],
             },
         )
         return attach_workspace_cookie(

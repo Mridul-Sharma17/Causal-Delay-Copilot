@@ -1,0 +1,38 @@
+{
+  "dataset_key": "scms-rejection-vignette",
+  "source_schema_id": "scms-delivery-history",
+  "source_schema_version": "scms-delivery-history.v1",
+  "source_object": {
+    "logical_name": "scms-delivery-history.conformance.json",
+    "protected_locator": "bundled://scms-rejection-vignette/source"
+  },
+  "rows": [
+    {
+      "ID": "scms-shipment-001",
+      "Vendor": "scms-vendor-001",
+      "Product Group": "ARV",
+      "PO Sent to Vendor Date": "2015-01-02",
+      "Scheduled Delivery Date": "2015-01-12",
+      "Delivered to Client Date": "2015-01-12",
+      "Delivery Recorded Date": "2015-01-13"
+    },
+    {
+      "ID": "scms-shipment-002",
+      "Vendor": "scms-vendor-002",
+      "Product Group": "lab supplies",
+      "PO Sent to Vendor Date": "Date Not Captured",
+      "Scheduled Delivery Date": "2015-02-10",
+      "Delivered to Client Date": "2015-02-12",
+      "Delivery Recorded Date": "2015-02-13"
+    },
+    {
+      "ID": "scms-shipment-003",
+      "Vendor": "scms-vendor-001",
+      "Product Group": "malaria",
+      "PO Sent to Vendor Date": "N/A - From RDC",
+      "Scheduled Delivery Date": "2015-03-10",
+      "Delivered to Client Date": "2015-03-10",
+      "Delivery Recorded Date": "2015-03-11"
+    }
+  ]
+}

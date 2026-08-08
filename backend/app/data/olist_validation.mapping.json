@@ -1,0 +1,157 @@
+{
+  "mapping_manifest_id": "olist-validation.mapping.v1",
+  "schema_version": "mapping-manifest.v1",
+  "dataset_key": "olist-validation",
+  "source_kind": "olist",
+  "intended_role": "out_of_domain_validation",
+  "source_schema_id": "olist-public-order-items",
+  "source_schema_version": "olist-public-order-items.v1",
+  "canonical_schema_version": "canonical-lineage.v1",
+  "adapter_id": "olist-public-validation-adapter",
+  "adapter_version": "1.0.0",
+  "mapping_assumptions": [
+    "olist.transport_timing.v1",
+    "olist.shipping_limit_known_at_purchase.v1",
+    "olist.timestamps_assume_brt.v1"
+  ],
+  "license_and_attribution_ref": "docs/causal_delay_copilot_stage2_strategy.md#451",
+  "data_classification": "public",
+  "raw_redistribution_policy": "prohibited",
+  "derived_redistribution_policy": "prohibited",
+  "reviewed_source_fields": [
+    "order_id",
+    "order_item_id",
+    "seller_id",
+    "order_purchase_timestamp",
+    "shipping_limit_date",
+    "order_delivered_carrier_date",
+    "product_category_name",
+    "price",
+    "customer_state"
+  ],
+  "generator_metadata": {"state": "not_applicable"},
+  "identity_mappings": {
+    "order_line_id": {
+      "source_path": "order_id",
+      "source_paths": ["order_id", "order_item_id"],
+      "rule_id": "uuid5.dataset.order-line.olist-order-item.v1",
+      "rule_version": "1"
+    },
+    "order_group_id": {
+      "source_path": "order_id",
+      "source_paths": ["order_id"],
+      "rule_id": "uuid5.dataset.order-group.olist-order.v1",
+      "rule_version": "1"
+    },
+    "supplier_id": {
+      "source_path": "seller_id",
+      "source_paths": ["seller_id"],
+      "rule_id": "uuid5.dataset.supplier.olist-seller.v1",
+      "rule_version": "1"
+    }
+  },
+  "field_mappings": {
+    "material_class": {
+      "source_path": "product_category_name",
+      "canonical_type": "classification",
+      "rule_id": "olist.category-preserving.v1",
+      "rule_version": "1"
+    },
+    "complexity_class": {
+      "source_path": "",
+      "canonical_type": "classification",
+      "fixed_state": "not_applicable",
+      "rule_id": "olist.complexity-not-mapped.v1",
+      "rule_version": "1"
+    },
+    "quantity": {
+      "source_path": "order_item_id",
+      "canonical_type": "quantity",
+      "fixed_value": 1,
+      "fixed_unit": "order_item",
+      "rule_id": "olist.one-order-item-row.v1",
+      "rule_version": "1"
+    },
+    "value": {
+      "source_path": "price",
+      "canonical_type": "money",
+      "currency": "BRL",
+      "rule_id": "olist.price-brl-preserving.v1",
+      "rule_version": "1"
+    },
+    "project_id": {
+      "source_path": "",
+      "canonical_type": "identifier",
+      "fixed_state": "not_applicable",
+      "rule_id": "olist.project-not-mapped.v1",
+      "rule_version": "1"
+    },
+    "project_phase": {
+      "source_path": "",
+      "canonical_type": "classification",
+      "fixed_state": "not_applicable",
+      "rule_id": "olist.project-phase-not-mapped.v1",
+      "rule_version": "1"
+    },
+    "urgency_class": {
+      "source_path": "",
+      "canonical_type": "classification",
+      "fixed_state": "not_applicable",
+      "rule_id": "olist.urgency-not-mapped.v1",
+      "rule_version": "1"
+    },
+    "geography_code": {
+      "source_path": "customer_state",
+      "canonical_type": "classification",
+      "rule_id": "olist.customer-state-preserving.v1",
+      "rule_version": "1"
+    },
+    "contract_form": {
+      "source_path": "",
+      "canonical_type": "classification",
+      "fixed_state": "not_applicable",
+      "rule_id": "olist.contract-form-not-mapped.v1",
+      "rule_version": "1"
+    }
+  },
+  "event_mappings": {
+    "collection_path": "source row",
+    "source_event_key": "order_id + order_item_id + event kind",
+    "kind": "registered transport event",
+    "milestone_kind": "supplier_handoff",
+    "occurred_at": "transport timing mapping",
+    "known_at": "registered availability rule",
+    "available_at": "registered availability rule",
+    "promised_for": "shipping_limit_date",
+    "reason": "not_applicable",
+    "revises_promise_source_event_key": "not_applicable",
+    "transport_timing": {
+      "committed": "order_purchase_timestamp",
+      "promised": "shipping_limit_date",
+    "reached": "order_delivered_carrier_date",
+      "assumed_timezone": "America/Sao_Paulo",
+      "promise_known_at": "committed"
+    },
+    "canonical_events": {
+      "committed": {"kind": "committed", "milestone_kind": "not_applicable"},
+      "promise_recorded": {"kind": "promise_recorded", "milestone_kind": "supplier_handoff"},
+      "milestone_reached": {"kind": "milestone_reached", "milestone_kind": "supplier_handoff"}
+    }
+  },
+  "advisory_context_mappings": {
+    "transport_timing": {
+      "rule_id": "olist.transport-timing-only.v1",
+      "rule_version": "1",
+      "source_namespace": "olist-public-order-items",
+      "target_field": "events.supplier_handoff",
+      "resolution_kind": "validation_only"
+    }
+  },
+  "entries": [
+    {"canonical": "order_line_id", "source": "order_id + order_item_id", "rule_id": "uuid5.dataset.order-line.olist-order-item.v1", "rule_version": "1"},
+    {"canonical": "order_group_id", "source": "order_id", "rule_id": "uuid5.dataset.order-group.olist-order.v1", "rule_version": "1"},
+    {"canonical": "supplier_id", "source": "seller_id", "rule_id": "uuid5.dataset.supplier.olist-seller.v1", "rule_version": "1"},
+    {"canonical": "transport_timing", "source": "order_purchase_timestamp + shipping_limit_date + order_delivered_carrier_date", "rule_id": "olist.transport-timing-only.v1", "rule_version": "1"},
+    {"canonical": "source_observation", "source": "opaque protected locator", "rule_id": "opaque-lineage-token.v1", "rule_version": "1"}
+  ]
+}

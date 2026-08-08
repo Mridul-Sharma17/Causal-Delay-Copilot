@@ -119,6 +119,7 @@ class AuditOccurrenceViewResponse(BaseModel):
         "DECISION_BRIEF_PUBLISHED",
     ]
     created_at: datetime
+    source_role_ceiling: SourceRoleCeilingResponse | None = None
 
 
 class AuditOccurrenceListResponse(BaseModel):
@@ -236,11 +237,27 @@ class IngestionRunRequest(BaseModel):
         max_length=128,
         pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
     )
-    dataset_key: Literal["semi-synthetic-hero"]
-    mapping_manifest_id: Literal["semi-synthetic-hero.mapping.v1"]
+    dataset_key: Literal[
+        "semi-synthetic-hero",
+        "olist-validation",
+        "scms-rejection-vignette",
+    ]
+    mapping_manifest_id: Literal[
+        "semi-synthetic-hero.mapping.v1",
+        "olist-validation.mapping.v1",
+        "scms-rejection-vignette.mapping.v1",
+    ]
 
 
-ValueState = Literal["present", "missing", "not_applicable", "invalid", "unresolved"]
+ValueState = Literal[
+    "present",
+    "missing",
+    "unknown",
+    "not_applicable",
+    "invalid",
+    "unresolved",
+    "redacted",
+]
 
 
 class FieldValueResponse(BaseModel):
@@ -259,7 +276,7 @@ class TemporalValueResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     kind: TemporalKind
-    source_value: str
+    source_value: str | None
     normalized_value: str
     precision: str
     timezone_status: TimezoneStatus
@@ -306,6 +323,7 @@ class IdentityMappingResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     source_path: str
+    source_paths: list[str] | None = None
     rule_id: str
     rule_version: str
 
@@ -315,6 +333,11 @@ class FieldMappingResponse(BaseModel):
 
     source_path: str
     canonical_type: str
+    fixed_state: str | None = None
+    fixed_value: Any | None = None
+    fixed_unit: str | None = None
+    currency: str | None = None
+    missingness_tokens: dict[str, str] | None = None
     rule_id: str
     rule_version: str
 
@@ -332,6 +355,13 @@ class EventMappingResponse(BaseModel):
     promised_for: str
     reason: str
     revises_promise_source_event_key: str
+    transport_timing: dict[str, str] | None = None
+    rejection_mapping: dict[str, Any] | None = None
+    canonical_events: dict[str, dict[str, str]] | None = None
+    scheduled_delivery: str | None = None
+    delivered_to_client: str | None = None
+    po_sent_to_vendor: str | None = None
+    delivery_recorded: str | None = None
 
 
 class AdvisoryContextMappingResponse(BaseModel):
@@ -362,7 +392,8 @@ class MappingManifestResponse(BaseModel):
     data_classification: str
     raw_redistribution_policy: str
     derived_redistribution_policy: str
-    generator_metadata: GeneratorMetadataResponse
+    reviewed_source_fields: list[str] | None = None
+    generator_metadata: GeneratorMetadataResponse | FieldValueResponse
     identity_mappings: dict[str, IdentityMappingResponse]
     field_mappings: dict[str, FieldMappingResponse]
     event_mappings: EventMappingResponse
@@ -423,6 +454,15 @@ class ProvenanceSummaryResponse(BaseModel):
     calibration: dict[str, int]
 
 
+class SourceRoleCeilingResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    label: str
+    permitted_claim_scope: str
+    subject_application_role_permitted: bool
+    decision_support_evaluation_permitted: bool
+
+
 class DatasetVersionResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -431,6 +471,7 @@ class DatasetVersionResponse(BaseModel):
     predecessor_dataset_version_id: FieldValueResponse
     source_kind: str
     intended_role: str
+    source_role_ceiling: SourceRoleCeilingResponse
     canonical_schema_version: str
     adapter_id: str
     adapter_version: str
@@ -511,9 +552,9 @@ class SourceObservationResponse(BaseModel):
     source_field_path: FieldValueResponse
     known_at: TemporalFieldResponse
     available_at: TemporalFieldResponse
-    origin: Literal["simulated"]
-    derivation: Literal["direct", "normalized"]
-    calibration: Literal["none"]
+    origin: Literal["simulated", "observed"]
+    derivation: Literal["direct", "normalized", "derived"]
+    calibration: Literal["none", "externally_calibrated"]
     transformation_rule_id: FieldValueResponse
     transformation_rule_version: FieldValueResponse
     evidence_refs: list[str]
@@ -553,6 +594,7 @@ class LineageAuditBindingResponse(BaseModel):
     event_seq: int = Field(gt=0)
     content_hash: str
     created_at: datetime
+    source_role_ceiling: SourceRoleCeilingResponse
 
 
 class IngestionRunResponse(BaseModel):

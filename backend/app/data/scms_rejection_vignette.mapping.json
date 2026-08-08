@@ -1,0 +1,162 @@
+{
+  "mapping_manifest_id": "scms-rejection-vignette.mapping.v1",
+  "schema_version": "mapping-manifest.v1",
+  "dataset_key": "scms-rejection-vignette",
+  "source_kind": "scms",
+  "intended_role": "rejection_vignette",
+  "source_schema_id": "scms-delivery-history",
+  "source_schema_version": "scms-delivery-history.v1",
+  "canonical_schema_version": "canonical-lineage.v1",
+  "adapter_id": "scms-rejection-vignette-adapter",
+  "adapter_version": "1.0.0",
+  "mapping_assumptions": [
+    "scms.client-delivery-only.v1",
+    "scms.scheduled-known-at-unknown.v1",
+    "scms.missingness-tokens.v1"
+  ],
+  "license_and_attribution_ref": "docs/causal_delay_copilot_stage2_strategy.md#452",
+  "data_classification": "public",
+  "raw_redistribution_policy": "prohibited",
+  "derived_redistribution_policy": "unknown",
+  "reviewed_source_fields": [
+    "ID",
+    "Vendor",
+    "Product Group",
+    "PO Sent to Vendor Date",
+    "Scheduled Delivery Date",
+    "Delivered to Client Date",
+    "Delivery Recorded Date"
+  ],
+  "generator_metadata": {"state": "not_applicable"},
+  "identity_mappings": {
+    "order_line_id": {
+      "source_path": "ID",
+      "source_paths": ["ID"],
+      "rule_id": "uuid5.dataset.order-line.scms-shipment.v1",
+      "rule_version": "1"
+    },
+    "order_group_id": {
+      "source_path": "ID",
+      "source_paths": ["ID"],
+      "rule_id": "uuid5.dataset.order-group.scms-shipment.v1",
+      "rule_version": "1"
+    },
+    "supplier_id": {
+      "source_path": "Vendor",
+      "source_paths": ["Vendor"],
+      "rule_id": "uuid5.dataset.supplier.scms-vendor.v1",
+      "rule_version": "1"
+    }
+  },
+  "field_mappings": {
+    "material_class": {
+      "source_path": "Product Group",
+      "canonical_type": "classification",
+      "rule_id": "scms.product-group-preserving.v1",
+      "rule_version": "1"
+    },
+    "complexity_class": {
+      "source_path": "",
+      "canonical_type": "classification",
+      "fixed_state": "not_applicable",
+      "rule_id": "scms.complexity-not-mapped.v1",
+      "rule_version": "1"
+    },
+    "quantity": {
+      "source_path": "",
+      "canonical_type": "quantity",
+      "fixed_state": "missing",
+      "rule_id": "scms.quantity-not-captured.v1",
+      "rule_version": "1"
+    },
+    "value": {
+      "source_path": "",
+      "canonical_type": "money",
+      "fixed_state": "missing",
+      "rule_id": "scms.value-not-captured.v1",
+      "rule_version": "1"
+    },
+    "project_id": {
+      "source_path": "",
+      "canonical_type": "identifier",
+      "fixed_state": "not_applicable",
+      "rule_id": "scms.project-not-mapped.v1",
+      "rule_version": "1"
+    },
+    "project_phase": {
+      "source_path": "",
+      "canonical_type": "classification",
+      "fixed_state": "not_applicable",
+      "rule_id": "scms.project-phase-not-mapped.v1",
+      "rule_version": "1"
+    },
+    "urgency_class": {
+      "source_path": "",
+      "canonical_type": "classification",
+      "fixed_state": "not_applicable",
+      "rule_id": "scms.urgency-not-mapped.v1",
+      "rule_version": "1"
+    },
+    "geography_code": {
+      "source_path": "",
+      "canonical_type": "classification",
+      "fixed_state": "not_applicable",
+      "rule_id": "scms.geography-not-mapped.v1",
+      "rule_version": "1"
+    },
+    "contract_form": {
+      "source_path": "",
+      "canonical_type": "classification",
+      "fixed_state": "not_applicable",
+      "rule_id": "scms.contract-form-not-mapped.v1",
+      "rule_version": "1"
+    }
+  },
+  "event_mappings": {
+    "collection_path": "source row",
+    "source_event_key": "ID + event kind",
+    "kind": "registered delivery event",
+    "milestone_kind": "customer_delivery",
+    "occurred_at": "registered delivery timing mapping",
+    "known_at": "scheduled delivery knowledge is unknown",
+    "available_at": "Delivery Recorded Date",
+    "promised_for": "Scheduled Delivery Date",
+    "reason": "not_applicable",
+    "revises_promise_source_event_key": "not_applicable",
+    "scheduled_delivery": "Scheduled Delivery Date",
+    "delivered_to_client": "Delivered to Client Date",
+    "po_sent_to_vendor": "PO Sent to Vendor Date",
+    "delivery_recorded": "Delivery Recorded Date",
+    "rejection_mapping": {
+      "po_sent_to_vendor": "PO Sent to Vendor Date",
+      "scheduled_delivery": "Scheduled Delivery Date",
+      "delivered_to_client": "Delivered to Client Date",
+      "delivery_recorded": "Delivery Recorded Date",
+      "promise_known_at": "unknown",
+      "missingness_tokens": {
+        "Date Not Captured": "unknown",
+        "N/A - From RDC": "not_applicable"
+      }
+    },
+    "canonical_events": {
+      "committed": {"kind": "committed", "milestone_kind": "not_applicable"},
+      "promise_recorded": {"kind": "promise_recorded", "milestone_kind": "customer_delivery"},
+      "milestone_reached": {"kind": "milestone_reached", "milestone_kind": "customer_delivery"}
+    }
+  },
+  "advisory_context_mappings": {
+    "client_delivery": {
+      "rule_id": "scms.client-delivery-only.v1",
+      "rule_version": "1",
+      "source_namespace": "scms-delivery-history",
+      "target_field": "events.customer_delivery",
+      "resolution_kind": "rejection_vignette_only"
+    }
+  },
+  "entries": [
+    {"canonical": "order_line_id", "source": "ID", "rule_id": "uuid5.dataset.order-line.scms-shipment.v1", "rule_version": "1"},
+    {"canonical": "supplier_id", "source": "Vendor", "rule_id": "uuid5.dataset.supplier.scms-vendor.v1", "rule_version": "1"},
+    {"canonical": "customer_delivery", "source": "Scheduled Delivery Date + Delivered to Client Date", "rule_id": "scms.client-delivery-only.v1", "rule_version": "1"},
+    {"canonical": "source_observation", "source": "opaque protected locator", "rule_id": "opaque-lineage-token.v1", "rule_version": "1"}
+  ]
+}

@@ -1,0 +1,44 @@
+{
+  "dataset_key": "olist-validation",
+  "source_schema_id": "olist-public-order-items",
+  "source_schema_version": "olist-public-order-items.v1",
+  "source_object": {
+    "logical_name": "olist-public-order-items.conformance.json",
+    "protected_locator": "bundled://olist-validation/source"
+  },
+  "rows": [
+    {
+      "order_id": "olist-order-001",
+      "order_item_id": 1,
+      "seller_id": "olist-seller-001",
+      "order_purchase_timestamp": "2017-01-05 10:00:00",
+      "shipping_limit_date": "2017-01-09 10:00:00",
+      "order_delivered_carrier_date": "2017-01-10 10:00:00",
+      "product_category_name": "utilidades_domesticas",
+      "price": 99.9,
+      "customer_state": "SP"
+    },
+    {
+      "order_id": "olist-order-002",
+      "order_item_id": 1,
+      "seller_id": "olist-seller-001",
+      "order_purchase_timestamp": "2017-01-07 12:30:00",
+      "shipping_limit_date": "2017-01-11 12:30:00",
+      "order_delivered_carrier_date": "2017-01-11 12:30:00",
+      "product_category_name": "informatica_acessorios",
+      "price": 149.0,
+      "customer_state": "RJ"
+    },
+    {
+      "order_id": "olist-order-003",
+      "order_item_id": 2,
+      "seller_id": "olist-seller-002",
+      "order_purchase_timestamp": "2017-01-08 09:15:00",
+      "shipping_limit_date": "2017-01-13 09:15:00",
+      "order_delivered_carrier_date": null,
+      "product_category_name": null,
+      "price": null,
+      "customer_state": "BA"
+    }
+  ]
+}

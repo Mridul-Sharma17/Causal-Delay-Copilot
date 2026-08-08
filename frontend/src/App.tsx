@@ -1345,6 +1345,47 @@ function App() {
                 Mapping manifest <code>{lineage.dataset_version.mapping_manifest_id}</code> is
                 bound to an immutable dataset version.
               </p>
+              <section className="lineage-subsection" aria-labelledby="source-role-heading">
+                <div className="record-heading">
+                  <div>
+                    <p className="eyebrow">Source-role boundary</p>
+                    <h3 id="source-role-heading">
+                      {lineage.dataset_version.source_role_ceiling.label}
+                    </h3>
+                  </div>
+                  <span>{lineage.dataset_version.source_kind}</span>
+                </div>
+                <dl className="verdict-facts">
+                  <div>
+                    <dt>Permitted claim scope</dt>
+                    <dd>{lineage.dataset_version.source_role_ceiling.permitted_claim_scope}</dd>
+                  </div>
+                  <div>
+                    <dt>In-domain subject application</dt>
+                    <dd>
+                      {lineage.dataset_version.source_role_ceiling.subject_application_role_permitted
+                        ? "Permitted"
+                        : "Prohibited"}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Decision Support permission</dt>
+                    <dd>
+                      {lineage.dataset_version.source_role_ceiling
+                        .decision_support_evaluation_permitted
+                        ? "Permitted after separate evidence checks"
+                        : "Prohibited by the source-role ceiling"}
+                    </dd>
+                  </div>
+                </dl>
+                {lineage.dataset_version.intended_role !== "semi_synthetic_hero" && (
+                  <p className="lineage-warning" role="status">
+                    {lineage.dataset_version.intended_role === "out_of_domain_validation"
+                      ? "Validation-only evidence. It cannot support an in-domain construction effect or action permission."
+                      : "Rejection-vignette evidence. It cannot support an effect claim, in-domain subject application, or action permission."}
+                  </p>
+                )}
+              </section>
 
               <dl className="probe-list lineage-counts">
                 <div>

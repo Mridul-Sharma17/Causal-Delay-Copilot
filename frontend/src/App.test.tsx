@@ -207,6 +207,12 @@ const lineageResponse = {
     source_kind: "semi_synthetic",
     intended_role: "semi_synthetic_hero",
     mapping_manifest_id: "semi-synthetic-hero.mapping.v1",
+    source_role_ceiling: {
+      label: "Construction demonstration",
+      permitted_claim_scope: "construction_demonstration",
+      subject_application_role_permitted: true,
+      decision_support_evaluation_permitted: true,
+    },
     record_counts: {
       order_lines: 3,
       order_line_events: 6,
@@ -291,6 +297,12 @@ const lineageResponse = {
     event_seq: 4,
     content_hash: "sha256:lineage-1",
     created_at: "2026-08-05T00:00:01Z",
+    source_role_ceiling: {
+      label: "Construction demonstration",
+      permitted_claim_scope: "construction_demonstration",
+      subject_application_role_permitted: true,
+      decision_support_evaluation_permitted: true,
+    },
   },
 };
 
@@ -964,5 +976,131 @@ describe("Core health journey", () => {
       "/api/audit/occurrences",
       expect.anything(),
     );
+  });
+
+  test("labels public validation evidence and its source-role ceiling", async () => {
+    let publicLineageResponse = {
+      ...lineageResponse,
+      dataset_version: {
+        ...lineageResponse.dataset_version,
+        dataset_id: "olist-validation",
+        dataset_version_id: "sha256:olist-validation-v1",
+        source_kind: "olist",
+        intended_role: "out_of_domain_validation",
+        mapping_manifest_id: "olist-validation.mapping.v1",
+        source_role_ceiling: {
+          label: "Out-of-domain validation only",
+          permitted_claim_scope: "out_of_domain_validation",
+          subject_application_role_permitted: false,
+          decision_support_evaluation_permitted: false,
+        },
+      },
+      audit_binding: {
+        ...lineageResponse.audit_binding,
+        source_role_ceiling: {
+          label: "Out-of-domain validation only",
+          permitted_claim_scope: "out_of_domain_validation",
+          subject_application_role_permitted: false,
+          decision_support_evaluation_permitted: false,
+        },
+      },
+    };
+    const fetchMock = vi.fn<typeof fetch>();
+    fetchMock.mockImplementation(async (input) => {
+      if (input === "/api/health") {
+        return new Response(JSON.stringify(healthResponse), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (input === "/api/workspace") {
+        return new Response(JSON.stringify(workspaceResponse), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (input === "/api/evidence/reference") {
+        return new Response(JSON.stringify(referenceDeliveryResponse), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (typeof input === "string" && input.startsWith("/api/datasets/")) {
+        return new Response(JSON.stringify(publicLineageResponse), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (typeof input === "string" && input.startsWith("/api/risk-signals")) {
+        return new Response(JSON.stringify({ items: [] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (typeof input === "string" && input.startsWith("/api/proactive-proposals")) {
+        return new Response(JSON.stringify({ items: [] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      expect(input).toBe("/api/audit/occurrences");
+      return new Response(
+        JSON.stringify({
+          result: "CREATED",
+          occurrence_id: "occurrence-public-lineage",
+          event_seq: 1,
+        }),
+        { status: 201, headers: { "content-type": "application/json" } },
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<App />);
+
+    expect(
+      await screen.findByRole("heading", { name: "Out-of-domain validation only" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("out_of_domain_validation")).toBeInTheDocument();
+    expect(screen.getByText("Prohibited by the source-role ceiling")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Validation-only evidence. It cannot support an in-domain construction effect or action permission.",
+      ),
+    ).toBeInTheDocument();
+
+    publicLineageResponse = {
+      ...publicLineageResponse,
+      dataset_version: {
+        ...publicLineageResponse.dataset_version,
+        source_kind: "scms",
+        intended_role: "rejection_vignette",
+        source_role_ceiling: {
+          label: "Rejection vignette only",
+          permitted_claim_scope: "rejection_vignette",
+          subject_application_role_permitted: false,
+          decision_support_evaluation_permitted: false,
+        },
+      },
+      audit_binding: {
+        ...publicLineageResponse.audit_binding,
+        source_role_ceiling: {
+          label: "Rejection vignette only",
+          permitted_claim_scope: "rejection_vignette",
+          subject_application_role_permitted: false,
+          decision_support_evaluation_permitted: false,
+        },
+      },
+    };
+    cleanup();
+    render(<App />);
+
+    expect(
+      await screen.findByRole("heading", { name: "Rejection vignette only" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Rejection-vignette evidence. It cannot support an effect claim, in-domain subject application, or action permission.",
+      ),
+    ).toBeInTheDocument();
   });
 });
