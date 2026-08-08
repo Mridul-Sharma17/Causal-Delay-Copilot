@@ -100,6 +100,36 @@ export type OperationKind =
   | "FRESH_REPRODUCTION"
   | "BOUNDED_WORK";
 
+export type AnalysisRunStatus = {
+  schema_version: "analysis-run-status.v1";
+  analysis_run_id: string;
+  occurrence_id: string;
+  operation_id: string;
+  status: "PENDING" | "RUNNING" | "ABSTAINED" | "FAILED";
+  lifecycle: "executing" | "sealed" | "failed" | "quarantined";
+  scientific_outcome: "pending" | "estimated" | "abstained" | "failed";
+  verification_state:
+    | "pending"
+    | "machine_verified"
+    | "reference_validated"
+    | "invalid";
+  availability_state: "available" | "suppressed";
+  delivery_mode: "fresh_execution" | "existing_run_reuse";
+  reason_code: string | null;
+  failure_code: string | null;
+  recovery_action: string | null;
+  estimator_executed: boolean;
+  request_schema_version: "causal-engine-suite-request.v2";
+  scientific_request_digest: string;
+  runtime_fingerprint: Record<string, unknown>;
+  runtime_fingerprint_digest: string;
+  root_seed: number;
+  derived_seed_registry: Array<Record<string, unknown>>;
+  estimator_descriptor: Record<string, unknown>;
+  feature_descriptor: Record<string, unknown>;
+  fold_descriptor: Record<string, unknown>;
+};
+
 export type DurableOperation = {
   schema_version: "durable-operation.v1";
   operation_id: string;
@@ -128,6 +158,7 @@ export type DurableOperation = {
   memory_required_bytes: number;
   memory_available_bytes: number;
   disk_free_bytes: number;
+  analysis_run: AnalysisRunStatus | null;
 };
 
 export type OperationMutationResponse = {
@@ -755,6 +786,77 @@ function nullableString(value: unknown): string | null {
   return value;
 }
 
+function parseAnalysisRunStatus(value: unknown): AnalysisRunStatus {
+  if (
+    !isRecord(value) ||
+    value.schema_version !== "analysis-run-status.v1" ||
+    typeof value.analysis_run_id !== "string" ||
+    typeof value.occurrence_id !== "string" ||
+    typeof value.operation_id !== "string" ||
+    (value.status !== "PENDING" &&
+      value.status !== "RUNNING" &&
+      value.status !== "ABSTAINED" &&
+      value.status !== "FAILED") ||
+    (value.lifecycle !== "executing" &&
+      value.lifecycle !== "sealed" &&
+      value.lifecycle !== "failed" &&
+      value.lifecycle !== "quarantined") ||
+    (value.scientific_outcome !== "pending" &&
+      value.scientific_outcome !== "estimated" &&
+      value.scientific_outcome !== "abstained" &&
+      value.scientific_outcome !== "failed") ||
+    (value.verification_state !== "pending" &&
+      value.verification_state !== "machine_verified" &&
+      value.verification_state !== "reference_validated" &&
+      value.verification_state !== "invalid") ||
+    (value.availability_state !== "available" &&
+      value.availability_state !== "suppressed") ||
+    (value.delivery_mode !== "fresh_execution" &&
+      value.delivery_mode !== "existing_run_reuse") ||
+    (value.reason_code !== null && typeof value.reason_code !== "string") ||
+    (value.failure_code !== null && typeof value.failure_code !== "string") ||
+    (value.recovery_action !== null && typeof value.recovery_action !== "string") ||
+    typeof value.estimator_executed !== "boolean" ||
+    value.request_schema_version !== "causal-engine-suite-request.v2" ||
+    typeof value.scientific_request_digest !== "string" ||
+    !isRecord(value.runtime_fingerprint) ||
+    typeof value.runtime_fingerprint_digest !== "string" ||
+    !isNonNegativeInteger(value.root_seed) ||
+    !Array.isArray(value.derived_seed_registry) ||
+    !value.derived_seed_registry.every(isRecord) ||
+    !isRecord(value.estimator_descriptor) ||
+    !isRecord(value.feature_descriptor) ||
+    !isRecord(value.fold_descriptor)
+  ) {
+    throw new Error("invalid analysis run response");
+  }
+  return {
+    schema_version: "analysis-run-status.v1",
+    analysis_run_id: value.analysis_run_id,
+    occurrence_id: value.occurrence_id,
+    operation_id: value.operation_id,
+    status: value.status,
+    lifecycle: value.lifecycle,
+    scientific_outcome: value.scientific_outcome,
+    verification_state: value.verification_state,
+    availability_state: value.availability_state,
+    delivery_mode: value.delivery_mode,
+    reason_code: nullableString(value.reason_code),
+    failure_code: nullableString(value.failure_code),
+    recovery_action: nullableString(value.recovery_action),
+    estimator_executed: value.estimator_executed,
+    request_schema_version: "causal-engine-suite-request.v2",
+    scientific_request_digest: value.scientific_request_digest,
+    runtime_fingerprint: value.runtime_fingerprint,
+    runtime_fingerprint_digest: value.runtime_fingerprint_digest,
+    root_seed: value.root_seed,
+    derived_seed_registry: value.derived_seed_registry,
+    estimator_descriptor: value.estimator_descriptor,
+    feature_descriptor: value.feature_descriptor,
+    fold_descriptor: value.fold_descriptor,
+  };
+}
+
 export function parseOperationResponse(value: unknown): DurableOperation {
   if (
     !isRecord(value) ||
@@ -799,6 +901,10 @@ export function parseOperationResponse(value: unknown): DurableOperation {
   if (!isOperationState(parsedState)) {
     throw new Error("invalid operation response");
   }
+  const analysisRun =
+    value.analysis_run === undefined || value.analysis_run === null
+      ? null
+      : parseAnalysisRunStatus(value.analysis_run);
   return {
     schema_version: "durable-operation.v1",
     operation_id: value.operation_id,
@@ -822,6 +928,7 @@ export function parseOperationResponse(value: unknown): DurableOperation {
     memory_required_bytes: value.memory_required_bytes,
     memory_available_bytes: value.memory_available_bytes,
     disk_free_bytes: value.disk_free_bytes,
+    analysis_run: analysisRun,
   };
 }
 

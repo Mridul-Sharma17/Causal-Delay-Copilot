@@ -481,6 +481,25 @@ class DurableOperationsMixin:
             )
             return None if row is None else self._operation_from_row(connection, row)
 
+    def get_operation_request(
+        self,
+        workspace_id: str,
+        operation_id: str,
+    ) -> dict[str, Any] | None:
+        """Read the durable request payload for the bounded worker only."""
+
+        with self._lock:
+            row = self._operation_row_locked(
+                self._connection_or_raise(),
+                workspace_id=workspace_id,
+                operation_id=operation_id,
+            )
+            if row is None:
+                return None
+            payload = json.loads(str(row["request_json"]))
+            request = payload.get("request") if isinstance(payload, Mapping) else None
+            return dict(request) if isinstance(request, Mapping) else None
+
     def claim_next_operation(self, *, now: datetime | None = None) -> DurableOperation | None:
         current_time = _as_utc(now or datetime.now(timezone.utc))
         with self._lock:
@@ -1054,6 +1073,19 @@ class OperationRunner:
         terminal_state: str | None = None
         try:
             temporary_root.mkdir(parents=True, exist_ok=True)
+            operation_request = self._store.get_operation_request(
+                operation.workspace_id,
+                operation.operation_id,
+            )
+            if (
+                operation.operation_kind == "FRESH_ANALYSIS"
+                and isinstance(operation_request, Mapping)
+                and operation_request.get("schema_version") == "analysis-run-admission.v1"
+            ):
+                _write_json_durable(
+                    temporary_root / "analysis-run-request.json",
+                    operation_request,
+                )
             _write_json_durable(
                 temporary_root / "executing.json",
                 {

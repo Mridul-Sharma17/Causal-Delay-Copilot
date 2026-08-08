@@ -884,7 +884,7 @@ function App() {
     const investigationRequestId = riskAttempt.investigation_request_id;
     const idempotencyKey =
       freshOperationKey.current ??
-      `fresh-analysis:${investigationRequestId}:${reference.scientific_request_digest}`;
+      `fresh-analysis:${investigationRequestId}:seed-0`;
     freshOperationKey.current = idempotencyKey;
     setFreshOperationState("starting");
     try {
@@ -893,7 +893,7 @@ function App() {
         operation_kind: "FRESH_ANALYSIS",
         request: {
           investigation_request_id: investigationRequestId,
-          scientific_request_digest: reference.scientific_request_digest,
+          root_seed: 0,
         },
       });
       setFreshOperation(accepted.operation);
@@ -1074,7 +1074,11 @@ function App() {
                         <p className="eyebrow">Fresh analysis boundary</p>
                         <h3 id="fresh-operation-heading">Durable operation status</h3>
                       </div>
-                      <span>{freshOperation?.state ?? "NOT_REQUESTED"}</span>
+                      <span>
+                        {freshOperation?.analysis_run?.status ??
+                          freshOperation?.state ??
+                          "NOT_REQUESTED"}
+                      </span>
                     </div>
                     <p className="supporting-copy">
                       Fresh work is admitted durably and polled over the typed API. Existing
@@ -1104,9 +1108,13 @@ function App() {
                     )}
                     {freshOperationState === "terminal" && freshOperation !== null && (
                       <p className="supporting-copy" role="status">
-                        {freshOperation.state === "SUCCEEDED"
-                          ? "Fresh operation completed with a durable result."
-                          : `Fresh operation ended ${freshOperation.state}. ${freshOperation.failure_code ?? "No result was published."}`}
+                        {freshOperation.analysis_run?.status === "ABSTAINED"
+                          ? `Fresh request validated and abstained before estimator execution. ${freshOperation.analysis_run.reason_code ?? "No scientific result was published."}`
+                          : freshOperation.analysis_run?.status === "FAILED"
+                            ? `Fresh request failed safely. ${freshOperation.analysis_run.failure_code ?? "No result was published."}`
+                            : freshOperation.state === "SUCCEEDED"
+                              ? "Fresh request is durably sealed without a fabricated estimate."
+                              : `Fresh operation ended ${freshOperation.state}. ${freshOperation.failure_code ?? "No result was published."}`}
                       </p>
                     )}
                   </section>

@@ -1227,6 +1227,7 @@ def evaluate_pre_estimation_eligibility(
     subject_propensity: Any | None = None,
     history_selected_ids: Sequence[str] | None = None,
     estimator_selected_ids: Sequence[str] | None = None,
+    include_engine_rows: bool = False,
 ) -> dict[str, Any]:
     """Evaluate the deterministic pre-estimation cohort and subject gates.
 
@@ -1255,6 +1256,7 @@ def evaluate_pre_estimation_eligibility(
     h0_ids = frozen_ids["h0"]
     s0_ids = frozen_ids["s0"]
     records: dict[str, dict[str, Any]] = {}
+    engine_rows_by_variant: dict[str, list[dict[str, Any]]] = {}
     line_codes: dict[str, list[str]] = {line_id: [] for line_id in h0_ids}
 
     for line_id in h0_ids:
@@ -1824,6 +1826,15 @@ def evaluate_pre_estimation_eligibility(
             }
             for line_id in s8_ids
         ]
+        engine_rows_by_variant[variant_id] = deepcopy(
+            [
+                {
+                    **row,
+                    "lineage_refs": records[row["id"]].get("lineage_refs", []),
+                }
+                for row in line_rows_s8
+            ]
+        )
         for row in line_rows_s8:
             records[row["id"]]["exposure"] = row["exposure"]
 
@@ -2659,4 +2670,7 @@ def evaluate_pre_estimation_eligibility(
         result["variants"][variant_id] = public_variant
         if variant_id != "primary" and variant.get("estimator_input") is not None:
             result["sensitivity_inputs"][variant_id] = variant["estimator_input"]
-    return _sanitize_proactive(result) if trigger_mode == "proactive" else result
+    public_result = _sanitize_proactive(result) if trigger_mode == "proactive" else result
+    if include_engine_rows:
+        public_result["_engine_rows"] = deepcopy(engine_rows_by_variant)
+    return public_result

@@ -19,6 +19,7 @@ from .contracts import (
     AuditOccurrenceListResponse,
     AuditOccurrenceResponse,
     AuditOccurrenceViewResponse,
+    AnalysisRunStatusResponse,
     DecisionBriefRequest,
     DecisionBriefResponse,
     DecisionBriefSnapshotResponse,
@@ -51,7 +52,14 @@ from .contracts import (
     WorkspaceSelectionViewResponse,
     WorkspaceResultViewResponse,
 )
-from .errors import WorkspaceRequestError
+from .errors import SafeErrorCode, WorkspaceRequestError
+from .analysis_runs import (
+    AnalysisRunRequestError,
+    analysis_run_id_for_operation,
+    analysis_run_status,
+    build_fresh_analysis_payload,
+    is_strict_fresh_analysis_request,
+)
 from .governance import (
     DecisionBriefUnavailable,
     InvestigationRequestUnavailable,
@@ -559,6 +567,19 @@ def create_app(
         )
 
     def operation_response(operation: DurableOperation) -> OperationResponse:
+        operation_request = core_store.get_operation_request(
+            operation.workspace_id,
+            operation.operation_id,
+        )
+        analysis_run = None
+        if (
+            operation.operation_kind == "FRESH_ANALYSIS"
+            and isinstance(operation_request, dict)
+            and operation_request.get("schema_version") == "analysis-run-admission.v1"
+        ):
+            analysis_run = AnalysisRunStatusResponse(
+                **analysis_run_status(operation, operation_request)
+            )
         return OperationResponse(
             schema_version="durable-operation.v1",
             operation_id=operation.operation_id,
@@ -583,6 +604,7 @@ def create_app(
             memory_required_bytes=operation.memory_required_bytes,
             memory_available_bytes=operation.memory_available_bytes,
             disk_free_bytes=operation.disk_free_bytes,
+            analysis_run=analysis_run,
         )
 
     def liveness_probe() -> HealthProbe:
@@ -658,11 +680,28 @@ def create_app(
             if "memory_required_bytes" in request.model_fields_set
             else resolved_settings.quotas.compute_memory_request_bytes
         )
+        stored_request = request.request
+        if request.operation_kind == "FRESH_ANALYSIS" and is_strict_fresh_analysis_request(
+            request.request
+        ):
+            try:
+                stored_request = build_fresh_analysis_payload(
+                    core_store,
+                    resolution.snapshot.workspace_id,
+                    request.request,
+                    resolved_settings,
+                )
+            except AnalysisRunRequestError as error:
+                raise WorkspaceRequestError(
+                    SafeErrorCode(error.code),
+                    error.recovery_action,
+                    error.status_code,
+                ) from error
         stored = core_store.admit_operation(
             resolution.snapshot.workspace_id,
             operation_kind=request.operation_kind,
             idempotency_key=request.idempotency_key,
-            request=request.request,
+            request=stored_request,
             memory_required_bytes=memory_required_bytes,
             state_root=resolved_settings.state_root,
         )
@@ -675,6 +714,45 @@ def create_app(
                 status_code=200 if stored.replayed else 202,
                 content=response.model_dump(mode="json"),
             ),
+            resolution,
+        )
+
+    @app.get(
+        "/api/analysis-runs/{analysis_run_id}",
+        response_model=AnalysisRunStatusResponse,
+    )
+    async def get_analysis_run(
+        request: Request,
+        analysis_run_id: str,
+    ) -> JSONResponse:
+        resolution = resolve_workspace(request)
+        try:
+            if not analysis_run_id.startswith("analysis-run-"):
+                raise ValueError("analysis run identity is invalid")
+            operation_id = "operation-" + analysis_run_id.removeprefix("analysis-run-")
+            if analysis_run_id != analysis_run_id_for_operation(operation_id):
+                raise ValueError("analysis run identity is invalid")
+        except ValueError:
+            return attach_workspace_cookie(workspace_resource_unavailable(), resolution)
+        operation = core_store.get_operation(
+            resolution.snapshot.workspace_id,
+            operation_id,
+        )
+        operation_request = core_store.get_operation_request(
+            resolution.snapshot.workspace_id,
+            operation_id,
+        )
+        if (
+            operation is None
+            or not isinstance(operation_request, dict)
+            or operation_request.get("schema_version") != "analysis-run-admission.v1"
+        ):
+            return attach_workspace_cookie(workspace_resource_unavailable(), resolution)
+        response = AnalysisRunStatusResponse(
+            **analysis_run_status(operation, operation_request)
+        )
+        return attach_workspace_cookie(
+            JSONResponse(status_code=200, content=response.model_dump(mode="json")),
             resolution,
         )
 

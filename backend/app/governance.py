@@ -701,6 +701,21 @@ class GovernanceMixin:
         ).fetchone()
         return None if row is None else _request_from_row(row)
 
+    def get_investigation_request(
+        self,
+        workspace_id: str,
+        investigation_request_id: str,
+    ) -> dict[str, Any] | None:
+        """Read one immutable accepted request for a bounded engine admission."""
+
+        with self._lock:
+            connection = self._connection_or_raise()
+            return self._get_investigation_request_locked(
+                connection,
+                workspace_id,
+                investigation_request_id,
+            )
+
     def get_decision_brief_by_idempotency(
         self,
         workspace_id: str,

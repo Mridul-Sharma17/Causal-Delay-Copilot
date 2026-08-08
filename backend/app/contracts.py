@@ -713,6 +713,34 @@ class OperationActionRequest(BaseModel):
     )
 
 
+class AnalysisRunStatusResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["analysis-run-status.v1"]
+    analysis_run_id: str
+    occurrence_id: str
+    operation_id: str
+    status: Literal["PENDING", "RUNNING", "ABSTAINED", "FAILED"]
+    lifecycle: Literal["executing", "sealed", "failed", "quarantined"]
+    scientific_outcome: Literal["pending", "estimated", "abstained", "failed"]
+    verification_state: Literal["pending", "machine_verified", "reference_validated", "invalid"]
+    availability_state: Literal["available", "suppressed"]
+    delivery_mode: Literal["fresh_execution", "existing_run_reuse"]
+    reason_code: str | None
+    failure_code: str | None
+    recovery_action: str | None
+    estimator_executed: bool
+    request_schema_version: Literal["causal-engine-suite-request.v2"]
+    scientific_request_digest: str
+    runtime_fingerprint: dict[str, Any]
+    runtime_fingerprint_digest: str
+    root_seed: int = Field(ge=0, le=2**64 - 1)
+    derived_seed_registry: list[dict[str, Any]]
+    estimator_descriptor: dict[str, Any]
+    feature_descriptor: dict[str, Any]
+    fold_descriptor: dict[str, Any]
+
+
 class OperationResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -744,6 +772,7 @@ class OperationResponse(BaseModel):
     memory_required_bytes: int = Field(ge=1)
     memory_available_bytes: int = Field(ge=0)
     disk_free_bytes: int = Field(ge=0)
+    analysis_run: AnalysisRunStatusResponse | None = None
 
 
 class OperationMutationResponse(BaseModel):
