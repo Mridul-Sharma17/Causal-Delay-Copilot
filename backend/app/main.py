@@ -35,6 +35,7 @@ from .contracts import (
     ReactiveFixtureRequest,
     RiskSignalListResponse,
     RiskSignalRequest,
+    ValidatedReferenceDeliveryResponse,
     ValidatedReferenceListResponse,
     ValidatedReferenceResponse,
     WorkspaceSelectionRequest,
@@ -56,6 +57,7 @@ from .risk import (
 from .security import apply_public_response_headers
 from .settings import Settings
 from .state import StateRoot
+from .references import DEFAULT_REFERENCE_SLOT_ID, ValidatedReferenceStore
 from .workspace import DEMO_WORKSPACE_COOKIE_NAME, WorkspaceResolution
 
 MAX_REACTIVE_REQUEST_BYTES = 64 * 1024
@@ -266,6 +268,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         release_candidate_id=resolved_settings.release_candidate_id,
         quotas=resolved_settings.quotas,
     )
+    reference_store = ValidatedReferenceStore(
+        resolved_settings.artifact_root,
+        release_candidate_id=resolved_settings.release_candidate_id,
+        runtime_fingerprint=resolved_settings.runtime_fingerprint.model_dump(mode="json"),
+    )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -284,6 +291,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.settings = resolved_settings
     app.state.audit_store = core_store
+    app.state.reference_store = reference_store
 
     @app.exception_handler(RequestValidationError)
     async def handle_request_validation(
@@ -827,6 +835,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             selection_id=request.selection_id,
             reference_id=request.reference_id,
             idempotency_key=request.idempotency_key,
+            reference_exists=reference_store.is_verified,
         )
         response = WorkspaceSelectionResponse(
             result="IDEMPOTENT_REPLAY" if receipt.replayed else "CREATED",
@@ -899,12 +908,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def list_validated_references() -> JSONResponse:
         items = [
             ValidatedReferenceResponse(
-                reference_id=item.reference_id,
-                bundle_ref=item.bundle_ref,
+                reference_id=item.reference_slot_id,
+                bundle_ref=item.bundle_manifest_hash,
                 validation_attestation_ref=item.validation_attestation_ref,
                 release_candidate_id=item.release_candidate_id,
             )
-            for item in core_store.list_validated_references()
+            for item in reference_store.list_verified_references()
         ]
         return JSONResponse(
             status_code=200,
@@ -916,14 +925,44 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         response_model=ValidatedReferenceResponse,
     )
     async def get_validated_reference(reference_id: str) -> JSONResponse:
-        reference = core_store.get_validated_reference(reference_id)
-        if reference is None:
+        verified = reference_store.select_reference(reference_id)
+        if verified is None:
             return workspace_resource_unavailable()
         response = ValidatedReferenceResponse(
-            reference_id=reference.reference_id,
-            bundle_ref=reference.bundle_ref,
+            reference_id=verified.reference_slot_id,
+            bundle_ref=verified.bundle_manifest_hash,
+            validation_attestation_ref=verified.validation_attestation_ref,
+            release_candidate_id=verified.release_candidate_id,
+        )
+        return JSONResponse(status_code=200, content=response.model_dump(mode="json"))
+
+    @app.get(
+        "/api/evidence/reference",
+        response_model=ValidatedReferenceDeliveryResponse,
+    )
+    async def get_ordinary_reference() -> JSONResponse:
+        reference = reference_store.read_model(DEFAULT_REFERENCE_SLOT_ID)
+        if reference is None:
+            return workspace_resource_unavailable()
+        response = ValidatedReferenceDeliveryResponse(
+            schema_version="analysis-run-read-model.v1",
+            delivery_mode=reference.delivery_mode,
+            delivery_badge="Validated reference",
+            verification_state=reference.verification_state,
+            reference_slot_id=reference.reference_slot_id,
+            reference_id=reference.reference_slot_id,
+            analysis_run_id=reference.analysis_run_id,
+            bundle_manifest_hash=reference.bundle_manifest_hash,
+            bundle_ref=reference.bundle_manifest_hash,
+            validation_attestation_id=reference.validation_attestation_id,
             validation_attestation_ref=reference.validation_attestation_ref,
             release_candidate_id=reference.release_candidate_id,
+            intended_role=reference.intended_role,
+            engine_result_status=reference.engine_result_status,
+            scientific_request_digest=reference.scientific_request_digest,
+            runtime_fingerprint_digest=reference.runtime_fingerprint_digest,
+            validation_policy_version=reference.validation_policy_version,
+            validated_at=reference.validated_at,
         )
         return JSONResponse(status_code=200, content=response.model_dump(mode="json"))
 

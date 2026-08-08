@@ -49,6 +49,15 @@ def test_startup_seals_database_artifacts_release_and_global_reference_state(
     assert (state_root / "core.sqlite3").is_file()
     assert (state_root / "artifacts").is_dir()
     assert (state_root / "artifacts" / "validated-references").is_dir()
+    for directory in (
+        "objects",
+        "runs",
+        "attestations",
+        "releases",
+        "temporary",
+        "quarantine",
+    ):
+        assert (state_root / "artifacts" / directory).is_dir()
     assert (state_root / "runtime" / "release_identity.json").is_file()
     assert (state_root / "runtime" / "quota_policy.json").is_file()
     assert (state_root / "runtime" / "runtime_fingerprint.json").is_file()

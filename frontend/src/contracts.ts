@@ -44,6 +44,27 @@ export type DemoWorkspace = {
   remaining_terminal_fresh_bundles: number;
 };
 
+export type ValidatedReferenceDelivery = {
+  schema_version: "analysis-run-read-model.v1";
+  delivery_mode: "existing_run_reuse";
+  delivery_badge: "Validated reference";
+  verification_state: "reference_validated";
+  reference_slot_id: string;
+  reference_id: string;
+  analysis_run_id: string;
+  bundle_manifest_hash: string;
+  bundle_ref: string;
+  validation_attestation_id: string;
+  validation_attestation_ref: string;
+  release_candidate_id: string;
+  intended_role: string;
+  engine_result_status: "estimated" | "abstained";
+  scientific_request_digest: string;
+  runtime_fingerprint_digest: string;
+  validation_policy_version: string;
+  validated_at: string;
+};
+
 export type IngestionRunResponse = {
   result: "CREATED" | "IDEMPOTENT_REPLAY";
   ingestion_run_id: string;
@@ -500,6 +521,55 @@ export function parseDemoWorkspaceResponse(value: unknown): DemoWorkspace {
     remaining_mutations: value.remaining_mutations,
     terminal_fresh_bundle_count: value.terminal_fresh_bundle_count,
     remaining_terminal_fresh_bundles: value.remaining_terminal_fresh_bundles,
+  };
+}
+
+export function parseValidatedReferenceDelivery(
+  value: unknown,
+): ValidatedReferenceDelivery {
+  if (
+    !isRecord(value) ||
+    value.schema_version !== "analysis-run-read-model.v1" ||
+    value.delivery_mode !== "existing_run_reuse" ||
+    value.delivery_badge !== "Validated reference" ||
+    value.verification_state !== "reference_validated" ||
+    typeof value.reference_slot_id !== "string" ||
+    typeof value.reference_id !== "string" ||
+    typeof value.analysis_run_id !== "string" ||
+    typeof value.bundle_manifest_hash !== "string" ||
+    typeof value.bundle_ref !== "string" ||
+    typeof value.validation_attestation_id !== "string" ||
+    typeof value.validation_attestation_ref !== "string" ||
+    typeof value.release_candidate_id !== "string" ||
+    typeof value.intended_role !== "string" ||
+    (value.engine_result_status !== "estimated" &&
+      value.engine_result_status !== "abstained") ||
+    typeof value.scientific_request_digest !== "string" ||
+    typeof value.runtime_fingerprint_digest !== "string" ||
+    typeof value.validation_policy_version !== "string" ||
+    typeof value.validated_at !== "string"
+  ) {
+    throw new Error("invalid validated reference response");
+  }
+  return {
+    schema_version: "analysis-run-read-model.v1",
+    delivery_mode: "existing_run_reuse",
+    delivery_badge: "Validated reference",
+    verification_state: "reference_validated",
+    reference_slot_id: value.reference_slot_id,
+    reference_id: value.reference_id,
+    analysis_run_id: value.analysis_run_id,
+    bundle_manifest_hash: value.bundle_manifest_hash,
+    bundle_ref: value.bundle_ref,
+    validation_attestation_id: value.validation_attestation_id,
+    validation_attestation_ref: value.validation_attestation_ref,
+    release_candidate_id: value.release_candidate_id,
+    intended_role: value.intended_role,
+    engine_result_status: value.engine_result_status,
+    scientific_request_digest: value.scientific_request_digest,
+    runtime_fingerprint_digest: value.runtime_fingerprint_digest,
+    validation_policy_version: value.validation_policy_version,
+    validated_at: value.validated_at,
   };
 }
 

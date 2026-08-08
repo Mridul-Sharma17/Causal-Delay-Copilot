@@ -140,6 +140,29 @@ class ValidatedReferenceListResponse(BaseModel):
     items: list[ValidatedReferenceResponse]
 
 
+class ValidatedReferenceDeliveryResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["analysis-run-read-model.v1"]
+    delivery_mode: Literal["existing_run_reuse"]
+    delivery_badge: Literal["Validated reference"]
+    verification_state: Literal["reference_validated"]
+    reference_slot_id: str
+    reference_id: str
+    analysis_run_id: str
+    bundle_manifest_hash: str
+    bundle_ref: str
+    validation_attestation_id: str
+    validation_attestation_ref: str
+    release_candidate_id: str
+    intended_role: str
+    engine_result_status: Literal["estimated", "abstained"]
+    scientific_request_digest: str
+    runtime_fingerprint_digest: str
+    validation_policy_version: str
+    validated_at: datetime
+
+
 class IngestionRunRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

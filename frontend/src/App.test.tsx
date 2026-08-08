@@ -24,6 +24,27 @@ const workspaceResponse = {
   remaining_terminal_fresh_bundles: 4,
 };
 
+const referenceDeliveryResponse = {
+  schema_version: "analysis-run-read-model.v1",
+  delivery_mode: "existing_run_reuse",
+  delivery_badge: "Validated reference",
+  verification_state: "reference_validated",
+  reference_slot_id: "ordinary-demo",
+  reference_id: "ordinary-demo",
+  analysis_run_id: "analysis-run-00000000-0000-4000-8000-000000000001",
+  bundle_manifest_hash: "sha256:bundle",
+  bundle_ref: "sha256:bundle",
+  validation_attestation_id: "attestation-ordinary-demo",
+  validation_attestation_ref: "attestation-ordinary-demo",
+  release_candidate_id: "local-local_development",
+  intended_role: "semi_synthetic_hero",
+  engine_result_status: "estimated",
+  scientific_request_digest: "sha256:request",
+  runtime_fingerprint_digest: "sha256:runtime",
+  validation_policy_version: "release-validation.v1",
+  validated_at: "2026-08-05T00:00:00Z",
+};
+
 const lineageResponse = {
   ingestion_run: {
     ingestion_run_id: "run-1",
@@ -491,6 +512,13 @@ describe("Core health journey", () => {
         });
       }
 
+      if (input === "/api/evidence/reference") {
+        return new Response(JSON.stringify(referenceDeliveryResponse), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+
       if (input === "/api/ingestion-runs") {
         expect(init?.method).toBe("POST");
         expect(JSON.parse(String(init?.body))).toEqual({
@@ -605,6 +633,10 @@ describe("Core health journey", () => {
     expect(screen.getByText(/Demo Workspace active/)).toBeInTheDocument();
     expect(screen.getByText("Process liveness")).toBeInTheDocument();
     expect(screen.getByText("Core readiness")).toBeInTheDocument();
+    expect(
+      await screen.findByText("Existing run reused. No fresh scientific execution occurred."),
+    ).toBeInTheDocument();
+    expect(screen.getByText("ordinary-demo")).toBeInTheDocument();
     expect(screen.getByText("Audit occurrence recorded · event 1")).toBeInTheDocument();
     expect(await screen.findByText("Canonical lineage")).toBeInTheDocument();
     expect(await screen.findByText("Investigation request accepted")).toBeInTheDocument();
@@ -632,7 +664,7 @@ describe("Core health journey", () => {
       await screen.findByText("Source observation register (3)"),
     ).toBeInTheDocument();
     expect(screen.getAllByText("SOURCE_DUPLICATE_DEDUPED").length).toBeGreaterThan(0);
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(10));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(11));
   });
 
   test("does not expose an internal error when health is unavailable", async () => {
