@@ -44,6 +44,37 @@ const referenceDeliveryResponse = {
   runtime_fingerprint_digest: "sha256:runtime",
   validation_policy_version: "release-validation.v1",
   validated_at: "2026-08-05T00:00:00Z",
+  diagnostics: [
+    {
+      schema_version: "diagnostic-result.v1",
+      diagnostic_id: "primary_interval",
+      diagnostic_version: "1",
+      scope: "population",
+      status: "UNAVAILABLE",
+      policy_id: "causal-validity-verdict-policy",
+      policy_version: "1",
+      rule_id: "primary-interval-sign",
+      rule_version: "1",
+      observed: null,
+      threshold: { null: 0 },
+      result: null,
+      verdict_effect: "NONE",
+      trigger_codes: [],
+      reason_code: "PRIMARY_INTERVAL_UNAVAILABLE",
+      reason: "The verified evidence bundle contains no primary interval.",
+      analysis_run_id: "analysis-run-00000000-0000-4000-8000-000000000001",
+      bundle_manifest_hash: "sha256:bundle",
+      evidence_refs: ["diagnostic_artifacts:diagnostic_artifacts"],
+      input_refs: ["diagnostic_artifacts:diagnostic_artifacts"],
+      diagnostic_identity: "sha256:diagnostic-identity",
+      content_hash: "sha256:diagnostic-content",
+    },
+  ],
+  diagnostic_summary: {
+    state: "limited",
+    diagnostic_count: 1,
+    status_counts: { UNAVAILABLE: 1 },
+  },
 };
 
 const lineageResponse = {
@@ -623,6 +654,12 @@ describe("Core health journey", () => {
       await screen.findByText("Existing run reused. No fresh scientific execution occurred."),
     ).toBeInTheDocument();
     expect(screen.getByText("ordinary-demo")).toBeInTheDocument();
+    expect(await screen.findByText("Diagnostic summary")).toBeInTheDocument();
+    expect(screen.getByText("Limited diagnostic evidence")).toBeInTheDocument();
+    const diagnosticSummary = screen.getByText("Open diagnostic details (1)");
+    expect(diagnosticSummary.closest("details")).not.toHaveAttribute("open");
+    fireEvent.click(diagnosticSummary);
+    expect(screen.getByText(/UNAVAILABLE — no verified result/)).toBeInTheDocument();
     expect(screen.getByText("Audit occurrence recorded · event 1")).toBeInTheDocument();
     expect(await screen.findByText("Canonical lineage")).toBeInTheDocument();
     expect(await screen.findByText("Investigation request accepted")).toBeInTheDocument();

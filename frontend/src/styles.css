@@ -214,6 +214,71 @@ code {
   overflow-wrap: anywhere;
 }
 
+.evidence-diagnostics {
+  margin-top: 24px;
+  padding: 24px;
+  background: #f4f4f4;
+  border-top: 4px solid #8a3ffc;
+}
+
+.evidence-diagnostics h3 {
+  margin: 0;
+  font-size: 1.125rem;
+  font-weight: 500;
+}
+
+.diagnostic-status-summary {
+  margin-bottom: 0;
+  color: #525252;
+  font-family: "IBM Plex Mono", Consolas, monospace;
+  font-size: 0.75rem;
+}
+
+.diagnostic-details {
+  margin-top: 24px;
+  padding-top: 24px;
+  border-top: 1px solid #c6c6c6;
+}
+
+.diagnostic-details summary {
+  cursor: pointer;
+  font-weight: 500;
+}
+
+.diagnostic-list {
+  display: grid;
+  gap: 1px;
+  margin: 16px 0 0;
+  padding: 0;
+  list-style: none;
+  background: #c6c6c6;
+}
+
+.diagnostic-item {
+  display: grid;
+  gap: 6px;
+  padding: 16px;
+  background: #ffffff;
+}
+
+.diagnostic-item-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.diagnostic-item-heading code {
+  margin-top: 0;
+  text-align: right;
+}
+
+.diagnostic-item > span {
+  color: #525252;
+  font-size: 0.875rem;
+  line-height: 1.5;
+}
+
 .eligibility-stage {
   margin-top: 24px;
   padding: 24px;

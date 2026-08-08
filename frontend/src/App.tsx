@@ -14,6 +14,8 @@ import {
 import {
   auditOutcomeCode,
   type AuditOccurrenceResponse,
+  type DiagnosticResult,
+  type DiagnosticSummary,
   type DemoWorkspace,
   type HealthState,
   type HealthResponse,
@@ -261,6 +263,88 @@ function Trace({
           : "None recorded"}
       </code>
     </div>
+  );
+}
+
+function diagnosticStatusLabel(status: DiagnosticResult["status"]): string {
+  switch (status) {
+    case "PASS":
+      return "PASS — rule met";
+    case "FAIL":
+      return "FAIL — rule not met";
+    case "UNSUPPORTED":
+      return "UNSUPPORTED — scientific support missing";
+    case "UNAVAILABLE":
+      return "UNAVAILABLE — no verified result";
+    case "FAILED":
+      return "FAILED — execution or integrity failure";
+    case "NOT_RUN":
+      return "NOT_RUN — upstream short circuit";
+  }
+}
+
+function diagnosticSummaryLabel(summary: DiagnosticSummary): string {
+  switch (summary.state) {
+    case "complete":
+      return "Complete diagnostic set";
+    case "limited":
+      return "Limited diagnostic evidence";
+    case "attention_required":
+      return "Diagnostic attention required";
+  }
+}
+
+function EvidenceDiagnostics({
+  diagnostics,
+  summary,
+}: {
+  diagnostics: DiagnosticResult[];
+  summary: DiagnosticSummary;
+}) {
+  return (
+    <section className="evidence-diagnostics" aria-labelledby="diagnostic-summary-heading">
+      <div className="record-heading">
+        <div>
+          <p className="eyebrow">Validity diagnostics</p>
+          <h3 id="diagnostic-summary-heading">Diagnostic summary</h3>
+        </div>
+        <span>{diagnosticSummaryLabel(summary)}</span>
+      </div>
+      <p className="supporting-copy">
+        {summary.diagnostic_count === 0
+          ? "No verified diagnostic records are available for this reference."
+          : `${summary.diagnostic_count} verified diagnostic record${summary.diagnostic_count === 1 ? "" : "s"} are bound to this reference.`}
+      </p>
+      <p className="diagnostic-status-summary">
+        Status counts: {Object.entries(summary.status_counts)
+          .map(([status, count]) => `${status} ${count}`)
+          .join("; ") || "none"}
+      </p>
+      <details className="diagnostic-details">
+        <summary>Open diagnostic details ({diagnostics.length})</summary>
+        {diagnostics.length === 0 ? (
+          <p className="supporting-copy">Diagnostic detail is unavailable.</p>
+        ) : (
+          <ul className="diagnostic-list">
+            {diagnostics.map((diagnostic) => (
+              <li className="diagnostic-item" key={diagnostic.diagnostic_id}>
+                <div className="diagnostic-item-heading">
+                  <strong>{diagnostic.diagnostic_id}</strong>
+                  <code aria-label={`Status: ${diagnostic.status}`}>
+                    {diagnosticStatusLabel(diagnostic.status)}
+                  </code>
+                </div>
+                <span>{diagnostic.reason}</span>
+                <code>Reason: {diagnostic.reason_code}</code>
+                {diagnostic.trigger_codes.length > 0 && (
+                  <code>Triggers: {diagnostic.trigger_codes.join(", ")}</code>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+      </details>
+    </section>
   );
 }
 
@@ -602,6 +686,10 @@ function App() {
                       <dd><code>{reference.validation_attestation_ref}</code></dd>
                     </div>
                   </dl>
+                  <EvidenceDiagnostics
+                    diagnostics={reference.diagnostics}
+                    summary={reference.diagnostic_summary}
+                  />
                 </>
               )}
             </section>

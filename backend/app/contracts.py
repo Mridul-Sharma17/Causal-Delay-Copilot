@@ -162,6 +162,8 @@ class ValidatedReferenceDeliveryResponse(BaseModel):
     runtime_fingerprint_digest: str
     validation_policy_version: str
     validated_at: datetime
+    diagnostics: list[dict[str, Any]] = Field(default_factory=list)
+    diagnostic_summary: dict[str, Any] = Field(default_factory=dict)
 
 
 class IngestionRunRequest(BaseModel):

@@ -13,6 +13,10 @@ from typing import Any, Iterable, Mapping
 from uuid import uuid4
 
 from .canonical import canonical_json, sha256
+from .diagnostics import (
+    DiagnosticIntegrityError,
+    publish_diagnostic_results,
+)
 
 
 ARTIFACT_CONTRACT_VERSION = "analysis-run-artifacts.v1"
@@ -213,6 +217,7 @@ class ValidatedReference:
     validation_policy_version: str
     validated_at: datetime
     completed_at: datetime
+    diagnostic_results: tuple[Mapping[str, Any], ...] = ()
     delivery_mode: str = "existing_run_reuse"
     verification_state: str = "reference_validated"
 
@@ -853,6 +858,26 @@ class ValidatedReferenceStore:
         if report["validation_policy_version"] != attestation["validation_policy_version"]:
             raise ReferenceVerificationError("validation policy does not match")
         validated_at = _require_utc_timestamp(attestation["validated_at"], "validation timestamp")
+        diagnostic_descriptor = next(
+            descriptor
+            for descriptor in manifest["artifact_descriptors"]
+            if descriptor["logical_role"] == "diagnostic_artifacts"
+        )
+        try:
+            diagnostic_payload = payloads.get("diagnostic_artifacts")
+            if diagnostic_payload is not None and not isinstance(
+                diagnostic_payload, (Mapping, list)
+            ):
+                raise DiagnosticIntegrityError("diagnostic payload is unsupported")
+            diagnostic_results = publish_diagnostic_results(
+                diagnostic_payload,
+                analysis_run_id=str(entry["analysis_run_id"]),
+                bundle_manifest_hash=str(entry["bundle_manifest_hash"]),
+                evidence_refs=diagnostic_descriptor["evidence_refs"],
+                input_refs=["diagnostic_artifacts:" + str(diagnostic_descriptor["logical_id"])],
+            )
+        except DiagnosticIntegrityError as error:
+            raise ReferenceVerificationError("diagnostic artifact is invalid") from error
         return ValidatedReference(
             reference_slot_id=str(entry["reference_slot_id"]),
             analysis_run_id=str(entry["analysis_run_id"]),
@@ -871,6 +896,7 @@ class ValidatedReferenceStore:
             validation_policy_version=str(attestation["validation_policy_version"]),
             validated_at=validated_at,
             completed_at=_require_utc_timestamp(manifest["completed_at"], "bundle completion time"),
+            diagnostic_results=tuple(diagnostic_results),
         )
 
     def list_verified_references(self) -> list[ValidatedReference]:

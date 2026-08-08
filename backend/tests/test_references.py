@@ -544,6 +544,13 @@ def test_reference_delivery_endpoint_labels_verified_reuse_without_exposing_path
     assert body["release_candidate_id"] == RELEASE_ID
     assert body["dataset_version_id"] == _request()["dataset_version_id"]
     assert body["analysis_run_id"].startswith("analysis-run-")
+    assert len(body["diagnostics"]) == 4
+    assert {item["status"] for item in body["diagnostics"]} == {"UNAVAILABLE"}
+    assert body["diagnostic_summary"] == {
+        "state": "limited",
+        "diagnostic_count": 4,
+        "status_counts": {"UNAVAILABLE": 4},
+    }
     assert all("path" not in key.lower() for key in body)
 
 

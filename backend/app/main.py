@@ -62,6 +62,7 @@ from .references import (
     DEFAULT_REFERENCE_SLOT_ID,
     ValidatedReferenceStore,
 )
+from .diagnostics import diagnostic_summary as build_diagnostic_summary
 from .workspace import DEMO_WORKSPACE_COOKIE_NAME, WorkspaceResolution
 
 MAX_REACTIVE_REQUEST_BYTES = 64 * 1024
@@ -971,6 +972,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             runtime_fingerprint_digest=reference.runtime_fingerprint_digest,
             validation_policy_version=reference.validation_policy_version,
             validated_at=reference.validated_at,
+            diagnostics=[dict(item) for item in reference.diagnostic_results],
+            diagnostic_summary=build_diagnostic_summary(reference.diagnostic_results),
         )
         return JSONResponse(status_code=200, content=response.model_dump(mode="json"))
 

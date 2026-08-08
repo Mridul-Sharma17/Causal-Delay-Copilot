@@ -44,6 +44,46 @@ export type DemoWorkspace = {
   remaining_terminal_fresh_bundles: number;
 };
 
+export type DiagnosticStatus =
+  | "PASS"
+  | "FAIL"
+  | "UNSUPPORTED"
+  | "UNAVAILABLE"
+  | "FAILED"
+  | "NOT_RUN";
+
+export type DiagnosticResult = {
+  schema_version: "diagnostic-result.v1";
+  diagnostic_id: string;
+  diagnostic_version: string;
+  scope: string;
+  status: DiagnosticStatus;
+  policy_id: string;
+  policy_version: string;
+  rule_id: string;
+  rule_version: string;
+  observed: Record<string, unknown> | null;
+  threshold: Record<string, unknown>;
+  result: Record<string, unknown> | null;
+  verdict_effect: "NONE" | "FRAGILITY" | "VETO" | "INSUFFICIENT";
+  trigger_codes: string[];
+  reason_code: string;
+  reason: string;
+  analysis_run_id: string | null;
+  bundle_manifest_hash: string | null;
+  evidence_refs: string[];
+  input_refs: string[];
+  diagnostic_identity: string;
+  content_hash: string;
+  upstream_trigger?: string;
+};
+
+export type DiagnosticSummary = {
+  state: "complete" | "limited" | "attention_required";
+  diagnostic_count: number;
+  status_counts: Record<string, number>;
+};
+
 export type ValidatedReferenceDelivery = {
   schema_version: "analysis-run-read-model.v1";
   delivery_mode: "existing_run_reuse";
@@ -64,6 +104,8 @@ export type ValidatedReferenceDelivery = {
   runtime_fingerprint_digest: string;
   validation_policy_version: string;
   validated_at: string;
+  diagnostics: DiagnosticResult[];
+  diagnostic_summary: DiagnosticSummary;
 };
 
 export type IngestionRunResponse = {
@@ -525,6 +567,116 @@ export function parseDemoWorkspaceResponse(value: unknown): DemoWorkspace {
   };
 }
 
+function parseDiagnosticRecord(value: unknown): DiagnosticResult {
+  if (!isRecord(value) || Array.isArray(value)) {
+    throw new Error("invalid diagnostic response");
+  }
+  const status = value.status;
+  if (
+    status !== "PASS" &&
+    status !== "FAIL" &&
+    status !== "UNSUPPORTED" &&
+    status !== "UNAVAILABLE" &&
+    status !== "FAILED" &&
+    status !== "NOT_RUN"
+  ) {
+    throw new Error("invalid diagnostic response");
+  }
+  const verdictEffect = value.verdict_effect;
+  if (
+    verdictEffect !== "NONE" &&
+    verdictEffect !== "FRAGILITY" &&
+    verdictEffect !== "VETO" &&
+    verdictEffect !== "INSUFFICIENT"
+  ) {
+    throw new Error("invalid diagnostic response");
+  }
+  const nullableRecord = (candidate: unknown): Record<string, unknown> | null => {
+    if (candidate === null) {
+      return null;
+    }
+    if (!isRecord(candidate) || Array.isArray(candidate)) {
+      throw new Error("invalid diagnostic response");
+    }
+    return candidate;
+  };
+  if (
+    value.schema_version !== "diagnostic-result.v1" ||
+    typeof value.diagnostic_id !== "string" ||
+    typeof value.diagnostic_version !== "string" ||
+    typeof value.scope !== "string" ||
+    typeof value.policy_id !== "string" ||
+    typeof value.policy_version !== "string" ||
+    typeof value.rule_id !== "string" ||
+    typeof value.rule_version !== "string" ||
+    !isRecord(value.threshold) ||
+    Array.isArray(value.threshold) ||
+    typeof value.reason_code !== "string" ||
+    typeof value.reason !== "string" ||
+    (value.analysis_run_id !== null && typeof value.analysis_run_id !== "string") ||
+    (value.bundle_manifest_hash !== null && typeof value.bundle_manifest_hash !== "string") ||
+    !Array.isArray(value.trigger_codes) ||
+    !value.trigger_codes.every((item) => typeof item === "string") ||
+    !Array.isArray(value.evidence_refs) ||
+    !value.evidence_refs.every((item) => typeof item === "string") ||
+    !Array.isArray(value.input_refs) ||
+    !value.input_refs.every((item) => typeof item === "string") ||
+    typeof value.diagnostic_identity !== "string" ||
+    typeof value.content_hash !== "string" ||
+    (value.upstream_trigger !== undefined && typeof value.upstream_trigger !== "string")
+  ) {
+    throw new Error("invalid diagnostic response");
+  }
+  const upstreamTrigger = value.upstream_trigger;
+  return {
+    schema_version: "diagnostic-result.v1",
+    diagnostic_id: value.diagnostic_id,
+    diagnostic_version: value.diagnostic_version,
+    scope: value.scope,
+    status,
+    policy_id: value.policy_id,
+    policy_version: value.policy_version,
+    rule_id: value.rule_id,
+    rule_version: value.rule_version,
+    observed: nullableRecord(value.observed),
+    threshold: value.threshold,
+    result: nullableRecord(value.result),
+    verdict_effect: verdictEffect,
+    trigger_codes: value.trigger_codes,
+    reason_code: value.reason_code,
+    reason: value.reason,
+    analysis_run_id: value.analysis_run_id,
+    bundle_manifest_hash: value.bundle_manifest_hash,
+    evidence_refs: value.evidence_refs,
+    input_refs: value.input_refs,
+    diagnostic_identity: value.diagnostic_identity,
+    content_hash: value.content_hash,
+    ...(upstreamTrigger === undefined ? {} : { upstream_trigger: upstreamTrigger }),
+  };
+}
+
+function parseDiagnosticSummary(value: unknown): DiagnosticSummary {
+  if (!isRecord(value) || Array.isArray(value)) {
+    throw new Error("invalid diagnostic response");
+  }
+  if (
+    (value.state !== "complete" &&
+      value.state !== "limited" &&
+      value.state !== "attention_required") ||
+    !isNonNegativeInteger(value.diagnostic_count) ||
+    !isRecord(value.status_counts) ||
+    Array.isArray(value.status_counts) ||
+    !Object.values(value.status_counts).every(isNonNegativeInteger)
+  ) {
+    throw new Error("invalid diagnostic response");
+  }
+  return {
+    state: value.state,
+    diagnostic_count: value.diagnostic_count,
+    status_counts: value.status_counts as Record<string, number>,
+  };
+}
+
 export function parseValidatedReferenceDelivery(
   value: unknown,
 ): ValidatedReferenceDelivery {
@@ -553,6 +705,22 @@ export function parseValidatedReferenceDelivery(
   ) {
     throw new Error("invalid validated reference response");
   }
+  const diagnostics =
+    value.diagnostics === undefined
+      ? []
+      : !Array.isArray(value.diagnostics)
+        ? (() => {
+            throw new Error("invalid validated reference response");
+          })()
+        : value.diagnostics.map(parseDiagnosticRecord);
+  const diagnosticSummary =
+    value.diagnostic_summary === undefined
+      ? {
+          state: "limited" as const,
+          diagnostic_count: diagnostics.length,
+          status_counts: {},
+        }
+      : parseDiagnosticSummary(value.diagnostic_summary);
   return {
     schema_version: "analysis-run-read-model.v1",
     delivery_mode: "existing_run_reuse",
@@ -573,6 +741,8 @@ export function parseValidatedReferenceDelivery(
     runtime_fingerprint_digest: value.runtime_fingerprint_digest,
     validation_policy_version: value.validation_policy_version,
     validated_at: value.validated_at,
+    diagnostics,
+    diagnostic_summary: diagnosticSummary,
   };
 }
 
