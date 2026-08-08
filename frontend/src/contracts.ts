@@ -84,6 +84,57 @@ export type DemoWorkspace = {
   remaining_terminal_fresh_bundles: number;
 };
 
+export type OperationState =
+  | "QUEUED"
+  | "RUNNING"
+  | "CANCELLING"
+  | "SUCCEEDED"
+  | "FAILED"
+  | "CANCELLED"
+  | "TIMED_OUT"
+  | "INTERRUPTED"
+  | "REJECTED";
+
+export type OperationKind =
+  | "FRESH_ANALYSIS"
+  | "FRESH_REPRODUCTION"
+  | "BOUNDED_WORK";
+
+export type DurableOperation = {
+  schema_version: "durable-operation.v1";
+  operation_id: string;
+  operation_kind: OperationKind;
+  state: OperationState;
+  status: OperationState;
+  queue_position: number | null;
+  created_at: string;
+  queued_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  cancel_requested_at: string | null;
+  retry_of_operation_id: string | null;
+  failure_code: string | null;
+  recovery_action: string | null;
+  resource_warnings: Array<"DISK_SPACE_LOW">;
+  artifact_state:
+    | "NOT_STARTED"
+    | "EXECUTING"
+    | "PUBLISHED"
+    | "QUARANTINED"
+    | "QUARANTINE_UNAVAILABLE";
+  retryable: boolean;
+  timeout_seconds: number;
+  thread_cap: number;
+  memory_required_bytes: number;
+  memory_available_bytes: number;
+  disk_free_bytes: number;
+};
+
+export type OperationMutationResponse = {
+  result: "CREATED" | "IDEMPOTENT_REPLAY";
+  operation: DurableOperation;
+};
+
 export type DiagnosticStatus =
   | "PASS"
   | "FAIL"
@@ -673,6 +724,120 @@ export function parseDemoWorkspaceResponse(value: unknown): DemoWorkspace {
     remaining_mutations: value.remaining_mutations,
     terminal_fresh_bundle_count: value.terminal_fresh_bundle_count,
     remaining_terminal_fresh_bundles: value.remaining_terminal_fresh_bundles,
+  };
+}
+
+function isOperationState(value: unknown): value is OperationState {
+  return (
+    value === "QUEUED" ||
+    value === "RUNNING" ||
+    value === "CANCELLING" ||
+    value === "SUCCEEDED" ||
+    value === "FAILED" ||
+    value === "CANCELLED" ||
+    value === "TIMED_OUT" ||
+    value === "INTERRUPTED" ||
+    value === "REJECTED"
+  );
+}
+
+function isOperationKind(value: unknown): value is OperationKind {
+  return (
+    value === "FRESH_ANALYSIS" ||
+    value === "FRESH_REPRODUCTION" ||
+    value === "BOUNDED_WORK"
+  );
+}
+
+function nullableString(value: unknown): string | null {
+  if (value === null) return null;
+  if (typeof value !== "string") throw new Error("invalid operation response");
+  return value;
+}
+
+export function parseOperationResponse(value: unknown): DurableOperation {
+  if (
+    !isRecord(value) ||
+    value.schema_version !== "durable-operation.v1" ||
+    typeof value.operation_id !== "string" ||
+    !isOperationKind(value.operation_kind) ||
+    !isOperationState(value.state) ||
+    value.status !== value.state ||
+    (value.queue_position !== null &&
+      (!isNonNegativeInteger(value.queue_position) || value.queue_position < 1)) ||
+    typeof value.created_at !== "string" ||
+    typeof value.queued_at !== "string" ||
+    (value.started_at !== null && typeof value.started_at !== "string") ||
+    (value.finished_at !== null && typeof value.finished_at !== "string") ||
+    (value.cancel_requested_at !== null &&
+      typeof value.cancel_requested_at !== "string") ||
+    (value.retry_of_operation_id !== null &&
+      typeof value.retry_of_operation_id !== "string") ||
+    (value.failure_code !== null && typeof value.failure_code !== "string") ||
+    (value.recovery_action !== null && typeof value.recovery_action !== "string") ||
+    !Array.isArray(value.resource_warnings) ||
+    !value.resource_warnings.every((warning) => warning === "DISK_SPACE_LOW") ||
+    (value.artifact_state !== "NOT_STARTED" &&
+      value.artifact_state !== "EXECUTING" &&
+      value.artifact_state !== "PUBLISHED" &&
+      value.artifact_state !== "QUARANTINED" &&
+      value.artifact_state !== "QUARANTINE_UNAVAILABLE") ||
+    typeof value.retryable !== "boolean" ||
+    typeof value.timeout_seconds !== "number" ||
+    value.timeout_seconds <= 0 ||
+    value.timeout_seconds > 300 ||
+    !isNonNegativeInteger(value.thread_cap) ||
+    value.thread_cap < 1 ||
+    !isNonNegativeInteger(value.memory_required_bytes) ||
+    value.memory_required_bytes < 1 ||
+    !isNonNegativeInteger(value.memory_available_bytes) ||
+    !isNonNegativeInteger(value.disk_free_bytes)
+  ) {
+    throw new Error("invalid operation response");
+  }
+  const parsedState = value.state;
+  if (!isOperationState(parsedState)) {
+    throw new Error("invalid operation response");
+  }
+  return {
+    schema_version: "durable-operation.v1",
+    operation_id: value.operation_id,
+    operation_kind: value.operation_kind,
+    state: parsedState,
+    status: parsedState,
+    queue_position: value.queue_position,
+    created_at: value.created_at,
+    queued_at: value.queued_at,
+    started_at: nullableString(value.started_at),
+    finished_at: nullableString(value.finished_at),
+    cancel_requested_at: nullableString(value.cancel_requested_at),
+    retry_of_operation_id: nullableString(value.retry_of_operation_id),
+    failure_code: nullableString(value.failure_code),
+    recovery_action: nullableString(value.recovery_action),
+    resource_warnings: value.resource_warnings,
+    artifact_state: value.artifact_state,
+    retryable: value.retryable,
+    timeout_seconds: value.timeout_seconds,
+    thread_cap: value.thread_cap,
+    memory_required_bytes: value.memory_required_bytes,
+    memory_available_bytes: value.memory_available_bytes,
+    disk_free_bytes: value.disk_free_bytes,
+  };
+}
+
+export function parseOperationMutationResponse(
+  value: unknown,
+): OperationMutationResponse {
+  if (
+    !isRecord(value) ||
+    (value.result !== "CREATED" && value.result !== "IDEMPOTENT_REPLAY") ||
+    !isRecord(value.operation)
+  ) {
+    throw new Error("invalid operation response");
+  }
+  return {
+    result: value.result,
+    operation: parseOperationResponse(value.operation),
   };
 }
 

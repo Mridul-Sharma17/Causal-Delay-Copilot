@@ -32,6 +32,11 @@ class QuotaPolicy(BaseModel):
     max_running_operations: int = Field(default=1, ge=1)
     max_waiting_operations: int = Field(default=2, ge=0)
     max_outstanding_operations_per_workspace: int = Field(default=1, ge=1)
+    compute_timeout_seconds: float = Field(default=300.0, gt=0, le=300)
+    compute_memory_request_bytes: int = Field(default=256 * 1024 * 1024, ge=1)
+    memory_headroom_fraction: float = Field(default=0.25, ge=0, le=1)
+    disk_warning_bytes: int = Field(default=1024 * 1024 * 1024, ge=1)
+    disk_block_bytes: int = Field(default=512 * 1024 * 1024, ge=1)
 
 
 class RuntimeFingerprint(BaseModel):

@@ -16,6 +16,7 @@ from .canonical import canonical_json as _canonical_json
 from .canonical import field as _canonical_field
 from .canonical import sha256 as _sha256
 from .governance import GovernanceMixin, ensure_governance_schema
+from .operations import DurableOperationsMixin, ensure_operation_schema
 from .risk import ReactiveInvestigationMixin, ensure_risk_schema
 
 
@@ -2418,7 +2419,12 @@ def _insert_ingestion_run(
     )
 
 
-class LineageStore(ReactiveInvestigationMixin, GovernanceMixin, AuditStore):
+class LineageStore(
+    DurableOperationsMixin,
+    ReactiveInvestigationMixin,
+    GovernanceMixin,
+    AuditStore,
+):
     """The single SQLite writer for audit events and immutable intake records."""
 
     def initialize(self) -> None:
@@ -2428,6 +2434,7 @@ class LineageStore(ReactiveInvestigationMixin, GovernanceMixin, AuditStore):
             ensure_ingestion_schema(connection, create=False)
             ensure_risk_schema(connection, create=False)
             ensure_governance_schema(connection, create=False)
+            ensure_operation_schema(connection, create=False)
         except sqlite3.Error:
             self.close()
             raise

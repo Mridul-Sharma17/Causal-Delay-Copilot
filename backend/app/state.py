@@ -12,12 +12,16 @@ from .canonical import canonical_json as _canonical_json
 from .errors import CoreSafeError, SafeErrorCode
 from .governance import GOVERNANCE_SCHEMA_VERSION, ensure_governance_schema
 from .ingestion import INGESTION_SCHEMA_VERSION, ensure_ingestion_schema
+from .operations import (
+    DURABLE_OPERATION_SCHEMA_VERSION,
+    ensure_operation_schema,
+)
 from .risk import ensure_risk_schema
 from .settings import Settings
 from .workspace import DEMO_WORKSPACE_SCHEMA_VERSION, ensure_workspace_schema
 
 
-CORE_STATE_SCHEMA_VERSION = "core-state.v7"
+CORE_STATE_SCHEMA_VERSION = "core-state.v8"
 RELEASE_IDENTITY_SCHEMA_VERSION = "release-identity.v1"
 QUOTA_POLICY_SCHEMA_VERSION = "quota-policy.v1"
 VALIDATED_REFERENCE_PARTITION_SCHEMA_VERSION = "validated-reference-partition.v1"
@@ -235,6 +239,7 @@ class StateRoot:
             ensure_ingestion_schema(connection, create=True)
             ensure_risk_schema(connection, create=True)
             ensure_governance_schema(connection, create=True)
+            ensure_operation_schema(connection, create=True)
             _ensure_table(
                 connection,
                 "core_state_metadata",
@@ -346,6 +351,7 @@ class StateRoot:
             ensure_ingestion_schema(connection, create=False)
             ensure_risk_schema(connection, create=False)
             ensure_governance_schema(connection, create=False)
+            ensure_operation_schema(connection, create=False)
             _ensure_table(
                 connection,
                 "core_state_metadata",
@@ -415,6 +421,7 @@ class StateRoot:
             "demo_workspace_schema": DEMO_WORKSPACE_SCHEMA_VERSION,
             "intake_lineage_schema": INGESTION_SCHEMA_VERSION,
             "governance_schema": GOVERNANCE_SCHEMA_VERSION,
+            "durable_operation_schema": DURABLE_OPERATION_SCHEMA_VERSION,
         }
 
     def _cleanup(

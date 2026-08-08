@@ -4,6 +4,8 @@ import {
   parseAuditOccurrenceResponse,
   parseDecisionBriefResponse,
   parseHealthResponse,
+  parseOperationMutationResponse,
+  parseOperationResponse,
   parseProactiveInvestigationResponse,
   parseProactiveProposalListResponse,
   parseReactiveInvestigationResponse,
@@ -13,8 +15,10 @@ import {
   type AuditOccurrenceRequest,
   type AuditOccurrenceResponse,
   type DecisionBriefResponse,
+  type DurableOperation,
   type DemoWorkspace,
   type HealthResponse,
+  type OperationMutationResponse,
   type LineageSnapshot,
   type ProactiveInvestigationResponse,
   type ProactiveProposalListResponse,
@@ -118,6 +122,99 @@ export function getDatasetLineage(datasetVersionId: string): Promise<LineageSnap
     },
     parseLineageSnapshot,
   );
+}
+
+export function createOperation(request: {
+  idempotency_key: string;
+  operation_kind: "FRESH_ANALYSIS" | "FRESH_REPRODUCTION" | "BOUNDED_WORK";
+  memory_required_bytes?: number;
+  request?: Record<string, unknown>;
+}): Promise<OperationMutationResponse> {
+  return requestJson(
+    "/api/operations",
+    {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        "content-type": "application/json",
+      },
+      credentials: "same-origin",
+      body: JSON.stringify(request),
+    },
+    parseOperationMutationResponse,
+  );
+}
+
+export function getOperation(operationId: string): Promise<DurableOperation> {
+  return requestJson(
+    `/api/operations/${encodeURIComponent(operationId)}`,
+    {
+      headers: { accept: "application/json" },
+      credentials: "same-origin",
+    },
+    parseOperationResponse,
+  );
+}
+
+export function cancelOperation(
+  operationId: string,
+  idempotencyKey: string,
+): Promise<OperationMutationResponse> {
+  return requestJson(
+    `/api/operations/${encodeURIComponent(operationId)}/cancel`,
+    {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        "content-type": "application/json",
+      },
+      credentials: "same-origin",
+      body: JSON.stringify({ idempotency_key: idempotencyKey }),
+    },
+    parseOperationMutationResponse,
+  );
+}
+
+export function retryOperation(
+  operationId: string,
+  idempotencyKey: string,
+): Promise<OperationMutationResponse> {
+  return requestJson(
+    `/api/operations/${encodeURIComponent(operationId)}/retry`,
+    {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        "content-type": "application/json",
+      },
+      credentials: "same-origin",
+      body: JSON.stringify({ idempotency_key: idempotencyKey }),
+    },
+    parseOperationMutationResponse,
+  );
+}
+
+const TERMINAL_OPERATION_STATES = new Set([
+  "SUCCEEDED",
+  "FAILED",
+  "CANCELLED",
+  "TIMED_OUT",
+  "INTERRUPTED",
+  "REJECTED",
+]);
+
+export async function pollOperation(operationId: string): Promise<DurableOperation> {
+  let delayMilliseconds = 2_000;
+  while (true) {
+    const operation = await getOperation(operationId);
+    if (TERMINAL_OPERATION_STATES.has(operation.state)) {
+      return operation;
+    }
+    await new Promise<void>((resolve) => {
+      window.setTimeout(resolve, delayMilliseconds);
+    });
+    delayMilliseconds = Math.min(delayMilliseconds * 2, 10_000);
+  }
 }
 
 export function publishDecisionBrief(

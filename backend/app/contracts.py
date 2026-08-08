@@ -670,6 +670,89 @@ class WorkspaceResultViewResponse(BaseModel):
     created_at: datetime
 
 
+OperationState = Literal[
+    "QUEUED",
+    "RUNNING",
+    "CANCELLING",
+    "SUCCEEDED",
+    "FAILED",
+    "CANCELLED",
+    "TIMED_OUT",
+    "INTERRUPTED",
+    "REJECTED",
+]
+
+
+OperationKind = Literal[
+    "FRESH_ANALYSIS",
+    "FRESH_REPRODUCTION",
+    "BOUNDED_WORK",
+]
+
+
+class OperationAdmissionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    idempotency_key: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+    )
+    operation_kind: OperationKind
+    memory_required_bytes: int = Field(default=256 * 1024 * 1024, ge=1)
+    request: dict[str, Any] = Field(default_factory=dict)
+
+
+class OperationActionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    idempotency_key: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+    )
+
+
+class OperationResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["durable-operation.v1"]
+    operation_id: str
+    operation_kind: OperationKind
+    state: OperationState
+    status: OperationState
+    queue_position: int | None = Field(default=None, ge=1)
+    created_at: datetime
+    queued_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+    cancel_requested_at: datetime | None
+    retry_of_operation_id: str | None
+    failure_code: str | None
+    recovery_action: str | None
+    resource_warnings: list[Literal["DISK_SPACE_LOW"]]
+    artifact_state: Literal[
+        "NOT_STARTED",
+        "EXECUTING",
+        "PUBLISHED",
+        "QUARANTINED",
+        "QUARANTINE_UNAVAILABLE",
+    ]
+    retryable: bool
+    timeout_seconds: float = Field(gt=0, le=300)
+    thread_cap: int = Field(ge=1)
+    memory_required_bytes: int = Field(ge=1)
+    memory_available_bytes: int = Field(ge=0)
+    disk_free_bytes: int = Field(ge=0)
+
+
+class OperationMutationResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    result: Literal["CREATED", "IDEMPOTENT_REPLAY"]
+    operation: OperationResponse
+
+
 class ErrorResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

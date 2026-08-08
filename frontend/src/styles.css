@@ -28,7 +28,8 @@ button {
 .core-header,
 .health-panel,
 .risk-panel,
-.lineage-panel {
+.lineage-panel,
+.operation-panel {
   width: min(100%, 960px);
   margin: 0 auto;
 }
@@ -94,6 +95,13 @@ h2 {
   padding: 32px;
   background: #ffffff;
   border-left: 4px solid #0f62fe;
+}
+
+.operation-panel {
+  margin-top: 24px;
+  padding: 24px;
+  background: #f4f4f4;
+  border-top: 4px solid #0f62fe;
 }
 
 .panel-heading {

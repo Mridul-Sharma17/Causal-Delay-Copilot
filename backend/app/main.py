@@ -30,6 +30,10 @@ from .contracts import (
     IngestionRunRequest,
     IngestionRunResponse,
     LineageSnapshotResponse,
+    OperationAdmissionRequest,
+    OperationActionRequest,
+    OperationMutationResponse,
+    OperationResponse,
     ProactiveInvestigationResponse,
     ProactiveFixtureRequest,
     ProactiveProposalListResponse,
@@ -65,6 +69,7 @@ from .risk import (
 from .security import apply_public_response_headers
 from .settings import Settings
 from .state import StateRoot
+from .operations import DurableOperation, OperationRunner
 from .references import (
     DEFAULT_REFERENCE_INTENDED_ROLE,
     DEFAULT_REFERENCE_SLOT_ID,
@@ -274,7 +279,11 @@ class ReactiveBodyLimitMiddleware:
         await self.app(scope, replay_receive, send)
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    *,
+    start_operation_runner: bool = True,
+) -> FastAPI:
     resolved_settings = settings or Settings()
     state_root = StateRoot(resolved_settings)
     core_store = LineageStore(
@@ -292,10 +301,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         state_layout = state_root.initialize()
         core_store.initialize()
+        core_store.recover_interrupted_operations(state_layout)
         app.state.state_layout = state_layout
+        operation_runner = (
+            OperationRunner(core_store, state_layout)
+            if start_operation_runner
+            else None
+        )
+        app.state.operation_runner = operation_runner
+        if operation_runner is not None:
+            operation_runner.start()
         try:
             yield
         finally:
+            if operation_runner is not None:
+                operation_runner.stop()
             core_store.close()
 
     app = FastAPI(
@@ -306,6 +326,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = resolved_settings
     app.state.audit_store = core_store
     app.state.reference_store = reference_store
+    app.state.operation_runner = None
 
     @app.exception_handler(RequestValidationError)
     async def handle_request_validation(
@@ -537,6 +558,33 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "CHECK_WORKSPACE_AND_RETRY",
         )
 
+    def operation_response(operation: DurableOperation) -> OperationResponse:
+        return OperationResponse(
+            schema_version="durable-operation.v1",
+            operation_id=operation.operation_id,
+            operation_kind=operation.operation_kind,
+            state=operation.state,
+            status=operation.state,
+            queue_position=operation.queue_position,
+            created_at=operation.created_at,
+            queued_at=operation.queued_at,
+            started_at=operation.started_at,
+            finished_at=operation.finished_at,
+            cancel_requested_at=operation.cancel_requested_at,
+            retry_of_operation_id=operation.retry_of_operation_id,
+            failure_code=operation.failure_code,
+            recovery_action=operation.recovery_action,
+            resource_warnings=list(operation.resource_warnings),
+            artifact_state=operation.artifact_state,
+            retryable=operation.state
+            in {"INTERRUPTED", "FAILED", "TIMED_OUT", "CANCELLED"},
+            timeout_seconds=operation.timeout_seconds,
+            thread_cap=operation.thread_cap,
+            memory_required_bytes=operation.memory_required_bytes,
+            memory_available_bytes=operation.memory_available_bytes,
+            disk_free_bytes=operation.disk_free_bytes,
+        )
+
     def liveness_probe() -> HealthProbe:
         return HealthProbe(state="live", code="CORE_LIVE")
 
@@ -594,6 +642,134 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             content=workspace_response(resolution).model_dump(mode="json"),
         )
         return attach_workspace_cookie(response, resolution)
+
+    @app.post(
+        "/api/operations",
+        response_model=OperationMutationResponse,
+        status_code=202,
+    )
+    async def admit_operation(
+        request_context: Request,
+        request: OperationAdmissionRequest,
+    ) -> JSONResponse:
+        resolution = resolve_workspace(request_context)
+        memory_required_bytes = (
+            request.memory_required_bytes
+            if "memory_required_bytes" in request.model_fields_set
+            else resolved_settings.quotas.compute_memory_request_bytes
+        )
+        stored = core_store.admit_operation(
+            resolution.snapshot.workspace_id,
+            operation_kind=request.operation_kind,
+            idempotency_key=request.idempotency_key,
+            request=request.request,
+            memory_required_bytes=memory_required_bytes,
+            state_root=resolved_settings.state_root,
+        )
+        response = OperationMutationResponse(
+            result="IDEMPOTENT_REPLAY" if stored.replayed else "CREATED",
+            operation=operation_response(stored.operation),
+        )
+        return attach_workspace_cookie(
+            JSONResponse(
+                status_code=200 if stored.replayed else 202,
+                content=response.model_dump(mode="json"),
+            ),
+            resolution,
+        )
+
+    @app.get(
+        "/api/operations/{operation_id}",
+        response_model=OperationResponse,
+    )
+    async def get_operation(
+        request: Request,
+        operation_id: str,
+    ) -> JSONResponse:
+        resolution = resolve_workspace(request)
+        operation = core_store.get_operation(
+            resolution.snapshot.workspace_id,
+            operation_id,
+        )
+        if operation is None:
+            return attach_workspace_cookie(
+                workspace_resource_unavailable(),
+                resolution,
+            )
+        return attach_workspace_cookie(
+            JSONResponse(
+                status_code=200,
+                content=operation_response(operation).model_dump(mode="json"),
+            ),
+            resolution,
+        )
+
+    @app.post(
+        "/api/operations/{operation_id}/cancel",
+        response_model=OperationMutationResponse,
+        status_code=202,
+    )
+    async def cancel_operation(
+        request_context: Request,
+        operation_id: str,
+        request: OperationActionRequest,
+    ) -> JSONResponse:
+        resolution = resolve_workspace(request_context)
+        stored = core_store.cancel_operation(
+            resolution.snapshot.workspace_id,
+            operation_id,
+            idempotency_key=request.idempotency_key,
+        )
+        if stored is None:
+            return attach_workspace_cookie(
+                workspace_resource_unavailable(),
+                resolution,
+            )
+        response = OperationMutationResponse(
+            result="IDEMPOTENT_REPLAY" if stored.replayed else "CREATED",
+            operation=operation_response(stored.operation),
+        )
+        return attach_workspace_cookie(
+            JSONResponse(
+                status_code=200 if stored.replayed else 202,
+                content=response.model_dump(mode="json"),
+            ),
+            resolution,
+        )
+
+    @app.post(
+        "/api/operations/{operation_id}/retry",
+        response_model=OperationMutationResponse,
+        status_code=202,
+    )
+    async def retry_operation(
+        request_context: Request,
+        operation_id: str,
+        request: OperationActionRequest,
+    ) -> JSONResponse:
+        resolution = resolve_workspace(request_context)
+        stored = core_store.retry_operation(
+            resolution.snapshot.workspace_id,
+            operation_id,
+            idempotency_key=request.idempotency_key,
+            state_root=resolved_settings.state_root,
+        )
+        if stored is None:
+            return attach_workspace_cookie(
+                workspace_resource_unavailable(),
+                resolution,
+            )
+        response = OperationMutationResponse(
+            result="IDEMPOTENT_REPLAY" if stored.replayed else "CREATED",
+            operation=operation_response(stored.operation),
+        )
+        return attach_workspace_cookie(
+            JSONResponse(
+                status_code=200 if stored.replayed else 202,
+                content=response.model_dump(mode="json"),
+            ),
+            resolution,
+        )
 
     @app.post(
         "/api/audit/occurrences",

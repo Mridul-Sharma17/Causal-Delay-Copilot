@@ -7,7 +7,9 @@ import {
   getRiskSignals,
   getValidatedReference,
   getWorkspace,
+  createOperation,
   publishDecisionBrief,
+  pollOperation,
   recordBootOccurrence,
   replayDecisionBrief,
   submitReactiveInvestigation,
@@ -19,6 +21,7 @@ import {
   type DecisionBriefSnapshot,
   type DiagnosticResult,
   type DiagnosticSummary,
+  type DurableOperation,
   type DemoWorkspace,
   type EvidenceVerdict,
   type HealthState,
@@ -45,6 +48,7 @@ type ReferenceState = "pending" | "loading" | "ready" | "failed";
 type LineageState = "pending" | "loading" | "ready" | "failed";
 type RiskState = "pending" | "loading" | "ready" | "failed";
 type DecisionBriefState = "pending" | "publishing" | "ready" | "failed";
+type FreshOperationState = "idle" | "starting" | "polling" | "terminal" | "failed";
 
 function createBootKey(outcomeCode: string): string {
   return `core-boot-health-v1:${outcomeCode}`;
@@ -656,7 +660,12 @@ function App() {
   const [proactiveFixtures, setProactiveFixtures] = useState<ProactiveProposalFixture[]>([]);
   const [proactiveAttempt, setProactiveAttempt] =
     useState<ProactiveIngressAttempt | null>(null);
+  const [freshOperationState, setFreshOperationState] =
+    useState<FreshOperationState>("idle");
+  const [freshOperation, setFreshOperation] =
+    useState<DurableOperation | null>(null);
   const bootKey = useRef<string | null>(null);
+  const freshOperationKey = useRef<string | null>(null);
 
   const loadHealth = useCallback(async () => {
     setJourneyState("loading");
@@ -683,6 +692,9 @@ function App() {
       setProactiveState("pending");
       setProactiveFixtures([]);
       setProactiveAttempt(null);
+      setFreshOperationState("idle");
+      setFreshOperation(null);
+      freshOperationKey.current = null;
 
       try {
         const nextWorkspace = await getWorkspace();
@@ -861,6 +873,50 @@ function App() {
     }
   }, [lineage, riskFixtures]);
 
+  const requestFreshAnalysis = useCallback(async () => {
+    if (
+      reference === null ||
+      riskAttempt?.investigation_request_id === null ||
+      riskAttempt?.investigation_request_id === undefined
+    ) {
+      return;
+    }
+    const investigationRequestId = riskAttempt.investigation_request_id;
+    const idempotencyKey =
+      freshOperationKey.current ??
+      `fresh-analysis:${investigationRequestId}:${reference.scientific_request_digest}`;
+    freshOperationKey.current = idempotencyKey;
+    setFreshOperationState("starting");
+    try {
+      const accepted = await createOperation({
+        idempotency_key: idempotencyKey,
+        operation_kind: "FRESH_ANALYSIS",
+        request: {
+          investigation_request_id: investigationRequestId,
+          scientific_request_digest: reference.scientific_request_digest,
+        },
+      });
+      setFreshOperation(accepted.operation);
+      if (
+        accepted.operation.state === "SUCCEEDED" ||
+        accepted.operation.state === "FAILED" ||
+        accepted.operation.state === "CANCELLED" ||
+        accepted.operation.state === "TIMED_OUT" ||
+        accepted.operation.state === "INTERRUPTED" ||
+        accepted.operation.state === "REJECTED"
+      ) {
+        setFreshOperationState("terminal");
+        return;
+      }
+      setFreshOperationState("polling");
+      const terminal = await pollOperation(accepted.operation.operation_id);
+      setFreshOperation(terminal);
+      setFreshOperationState("terminal");
+    } catch {
+      setFreshOperationState("failed");
+    }
+  }, [reference, riskAttempt]);
+
   useEffect(() => {
     void loadHealth();
   }, [loadHealth]);
@@ -1012,6 +1068,48 @@ function App() {
                     diagnostics={reference.diagnostics}
                     summary={reference.diagnostic_summary}
                   />
+                  <section className="operation-panel" aria-labelledby="fresh-operation-heading">
+                    <div className="record-heading">
+                      <div>
+                        <p className="eyebrow">Fresh analysis boundary</p>
+                        <h3 id="fresh-operation-heading">Durable operation status</h3>
+                      </div>
+                      <span>{freshOperation?.state ?? "NOT_REQUESTED"}</span>
+                    </div>
+                    <p className="supporting-copy">
+                      Fresh work is admitted durably and polled over the typed API. Existing
+                      reference evidence is never presented as a fresh run.
+                    </p>
+                    <button
+                      className="retry-button"
+                      type="button"
+                      onClick={() => void requestFreshAnalysis()}
+                      disabled={
+                        riskAttempt?.investigation_request_id === null ||
+                        riskAttempt?.investigation_request_id === undefined ||
+                        freshOperationState === "starting" ||
+                        freshOperationState === "polling"
+                      }
+                    >
+                      {freshOperationState === "starting"
+                        ? "Admitting fresh analysis"
+                        : freshOperationState === "polling"
+                          ? "Polling fresh analysis"
+                          : "Request fresh analysis"}
+                    </button>
+                    {freshOperationState === "failed" && (
+                      <p className="lineage-warning" role="status">
+                        Fresh operation status is unavailable. No result was substituted.
+                      </p>
+                    )}
+                    {freshOperationState === "terminal" && freshOperation !== null && (
+                      <p className="supporting-copy" role="status">
+                        {freshOperation.state === "SUCCEEDED"
+                          ? "Fresh operation completed with a durable result."
+                          : `Fresh operation ended ${freshOperation.state}. ${freshOperation.failure_code ?? "No result was published."}`}
+                      </p>
+                    )}
+                  </section>
                 </>
               )}
             </section>
