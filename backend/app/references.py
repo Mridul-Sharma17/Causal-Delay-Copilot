@@ -26,6 +26,7 @@ REFERENCE_REGISTRY_SCHEMA_VERSION = "validated-analysis-references.v1"
 READ_MODEL_SCHEMA_VERSION = "analysis-run-read-model.v1"
 
 DEFAULT_REFERENCE_SLOT_ID = "ordinary-demo"
+DEFAULT_REFERENCE_INTENDED_ROLE = "semi_synthetic_hero"
 SUPPORTED_MEDIA_TYPES = frozenset(
     {
         "application/json",
@@ -50,6 +51,29 @@ REQUIRED_LOGICAL_ROLES = frozenset(
         "diagnostic_artifacts",
         "verification_report",
     }
+)
+PRODUCER_SCHEMA_BY_ROLE: Mapping[str, tuple[str, str]] = {
+    "engine_request": ("causal-engine-input", "v2"),
+    "runtime_fingerprint": ("runtime-fingerprint", "v1"),
+    "model_recipe_registry": ("model_recipe_registry", "v1"),
+    "derived_seed_registry": ("derived_seed_registry", "v1"),
+    "cohort_stage_records": ("cohort_stage_records", "v1"),
+    "estimator_visible_rows": ("estimator_visible_rows", "v1"),
+    "feature_schema": ("feature_schema", "v1"),
+    "feature_matrix": ("feature_matrix", "v1"),
+    "fold_assignments": ("fold_assignments", "v1"),
+    "nuisance_predictions": ("nuisance_predictions", "v1"),
+    "engine_result": ("causal-engine-result", "v1"),
+    "diagnostic_artifacts": ("diagnostic_artifacts", "v1"),
+    "verification_report": ("analysis-run-verification", "v1"),
+    "reproduction_comparison": (
+        "analysis-run-reproduction-comparison",
+        "v1",
+    ),
+}
+SCIENTIFIC_CONTENT_DIGEST_ROLES = frozenset(
+    REQUIRED_LOGICAL_ROLES
+    - {"engine_request", "runtime_fingerprint", "verification_report"}
 )
 
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
@@ -183,6 +207,8 @@ class ValidatedReference:
     intended_role: str
     engine_result_status: str
     scientific_request_digest: str
+    dataset_version_id: str
+    cache_key: str
     runtime_fingerprint_digest: str
     validation_policy_version: str
     validated_at: datetime
@@ -412,6 +438,33 @@ def _verify_media(
     raise ReferenceVerificationError(f"{label} uses an unsupported media type")
 
 
+def _verify_role_payload(
+    descriptor: Mapping[str, Any],
+    payload: object | list[object] | None,
+) -> None:
+    role = str(descriptor["logical_role"])
+    if payload is None:
+        return
+    expected_schema = f"{descriptor['producer_schema_id']}.{descriptor['producer_schema_version']}"
+    if isinstance(payload, list):
+        if role == "engine_request":
+            raise ReferenceVerificationError("engine request must be one JSON object")
+        for record in payload:
+            record_mapping = _require_mapping(record, f"artifact {role} record")
+            if record_mapping.get("schema_version") != expected_schema:
+                raise ReferenceVerificationError(f"{role} payload schema does not match")
+        return
+    mapping = _require_mapping(payload, f"artifact {role} payload")
+    if role == "engine_request":
+        if mapping.get("engine_input_schema_version") != expected_schema:
+            raise ReferenceVerificationError("engine request payload schema does not match")
+        _require_digest(mapping.get("dataset_version_id"), "engine request dataset version")
+        _require_identifier(mapping.get("intended_role"), "engine request intended role")
+        return
+    if mapping.get("schema_version") != expected_schema:
+        raise ReferenceVerificationError(f"{role} payload schema does not match")
+
+
 def _object_path(artifact_root: Path, descriptor: Mapping[str, Any]) -> Path:
     digest = descriptor["sha256"][7:]
     class_root = descriptor["confidentiality_class"]
@@ -445,6 +498,7 @@ def _descriptor_payload(
     if sha256(content) != descriptor["sha256"]:
         raise ReferenceVerificationError(f"{label} hash does not match")
     payload = _verify_media(content, descriptor, label)
+    _verify_role_payload(descriptor, payload)
     declared_content_digest = descriptor.get("scientific_content_digest")
     if declared_content_digest is not None:
         if isinstance(payload, list):
@@ -456,6 +510,16 @@ def _descriptor_payload(
         if observed_content_digest != declared_content_digest:
             raise ReferenceVerificationError(f"{label} logical digest does not match")
     return payload
+
+
+def _verify_evidence_refs(
+    descriptor: Mapping[str, Any],
+    identities: set[tuple[str, str]],
+) -> None:
+    for reference in descriptor["evidence_refs"]:
+        role, separator, logical_id = reference.partition(":")
+        if not separator or (role, logical_id) not in identities:
+            raise ReferenceVerificationError("artifact evidence reference does not resolve")
 
 
 def _validate_descriptor_shape(descriptor: Mapping[str, Any]) -> None:
@@ -470,6 +534,12 @@ def _validate_descriptor_shape(descriptor: Mapping[str, Any]) -> None:
     role = _require_identifier(descriptor["logical_role"], "logical role")
     if role not in REQUIRED_LOGICAL_ROLES and role != "reproduction_comparison":
         raise ReferenceVerificationError("logical role is unsupported")
+    expected_producer_schema = PRODUCER_SCHEMA_BY_ROLE.get(role)
+    if expected_producer_schema is None or (
+        descriptor["producer_schema_id"],
+        descriptor["producer_schema_version"],
+    ) != expected_producer_schema:
+        raise ReferenceVerificationError("producer schema is unsupported for logical role")
     _require_identifier(descriptor["logical_id"], "logical id")
     _require_identifier(descriptor["producer_schema_id"], "producer schema id")
     _require_identifier(descriptor["producer_schema_version"], "producer schema version")
@@ -504,6 +574,12 @@ def _validate_descriptor_shape(descriptor: Mapping[str, Any]) -> None:
             raise ReferenceVerificationError("NumPy descriptor metadata is invalid")
     elif any(key in descriptor for key in ("array_shape", "array_dtype", "array_order")):
         raise ReferenceVerificationError("array metadata is only valid for NumPy")
+    if (
+        role in SCIENTIFIC_CONTENT_DIGEST_ROLES
+        and descriptor["media_type"] in {"application/json", "application/jsonl"}
+        and "scientific_content_digest" not in descriptor
+    ):
+        raise ReferenceVerificationError("scientific content digest is required")
 
 
 def _verify_bundle(
@@ -569,6 +645,9 @@ def _verify_bundle(
     identities = [(item["logical_role"], item["logical_id"]) for item in descriptor_mappings]
     if len(set(identities)) != len(identities):
         raise ReferenceVerificationError("bundle descriptor identities are duplicated")
+    identity_set = set(identities)
+    for descriptor in descriptor_mappings:
+        _verify_evidence_refs(descriptor, identity_set)
     roles = {item["logical_role"] for item in descriptor_mappings}
     if len(roles) != len(descriptor_mappings):
         raise ReferenceVerificationError("bundle logical roles are duplicated")
@@ -592,8 +671,9 @@ def _verify_bundle(
     if sha256(request) != manifest["scientific_request_digest"]:
         raise ReferenceVerificationError("scientific request digest does not match")
     _require_text(request.get("engine_input_schema_version"), "engine input schema")
-    _require_text(request.get("dataset_version_id"), "dataset version")
+    dataset_version_id = _require_digest(request.get("dataset_version_id"), "dataset version")
     intended_role = _require_identifier(request.get("intended_role"), "intended role")
+    payloads["dataset_version_id"] = dataset_version_id
     payloads["intended_role"] = intended_role
 
     runtime = _require_mapping(payloads["runtime_fingerprint"], "runtime fingerprint")
@@ -785,6 +865,8 @@ class ValidatedReferenceStore:
             intended_role=str(entry["intended_role"]),
             engine_result_status=str(manifest["engine_result_status"]),
             scientific_request_digest=str(manifest["scientific_request_digest"]),
+            dataset_version_id=str(payloads["dataset_version_id"]),
+            cache_key=str(manifest["cache_key"]),
             runtime_fingerprint_digest=str(manifest["runtime_fingerprint_digest"]),
             validation_policy_version=str(attestation["validation_policy_version"]),
             validated_at=validated_at,
@@ -815,6 +897,8 @@ class ValidatedReferenceStore:
         reference_slot_id: str | None = None,
         *,
         intended_role: str | None = None,
+        scientific_request_digest: str | None = None,
+        cache_key: str | None = None,
     ) -> ValidatedReference | None:
         references = self.list_verified_references()
         if reference_slot_id is not None:
@@ -823,12 +907,41 @@ class ValidatedReferenceStore:
             ]
         if intended_role is not None:
             references = [item for item in references if item.intended_role == intended_role]
+        if scientific_request_digest is not None:
+            _require_digest(scientific_request_digest, "scientific request digest")
+            references = [
+                item
+                for item in references
+                if item.scientific_request_digest == scientific_request_digest
+            ]
+        if cache_key is not None:
+            _require_digest(cache_key, "cache key")
+            references = [item for item in references if item.cache_key == cache_key]
         return references[0] if references else None
 
-    def read_model(self, reference_slot_id: str | None = None) -> ValidatedReference | None:
+    def read_model(
+        self,
+        reference_slot_id: str | None = None,
+        *,
+        intended_role: str | None = None,
+        scientific_request_digest: str | None = None,
+        cache_key: str | None = None,
+    ) -> ValidatedReference | None:
         """Return only the closed reference delivery DTO, never artifact bytes or paths."""
 
-        return self.select_reference(reference_slot_id)
+        selected = self.select_reference(
+            reference_slot_id,
+            intended_role=intended_role,
+            scientific_request_digest=scientific_request_digest,
+            cache_key=cache_key,
+        )
+        if selected is not None or reference_slot_id is None:
+            return selected
+        return self.select_reference(
+            intended_role=intended_role,
+            scientific_request_digest=scientific_request_digest,
+            cache_key=cache_key,
+        )
 
     def is_verified(self, reference_slot_id: str) -> bool:
         return self.select_reference(reference_slot_id) is not None
@@ -906,6 +1019,10 @@ def publish_analysis_bundle(
         descriptor = _member_descriptor(member)
         _validate_descriptor_shape(descriptor)
         payload = _verify_media(member.content, descriptor, f"artifact {member.logical_role}")
+        try:
+            _verify_role_payload(descriptor, payload)
+        except ReferenceVerificationError as error:
+            raise ValueError(str(error)) from error
         if member.scientific_content_digest is not None:
             observed_digest = sha256(payload) if payload is not None else None
             if observed_digest != member.scientific_content_digest:
@@ -916,6 +1033,11 @@ def publish_analysis_bundle(
         member_bytes[identity] = member.content
         descriptors.append(descriptor)
     descriptors.sort(key=lambda item: (item["logical_role"], item["logical_id"], item["sha256"]))
+    descriptor_identities = {
+        (str(item["logical_role"]), str(item["logical_id"])) for item in descriptors
+    }
+    for descriptor in descriptors:
+        _verify_evidence_refs(descriptor, descriptor_identities)
     core = manifest_core
     core["artifact_descriptors"] = descriptors
     bundle_manifest_hash = sha256(core)

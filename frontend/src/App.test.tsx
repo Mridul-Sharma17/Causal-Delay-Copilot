@@ -40,6 +40,7 @@ const referenceDeliveryResponse = {
   intended_role: "semi_synthetic_hero",
   engine_result_status: "estimated",
   scientific_request_digest: "sha256:request",
+  dataset_version_id: "sha256:hero-v1",
   runtime_fingerprint_digest: "sha256:runtime",
   validation_policy_version: "release-validation.v1",
   validated_at: "2026-08-05T00:00:00Z",
@@ -519,25 +520,10 @@ describe("Core health journey", () => {
         });
       }
 
-      if (input === "/api/ingestion-runs") {
-        expect(init?.method).toBe("POST");
-        expect(JSON.parse(String(init?.body))).toEqual({
-          idempotency_key: "core-semi-synthetic-hero-v1",
-          dataset_key: "semi-synthetic-hero",
-          mapping_manifest_id: "semi-synthetic-hero.mapping.v1",
-        });
-        return new Response(
-          JSON.stringify({
-            result: "CREATED",
-            ingestion_run_id: "run-1",
-            dataset_version_id: "sha256:hero-v1",
-            status: "SUCCEEDED",
-          }),
-          { status: 201, headers: { "content-type": "application/json" } },
-        );
-      }
-
       if (typeof input === "string" && input.startsWith("/api/datasets/")) {
+        expect(input).toBe(
+          `/api/datasets/${referenceDeliveryResponse.dataset_version_id}/lineage`,
+        );
         return new Response(JSON.stringify(lineageResponse), {
           status: 200,
           headers: { "content-type": "application/json" },
@@ -664,7 +650,7 @@ describe("Core health journey", () => {
       await screen.findByText("Source observation register (3)"),
     ).toBeInTheDocument();
     expect(screen.getAllByText("SOURCE_DUPLICATE_DEDUPED").length).toBeGreaterThan(0);
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(11));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(10));
   });
 
   test("does not expose an internal error when health is unavailable", async () => {
@@ -683,6 +669,64 @@ describe("Core health journey", () => {
     );
     expect(screen.queryByText("CORE_STORE_UNAVAILABLE")).not.toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  test("fails closed and does not load ordinary evidence when the reference is unavailable", async () => {
+    const fetchMock = vi.fn<typeof fetch>();
+    fetchMock.mockImplementation(async (input) => {
+      if (input === "/api/health") {
+        return new Response(JSON.stringify(healthResponse), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (input === "/api/workspace") {
+        return new Response(JSON.stringify(workspaceResponse), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (input === "/api/evidence/reference") {
+        return new Response(JSON.stringify({ code: "RUN_REFERENCE_INVALID" }), {
+          status: 503,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (input === "/api/audit/occurrences") {
+        return new Response(
+          JSON.stringify({
+            result: "CREATED",
+            occurrence_id: "occurrence-reference-unavailable",
+            event_seq: 1,
+          }),
+          { status: 201, headers: { "content-type": "application/json" } },
+        );
+      }
+      throw new Error(`unexpected request: ${String(input)}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<App />);
+
+    expect(
+      await screen.findByText(
+        "Validated Reference unavailable. No ordinary evidence was substituted.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByText(
+        "Reactive Risk intake is unavailable. No signal or cached result was substituted.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Canonical fields")).not.toBeInTheDocument();
+    expect(
+      fetchMock.mock.calls.some(([input]) => input === "/api/ingestion-runs"),
+    ).toBe(false);
+    expect(
+      fetchMock.mock.calls.some(
+        ([input]) => typeof input === "string" && input.startsWith("/api/datasets/"),
+      ),
+    ).toBe(false);
   });
 
   test("keeps health available when the audit write is unavailable", async () => {

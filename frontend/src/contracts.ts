@@ -60,6 +60,7 @@ export type ValidatedReferenceDelivery = {
   intended_role: string;
   engine_result_status: "estimated" | "abstained";
   scientific_request_digest: string;
+  dataset_version_id: string;
   runtime_fingerprint_digest: string;
   validation_policy_version: string;
   validated_at: string;
@@ -545,6 +546,7 @@ export function parseValidatedReferenceDelivery(
     (value.engine_result_status !== "estimated" &&
       value.engine_result_status !== "abstained") ||
     typeof value.scientific_request_digest !== "string" ||
+    typeof value.dataset_version_id !== "string" ||
     typeof value.runtime_fingerprint_digest !== "string" ||
     typeof value.validation_policy_version !== "string" ||
     typeof value.validated_at !== "string"
@@ -567,6 +569,7 @@ export function parseValidatedReferenceDelivery(
     intended_role: value.intended_role,
     engine_result_status: value.engine_result_status,
     scientific_request_digest: value.scientific_request_digest,
+    dataset_version_id: value.dataset_version_id,
     runtime_fingerprint_digest: value.runtime_fingerprint_digest,
     validation_policy_version: value.validation_policy_version,
     validated_at: value.validated_at,

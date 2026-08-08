@@ -158,6 +158,7 @@ class ValidatedReferenceDeliveryResponse(BaseModel):
     intended_role: str
     engine_result_status: Literal["estimated", "abstained"]
     scientific_request_digest: str
+    dataset_version_id: str
     runtime_fingerprint_digest: str
     validation_policy_version: str
     validated_at: datetime

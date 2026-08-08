@@ -57,7 +57,11 @@ from .risk import (
 from .security import apply_public_response_headers
 from .settings import Settings
 from .state import StateRoot
-from .references import DEFAULT_REFERENCE_SLOT_ID, ValidatedReferenceStore
+from .references import (
+    DEFAULT_REFERENCE_INTENDED_ROLE,
+    DEFAULT_REFERENCE_SLOT_ID,
+    ValidatedReferenceStore,
+)
 from .workspace import DEMO_WORKSPACE_COOKIE_NAME, WorkspaceResolution
 
 MAX_REACTIVE_REQUEST_BYTES = 64 * 1024
@@ -941,7 +945,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         response_model=ValidatedReferenceDeliveryResponse,
     )
     async def get_ordinary_reference() -> JSONResponse:
-        reference = reference_store.read_model(DEFAULT_REFERENCE_SLOT_ID)
+        reference = reference_store.read_model(
+            DEFAULT_REFERENCE_SLOT_ID,
+            intended_role=DEFAULT_REFERENCE_INTENDED_ROLE,
+        )
         if reference is None:
             return workspace_resource_unavailable()
         response = ValidatedReferenceDeliveryResponse(
@@ -960,6 +967,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             intended_role=reference.intended_role,
             engine_result_status=reference.engine_result_status,
             scientific_request_digest=reference.scientific_request_digest,
+            dataset_version_id=reference.dataset_version_id,
             runtime_fingerprint_digest=reference.runtime_fingerprint_digest,
             validation_policy_version=reference.validation_policy_version,
             validated_at=reference.validated_at,

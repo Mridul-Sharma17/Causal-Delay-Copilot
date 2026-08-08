@@ -7,7 +7,6 @@ import {
   getRiskSignals,
   getValidatedReference,
   getWorkspace,
-  importHeroDataset,
   recordBootOccurrence,
   submitReactiveInvestigation,
   submitProactiveInvestigation,
@@ -325,16 +324,19 @@ function App() {
         return;
       }
 
+      let referenceAvailable = false;
+      let validatedReferenceForJourney: ValidatedReferenceDelivery | null = null;
       setReferenceState("loading");
-      void getValidatedReference()
-        .then((validatedReference) => {
-          setReference(validatedReference);
-          setReferenceState("ready");
-        })
-        .catch(() => {
-          setReference(null);
-          setReferenceState("failed");
-        });
+      try {
+        const validatedReference = await getValidatedReference();
+        validatedReferenceForJourney = validatedReference;
+        setReference(validatedReference);
+        setReferenceState("ready");
+        referenceAvailable = true;
+      } catch {
+        setReference(null);
+        setReferenceState("failed");
+      }
 
       try {
         const outcomeCode = auditOutcomeCode(nextHealth);
@@ -352,15 +354,26 @@ function App() {
         setAuditState("failed");
       }
 
+      if (!referenceAvailable) {
+        setLineageState("failed");
+        setRiskState("failed");
+        setRiskFailureState("failed");
+        setProactiveState("failed");
+        return;
+      }
+
       setLineageState("loading");
       try {
-        const imported = await importHeroDataset();
-        const snapshot = await getDatasetLineage(imported.dataset_version_id);
+        const datasetVersionId = validatedReferenceForJourney?.dataset_version_id;
+        if (datasetVersionId === undefined) {
+          throw new Error("validated reference dataset identity is unavailable");
+        }
+        const snapshot = await getDatasetLineage(datasetVersionId);
         setLineage(snapshot);
         setLineageState("ready");
         setRiskState("loading");
         try {
-          const availableSignals = await getRiskSignals(imported.dataset_version_id);
+          const availableSignals = await getRiskSignals(datasetVersionId);
           setRiskFixtures(availableSignals.items);
           setPredictiveStatus(availableSignals.predictive_status ?? null);
           if (availableSignals.items.length === 0) {
@@ -372,7 +385,7 @@ function App() {
               return;
             }
             const attempt = await submitReactiveInvestigation(
-              imported.dataset_version_id,
+              datasetVersionId,
               validFixture.fixture_id,
             );
             setRiskAttempt(attempt.attempt);
@@ -381,7 +394,7 @@ function App() {
           setProactiveState("loading");
           try {
             const availableProposals = await getProactiveProposals(
-              imported.dataset_version_id,
+              datasetVersionId,
             );
             setProactiveFixtures(availableProposals.items);
             const proposalFixture = availableProposals.items.find(
@@ -391,7 +404,7 @@ function App() {
               setProactiveState("failed");
             } else {
               const attempt = await submitProactiveInvestigation(
-                imported.dataset_version_id,
+                datasetVersionId,
                 proposalFixture.fixture_id,
               );
               setProactiveAttempt(attempt.attempt);

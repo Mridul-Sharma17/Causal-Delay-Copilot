@@ -1,5 +1,4 @@
 import {
-  parseIngestionRunResponse,
   parseLineageSnapshot,
   parseDemoWorkspaceResponse,
   parseAuditOccurrenceResponse,
@@ -13,7 +12,6 @@ import {
   type AuditOccurrenceResponse,
   type DemoWorkspace,
   type HealthResponse,
-  type IngestionRunResponse,
   type LineageSnapshot,
   type ProactiveInvestigationResponse,
   type ProactiveProposalListResponse,
@@ -104,25 +102,6 @@ export async function recordBootOccurrence(
       body: JSON.stringify(request),
     },
     parseAuditOccurrenceResponse,
-  );
-}
-
-export function importHeroDataset(): Promise<IngestionRunResponse> {
-  return requestJson(
-    "/api/ingestion-runs",
-    {
-      method: "POST",
-      headers: {
-        accept: "application/json",
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        idempotency_key: "core-semi-synthetic-hero-v1",
-        dataset_key: "semi-synthetic-hero",
-        mapping_manifest_id: "semi-synthetic-hero.mapping.v1",
-      }),
-    },
-    parseIngestionRunResponse,
   );
 }
 
