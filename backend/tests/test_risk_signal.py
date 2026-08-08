@@ -149,6 +149,39 @@ def test_reactive_signal_creates_one_immutable_request_and_replays_exactly(
         assert outcome["outcome_code"] == "OUTCOME_NOT_REQUIRED_FOR_SUBJECT"
         assert outcome["supplier_milestone_slippage_days"] is None
         assert outcome["actual_target_milestone"] is None
+        eligibility = projection["eligibility"]
+        assert eligibility["stage_order"] == [
+            "H0_HISTORY_SOURCE",
+            "H1_HISTORY_COMMITMENT",
+            "S0_SOURCE",
+            "S1_COMMITMENT",
+            "S2_WARMED",
+            "S2_SNAPSHOT_OK",
+            "S3_EXPOSURE",
+            "S4_DESIGN",
+            "S5_PROMISE",
+            "S6_MATURE",
+            "S7_COVARIATE",
+            "S8_OUTCOME",
+            "S9_OVERLAP",
+        ]
+        assert eligibility["state"] == "scientifically_unavailable"
+        assert eligibility["estimator_input"] is None
+        assert projection["estimator_window_ref"]["selected_count"] == eligibility[
+            "selectors"
+        ]["estimator_window"]["selected_count"]
+        assert projection["history_lookback_ref"]["selected_count"] == eligibility[
+            "selectors"
+        ]["history_lookback"]["selected_count"]
+        assert eligibility["variants"]["primary"]["state"] == (
+            "scientifically_unavailable"
+        )
+        assert eligibility["variants"]["short_history"]["state"] == (
+            "scientifically_unavailable"
+        )
+        assert eligibility["subject"]["load"]["primary"]["eligibility_codes"] == [
+            "SUPPLIER_HISTORY_INSUFFICIENT"
+        ]
 
         lineage_response = client.get(f"/api/datasets/{dataset_version_id}/lineage")
         assert lineage_response.status_code == 200

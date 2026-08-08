@@ -257,6 +257,7 @@ export type CausalEngineInput = {
   engine_configuration_ref: string;
   supplier_load_exposure?: SupplierLoadExposure;
   supplier_milestone_outcome?: SupplierMilestoneOutcome;
+  eligibility?: Record<string, unknown>;
   estimator_window_ref: CausalWindow;
   history_lookback_ref: CausalWindow;
   historical_population_digest: string;
@@ -1039,6 +1040,7 @@ function parseCausalEngineInput(value: unknown): CausalEngineInput {
       !isRecord(value.supplier_load_exposure)) ||
     (value.supplier_milestone_outcome !== undefined &&
       !isRecord(value.supplier_milestone_outcome)) ||
+    (value.eligibility !== undefined && !isRecord(value.eligibility)) ||
     typeof value.historical_population_digest !== "string" ||
     !Array.isArray(value.analytical_fact_lineage_refs) ||
     !value.analytical_fact_lineage_refs.every((item) => typeof item === "string")
@@ -1070,6 +1072,7 @@ function parseCausalEngineInput(value: unknown): CausalEngineInput {
       value.supplier_milestone_outcome === undefined
         ? undefined
         : parseSupplierMilestoneOutcome(value.supplier_milestone_outcome),
+    eligibility: value.eligibility === undefined ? undefined : value.eligibility,
     estimator_window_ref: parseCausalWindow(value.estimator_window_ref),
     history_lookback_ref: parseCausalWindow(value.history_lookback_ref),
     historical_population_digest: value.historical_population_digest,

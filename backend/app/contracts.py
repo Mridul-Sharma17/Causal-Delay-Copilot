@@ -928,6 +928,7 @@ class CausalEngineInputResponse(BaseModel):
     engine_configuration_ref: str
     supplier_load_exposure: dict[str, Any] | None = None
     supplier_milestone_outcome: SupplierMilestoneOutcomeResponse | None = None
+    eligibility: dict[str, Any] | None = None
     estimator_window_ref: CausalWindowResponse
     history_lookback_ref: CausalWindowResponse
     historical_population_digest: str

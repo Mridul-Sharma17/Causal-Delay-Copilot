@@ -33,6 +33,11 @@ from .contracts import (
     RiskSignalPreviewResponse,
     RiskSignalRequest,
 )
+from .eligibility_contract import (
+    ADJUSTMENT_SET_FIELDS,
+    LOAD_EXPOSURE_VARIANTS,
+    SUPPORTED_TARGET_MILESTONE_KINDS,
+)
 RISK_SIGNAL_SCHEMA_VERSION = "risk-signal.v1"
 PROACTIVE_PROPOSAL_SCHEMA_VERSION = "proactive-proposal.v1"
 TRIGGER_SOURCE_SCHEMA_VERSION = "trigger-source-envelope.v1"
@@ -46,6 +51,7 @@ CANONICAL_SLIPPAGE_DURATION_BASIS = "CALENDAR_DAY"
 TEMPORAL_ELIGIBILITY_RELEASE_REF = "temporal-eligibility-release.v1"
 ESTIMATOR_WINDOW_SELECTOR_VERSION = "estimator-window.v1"
 HISTORY_LOOKBACK_SELECTOR_VERSION = "history-lookback.v1"
+DEFAULT_FOLLOW_UP_HORIZON_DAYS = 0
 SOURCE_NAMESPACE = "semi-synthetic-hero"
 SOURCE_SYSTEM = "bundled-predictive-stub"
 PROACTIVE_SOURCE_SYSTEM = "bundled-pre-award-hook"
@@ -88,18 +94,11 @@ ENGINE_CONFIGURATION_REGISTRY = {
     }
 }
 
-_LOAD_EXPOSURE_VARIANTS = (
-    ("primary", 0.67, 10, "nearest-rank-percentile-0.67.v1"),
-    ("stricter_threshold", 0.75, 10, "nearest-rank-percentile-0.75.v1"),
-    ("short_history", 0.67, 5, "nearest-rank-percentile-0.67.v1"),
-    ("long_history", 0.67, 20, "nearest-rank-percentile-0.67.v1"),
-)
-_PRIMARY_LOAD_MINIMUM_HISTORY = 10
+_LOAD_EXPOSURE_VARIANTS = LOAD_EXPOSURE_VARIANTS
+_PRIMARY_LOAD_MINIMUM_HISTORY = LOAD_EXPOSURE_VARIANTS[0][2]
 _LOAD_EXPOSURE_SCHEMA_VERSION = "supplier-load-exposure.v1"
 _SUPPLIER_MILESTONE_OUTCOME_SCHEMA_VERSION = "supplier-milestone-slippage.v1"
-_SUPPORTED_SUPPLIER_MILESTONE_KINDS = frozenset(
-    {"supplier_completion", "supplier_handoff"}
-)
+_SUPPORTED_SUPPLIER_MILESTONE_KINDS = SUPPORTED_TARGET_MILESTONE_KINDS
 
 _SHA256_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
 _RISK_SIGNAL_CODES = (
@@ -136,6 +135,21 @@ _RISK_SIGNAL_CODES = (
     "FROZEN_PROMISE_CONFLICT",
     "FROZEN_PROMISE_TEMPORALLY_INVALID",
 )
+
+
+def _dataset_follow_up_horizon_days(lineage: Mapping[str, Any]) -> int:
+    dataset = lineage.get("dataset_version", {})
+    lineage_manifest = lineage.get("mapping_manifest", {})
+    dataset_manifest = (
+        dataset.get("mapping_manifest", {}) if isinstance(dataset, Mapping) else {}
+    )
+    for container in (dataset, lineage_manifest, dataset_manifest):
+        if not isinstance(container, Mapping) or "follow_up_horizon_days" not in container:
+            continue
+        value = container.get("follow_up_horizon_days")
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            return value
+    return DEFAULT_FOLLOW_UP_HORIZON_DAYS
 
 REACTIVE_INGRESS_ATTEMPTS_TABLE = """
     CREATE TABLE IF NOT EXISTS reactive_ingress_attempts (
@@ -564,10 +578,10 @@ def _normalise_proactive_temporal(field: Any) -> _Temporal:
 def _proactive_target_field(field: Any) -> dict[str, Any]:
     if field.state != "present":
         return _field(field.state)
-    if not isinstance(field.value, str) or field.value not in {
-        "supplier_completion",
-        "supplier_handoff",
-    }:
+    if (
+        not isinstance(field.value, str)
+        or field.value not in SUPPORTED_TARGET_MILESTONE_KINDS
+    ):
         return _field("invalid")
     return _field("present", field.value)
 
@@ -777,15 +791,7 @@ def _lineage_mapping_refs(
     used_mapping_names = {
         "identity_mappings": {"order_line_id", "supplier_id"},
         "field_mappings": {
-            "material_class",
-            "complexity_class",
-            "quantity",
-            "value",
-            "project_id",
-            "project_phase",
-            "urgency_class",
-            "geography_code",
-            "contract_form",
+            *ADJUSTMENT_SET_FIELDS,
         },
         "advisory_context_mappings": (
             {"material_or_equipment"} if include_advisory else set()
@@ -2117,7 +2123,7 @@ def resolve_supplier_load_snapshot(
             subject_supplier_id=subject_supplier_id,
             decision_cutoff=decision_cutoff,
         )
-    if target_milestone_kind not in {"supplier_completion", "supplier_handoff"}:
+    if target_milestone_kind not in SUPPORTED_TARGET_MILESTONE_KINDS:
         return _load_snapshot_failure(
             code="LOAD_SNAPSHOT_UNRESOLVABLE",
             duration_basis=duration_basis,
@@ -4531,14 +4537,38 @@ class ReactiveInvestigationMixin:
             )
             evidence_refs = _lineage_evidence_refs(lineage, lineage_refs)
             configuration = ENGINE_CONFIGURATION_REGISTRY[ENGINE_CONFIGURATION_REF]
+            follow_up_horizon_days = _dataset_follow_up_horizon_days(lineage)
             supplier_milestone_outcome = resolve_supplier_milestone_slippage(
                 events,
                 target_milestone_kind=signal.target_milestone_kind,
                 commitment_cutoff=commitment_cutoff,
                 observation_cutoff=known,
                 canonical_slippage_duration_basis=duration_basis,
+                follow_up_horizon_days=follow_up_horizon_days,
                 role="SUBJECT_LINE",
                 frozen_promise=promise_resolution,
+            )
+            from .eligibility import (
+                evaluate_pre_estimation_eligibility,
+                frozen_selector_ids,
+            )
+
+            eligibility = evaluate_pre_estimation_eligibility(
+                lineage,
+                subject_id=canonical_order_line_id,
+                subject_supplier_id=str(order_line.get("supplier_id", "")),
+                decision_cutoff=commitment_cutoff,
+                observation_cutoff=known,
+                target_milestone_kind=signal.target_milestone_kind,
+                duration_basis=duration_basis,
+                trigger_mode="reactive",
+                follow_up_horizon_days=follow_up_horizon_days,
+            )
+            frozen_windows = frozen_selector_ids(
+                lineage,
+                observation_cutoff=known,
+                subject_id=canonical_order_line_id,
+                trigger_mode="reactive",
             )
             adjustment_fields = {
                 name: _subject_field_as_of(
@@ -4548,17 +4578,7 @@ class ReactiveInvestigationMixin:
                     canonical_value=order_line.get("fields", {}).get(name),
                     cutoff=commitment_cutoff,
                 )
-                for name in (
-                    "material_class",
-                    "complexity_class",
-                    "quantity",
-                    "value",
-                    "project_id",
-                    "project_phase",
-                    "urgency_class",
-                    "geography_code",
-                    "contract_form",
-                )
+                for name in ADJUSTMENT_SET_FIELDS
             }
             projection = {
                 "causal_input_schema_version": CAUSAL_INPUT_SCHEMA_VERSION,
@@ -4588,11 +4608,12 @@ class ReactiveInvestigationMixin:
                 "engine_configuration_ref": ENGINE_CONFIGURATION_REF,
                 "supplier_load_exposure": load_exposure,
                 "supplier_milestone_outcome": supplier_milestone_outcome,
+                "eligibility": eligibility,
                 "estimator_window_ref": _window_ref(
                     selector_version=configuration[
                         "estimator_window_selector_version"
                     ],
-                    selected_ids=selected_ids,
+                    selected_ids=frozen_windows["estimator"],
                     observation_cutoff=known,
                     subject_id=canonical_order_line_id,
                     remove_subject=True,
@@ -4601,18 +4622,14 @@ class ReactiveInvestigationMixin:
                     selector_version=configuration[
                         "history_lookback_selector_version"
                     ],
-                    selected_ids=selected_ids,
+                    selected_ids=frozen_windows["history"],
                     observation_cutoff=known,
                     subject_id=canonical_order_line_id,
                     remove_subject=False,
                 ),
                 "historical_population_digest": _historical_population_digest(
                     lineage,
-                    [
-                        item
-                        for item in selected_ids
-                        if item != canonical_order_line_id
-                    ],
+                    frozen_windows["s0"],
                     decision_cutoff=commitment_cutoff,
                 ),
                 "analytical_fact_lineage_refs": sorted(
@@ -4887,17 +4904,7 @@ class ReactiveInvestigationMixin:
 
         adjustment_fields: dict[str, Any] = {}
         subject_adjustments: dict[str, dict[str, Any]] = {}
-        registered_adjustments = (
-            "material_class",
-            "complexity_class",
-            "quantity",
-            "value",
-            "project_id",
-            "project_phase",
-            "urgency_class",
-            "geography_code",
-            "contract_form",
-        )
+        registered_adjustments = ADJUSTMENT_SET_FIELDS
         for name in registered_adjustments:
             field = proposal.adjustment_inputs.get(name)
             if field is None:
@@ -4948,6 +4955,7 @@ class ReactiveInvestigationMixin:
             "identity_hashes": {},
         }
         configuration = ENGINE_CONFIGURATION_REGISTRY.get(ENGINE_CONFIGURATION_REF)
+        follow_up_horizon_days = _dataset_follow_up_horizon_days(lineage or {})
         if lineage is not None and configuration is not None:
             duration_basis_evidence = _duration_basis_at_cutoff(
                 configuration,
@@ -5076,8 +5084,36 @@ class ReactiveInvestigationMixin:
                 commitment_cutoff=decision,
                 observation_cutoff=decision,
                 canonical_slippage_duration_basis=duration_basis,
+                follow_up_horizon_days=follow_up_horizon_days,
                 role="SUBJECT_LINE",
                 frozen_promise=promise,
+            )
+            from .eligibility import (
+                evaluate_pre_estimation_eligibility,
+                frozen_selector_ids,
+            )
+
+            eligibility = evaluate_pre_estimation_eligibility(
+                lineage,
+                subject_id=preview_subject_digest,
+                subject_supplier_id=str(resolved_supplier_field.get("value", "")),
+                decision_cutoff=decision,
+                observation_cutoff=decision,
+                target_milestone_kind=str(target_field.get("value", "")),
+                duration_basis=duration_basis,
+                trigger_mode="proactive",
+                follow_up_horizon_days=follow_up_horizon_days,
+                subject_inputs=subject_adjustments,
+                subject_original_promise=promise,
+                subject_target_milestone=proposal.target_milestone_kind.model_dump(
+                    mode="json"
+                ),
+            )
+            frozen_windows = frozen_selector_ids(
+                lineage,
+                observation_cutoff=decision,
+                subject_id=preview_subject_digest,
+                trigger_mode="proactive",
             )
             projection = {
                 "causal_input_schema_version": CAUSAL_INPUT_SCHEMA_VERSION,
@@ -5096,23 +5132,24 @@ class ReactiveInvestigationMixin:
                 "engine_configuration_ref": ENGINE_CONFIGURATION_REF,
                 "supplier_load_exposure": load_exposure,
                 "supplier_milestone_outcome": supplier_milestone_outcome,
+                "eligibility": eligibility,
                 "estimator_window_ref": _window_ref(
                     selector_version=configuration["estimator_window_selector_version"],
-                    selected_ids=selected_ids,
+                    selected_ids=frozen_windows["estimator"],
                     observation_cutoff=decision,
                     subject_id=preview_subject_digest,
                     remove_subject=False,
                 ),
                 "history_lookback_ref": _window_ref(
                     selector_version=configuration["history_lookback_selector_version"],
-                    selected_ids=selected_ids,
+                    selected_ids=frozen_windows["history"],
                     observation_cutoff=decision,
                     subject_id=preview_subject_digest,
                     remove_subject=False,
                 ),
                 "historical_population_digest": _historical_population_digest(
                     lineage,
-                    selected_ids,
+                    frozen_windows["s0"],
                     decision_cutoff=decision,
                 ),
                 "analytical_fact_lineage_refs": sorted(

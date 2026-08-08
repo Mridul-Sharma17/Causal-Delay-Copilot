@@ -129,16 +129,28 @@ function temporalSummary(value: LineageRecord): string {
   return `State: ${state} · ${source} → ${normalized} · ${precision} · timezone ${timezone}`;
 }
 
+function eligibilityValue(
+  eligibility: Record<string, unknown> | undefined,
+  key: string,
+): string {
+  if (eligibility === undefined) {
+    return "Unavailable";
+  }
+  return formatValue(eligibility[key]);
+}
+
 function EligibilityStage({
   outcome,
+  eligibility,
   badge,
   headingId,
 }: {
   outcome: SupplierMilestoneOutcome | undefined;
+  eligibility: Record<string, unknown> | undefined;
   badge: string;
   headingId: string;
 }) {
-  if (outcome === undefined) {
+  if (outcome === undefined && eligibility === undefined) {
     return null;
   }
   return (
@@ -154,16 +166,37 @@ function EligibilityStage({
         <div>
           <dt>Outcome basis</dt>
           <dd>
-            <code>{outcome.canonical_slippage_duration_basis}</code>
+            <code>{outcome?.canonical_slippage_duration_basis ?? "Unavailable"}</code>
           </dd>
         </div>
         <div>
           <dt>Outcome reason</dt>
           <dd>
-            <code>{outcome.reason_code ?? "Unavailable"}</code>
-            <span>{outcome.reason}</span>
+            <code>{outcome?.reason_code ?? "Unavailable"}</code>
+            <span>{outcome?.reason ?? "Unavailable"}</span>
           </dd>
         </div>
+        {eligibility !== undefined && (
+          <>
+            <div>
+              <dt>Pre-estimation state</dt>
+              <dd>
+                <code>{eligibilityValue(eligibility, "state")}</code>
+              </dd>
+            </div>
+            <div>
+              <dt>Eligibility reason</dt>
+              <dd>
+                <code>{eligibilityValue(eligibility, "reason_code")}</code>
+                <span>{eligibilityValue(eligibility, "reason")}</span>
+              </dd>
+            </div>
+            <div>
+              <dt>Next step</dt>
+              <dd>{eligibilityValue(eligibility, "next_step")}</dd>
+            </div>
+          </>
+        )}
       </dl>
       <p className="risk-note">
         This subject is not an estimation line. No slippage estimate is displayed; an actual
@@ -632,6 +665,9 @@ function App() {
                   riskAttempt.investigation_request?.causal_engine_input
                     .supplier_milestone_outcome
                 }
+                eligibility={
+                  riskAttempt.investigation_request?.causal_engine_input.eligibility
+                }
                 badge="SUBJECT"
                 headingId="reactive-eligibility-heading"
               />
@@ -773,6 +809,7 @@ function App() {
 
               <EligibilityStage
                 outcome={proactiveRequest?.causal_engine_input.supplier_milestone_outcome}
+                eligibility={proactiveRequest?.causal_engine_input.eligibility}
                 badge="PREVIEW ONLY"
                 headingId="proactive-eligibility-heading"
               />
