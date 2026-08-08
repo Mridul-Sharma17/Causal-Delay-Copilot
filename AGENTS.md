@@ -1,5 +1,7 @@
 # Project Instructions
 
+- Use the `main` branch only; do not create or work on separate branches.
+
 ## CLI-first tooling
 
 - Prefer an official, capable CLI over a web UI or MCP for project operations.
