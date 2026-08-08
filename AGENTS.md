@@ -1,6 +1,7 @@
 # Project Instructions
 
 - Use the `main` branch only; do not create or work on separate branches.
+- When implementing a ticket, fulfill every acceptance criterion before claiming completion.
 
 ## CLI-first tooling
 
