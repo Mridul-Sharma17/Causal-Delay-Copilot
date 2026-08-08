@@ -1482,9 +1482,23 @@ def publish_diagnostic_results(
             for item in records
         ]
         by_id = {item.get("diagnostic_id"): item for item in verified}
-        if len(by_id) != len(verified) or set(by_id) != set(CORE_DIAGNOSTIC_IDS):
+        if len(by_id) != len(verified):
             raise DiagnosticIntegrityError("diagnostic result set is incomplete or duplicated")
-        return [by_id[diagnostic_id] for diagnostic_id in CORE_DIAGNOSTIC_IDS]
+        expected_order: tuple[str, ...] = CORE_DIAGNOSTIC_IDS
+        if set(by_id) != set(CORE_DIAGNOSTIC_IDS):
+            from .refuters import (
+                NEGATIVE_CONTROL_DIAGNOSTIC_ID,
+                REFUTER_DIAGNOSTIC_IDS,
+            )
+
+            expected_order = (
+                *CORE_DIAGNOSTIC_IDS,
+                *REFUTER_DIAGNOSTIC_IDS,
+                NEGATIVE_CONTROL_DIAGNOSTIC_ID,
+            )
+        if set(by_id) != set(expected_order):
+            raise DiagnosticIntegrityError("diagnostic result set is incomplete or unsupported")
+        return [by_id[diagnostic_id] for diagnostic_id in expected_order]
     if records is not None:
         raise DiagnosticIntegrityError("diagnostic result list is unsupported")
 
@@ -1567,6 +1581,18 @@ def diagnostic_summary(results: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
 def evaluate_diagnostics(**kwargs: Any) -> list[dict[str, Any]]:
     """Compatibility alias for the declared Core diagnostic public seam."""
 
+    if any(
+        key in kwargs
+        for key in (
+            "refuter_rows",
+            "refuter_primary_effect",
+            "refuter_estimator_adapter",
+            "negative_control_rows",
+            "negative_control",
+            "negative_control_spec",
+        )
+    ):
+        return evaluate_validity_diagnostics(**kwargs)
     return evaluate_core_diagnostics(**kwargs)
 
 
@@ -1577,3 +1603,119 @@ def build_diagnostic_results(
     """Compatibility alias for publishing reference-bound diagnostic records."""
 
     return publish_diagnostic_results(payload, **kwargs)
+
+
+def apply_refuter_transformation(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    """Expose the registered transformation seam from the diagnostics module."""
+
+    from .refuters import apply_refuter_transformation as _apply_refuter_transformation
+
+    return _apply_refuter_transformation(*args, **kwargs)
+
+
+def run_refuter_battery(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    """Run and seal the four registered refuter diagnostics."""
+
+    from .refuters import run_refuter_battery as _run_refuter_battery
+
+    return _run_refuter_battery(*args, **kwargs)
+
+
+def evaluate_refuter_battery(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+    """Return the four refuter Diagnostic Results in canonical battery order."""
+
+    from .refuters import evaluate_refuter_battery as _evaluate_refuter_battery
+
+    return _evaluate_refuter_battery(*args, **kwargs)
+
+
+def evaluate_negative_control(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    """Evaluate the reviewed negative-control outcome at its public seam."""
+
+    from .refuters import evaluate_negative_control as _evaluate_negative_control
+
+    return _evaluate_negative_control(*args, **kwargs)
+
+
+def evaluate_validity_diagnostics(
+    *,
+    refuter_rows: Sequence[Mapping[str, Any]] | None = None,
+    refuter_primary_effect: Mapping[str, Any] | None = None,
+    refuter_estimator_adapter: object | None = None,
+    refuter_seed_context: Mapping[str, Any] | None = None,
+    refuter_primary_artifacts: Mapping[str, Any] | None = None,
+    negative_control_rows: Sequence[Mapping[str, Any]] | None = None,
+    negative_control: Mapping[str, Any] | None = None,
+    negative_control_spec: Mapping[str, Any] | None = None,
+    negative_control_estimator_adapter: object | None = None,
+    negative_control_primary_outer_splits: Sequence[Mapping[str, Any]] | None = None,
+    negative_control_primary_propensity_predictions: Mapping[str, Any] | Sequence[Any] | None = None,
+    negative_control_primary_artifacts: Mapping[str, Any] | None = None,
+    **core_kwargs: Any,
+) -> list[dict[str, Any]]:
+    """Publish Core 10 plus refuter and negative-control diagnostics.
+
+    The four existing Core diagnostics remain the first records. When an
+    upstream eligibility or engine gate short-circuits, every added check is
+    explicitly ``NOT_RUN`` rather than being omitted or treated as passing.
+    """
+
+    from .refuters import run_refuter_battery as _run_refuter_battery
+    from .refuters import evaluate_negative_control as _evaluate_negative_control
+
+    core_results = evaluate_core_diagnostics(**core_kwargs)
+    upstream_trigger: str | None = None
+    for diagnostic in core_results:
+        if diagnostic.get("status") == "NOT_RUN":
+            upstream_trigger = str(
+                diagnostic.get("upstream_trigger", diagnostic.get("reason_code"))
+            )
+            break
+    if upstream_trigger is None:
+        for diagnostic_id in (
+            INHERITED_ELIGIBILITY_DIAGNOSTIC_ID,
+            OVERLAP_DIAGNOSTIC_ID,
+        ):
+            diagnostic = next(
+                (
+                    item
+                    for item in core_results
+                    if item.get("diagnostic_id") == diagnostic_id
+                ),
+                None,
+            )
+            if diagnostic is not None and diagnostic.get("status") in {"FAIL", "FAILED"}:
+                upstream_trigger = str(diagnostic.get("reason_code"))
+                break
+
+    run_kwargs = {
+        "rows": refuter_rows,
+        "primary_effect": refuter_primary_effect,
+        "estimator_adapter": refuter_estimator_adapter,
+        "seed_context": refuter_seed_context,
+        "primary_artifacts": refuter_primary_artifacts,
+        "analysis_run_id": core_kwargs.get("analysis_run_id"),
+        "bundle_manifest_hash": core_kwargs.get("bundle_manifest_hash"),
+        "evidence_refs": core_kwargs.get("evidence_refs", ()),
+        "input_refs": core_kwargs.get("input_refs", ()),
+    }
+    if upstream_trigger is not None:
+        run_kwargs["upstream_trigger"] = upstream_trigger
+    refuter_results = _run_refuter_battery(**run_kwargs)["diagnostics"]
+
+    negative_result = _evaluate_negative_control(
+        negative_control_rows,
+        negative_control=(
+            negative_control_spec if negative_control_spec is not None else negative_control
+        ),
+        estimator_adapter=negative_control_estimator_adapter,
+        primary_outer_splits=negative_control_primary_outer_splits,
+        primary_propensity_predictions=negative_control_primary_propensity_predictions,
+        primary_artifacts=negative_control_primary_artifacts,
+        analysis_run_id=core_kwargs.get("analysis_run_id"),
+        bundle_manifest_hash=core_kwargs.get("bundle_manifest_hash"),
+        evidence_refs=core_kwargs.get("evidence_refs", ()),
+        input_refs=core_kwargs.get("input_refs", ()),
+        upstream_trigger=upstream_trigger,
+    )
+    return [*core_results, *refuter_results, negative_result]
