@@ -2,6 +2,7 @@
 
 - Use the `main` branch only; do not create or work on separate branches.
 - When implementing a ticket, fulfill every acceptance criterion before claiming completion.
+- When implementing a ticket or issue, mark each acceptance-criteria checkbox `[x]` only after that criterion has been successfully completed; this is bookkeeping for clarification.
 
 ## CLI-first tooling
 
