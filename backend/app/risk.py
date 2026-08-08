@@ -88,6 +88,15 @@ ENGINE_CONFIGURATION_REGISTRY = {
     }
 }
 
+_LOAD_EXPOSURE_VARIANTS = (
+    ("primary", 0.67, 10, "nearest-rank-percentile-0.67.v1"),
+    ("stricter_threshold", 0.75, 10, "nearest-rank-percentile-0.75.v1"),
+    ("short_history", 0.67, 5, "nearest-rank-percentile-0.67.v1"),
+    ("long_history", 0.67, 20, "nearest-rank-percentile-0.67.v1"),
+)
+_PRIMARY_LOAD_MINIMUM_HISTORY = 10
+_LOAD_EXPOSURE_SCHEMA_VERSION = "supplier-load-exposure.v1"
+
 _SHA256_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
 _RISK_SIGNAL_CODES = (
     "RISK_SIGNAL_SCHEMA_UNSUPPORTED",
@@ -1156,6 +1165,814 @@ def resolve_frozen_promise(
         target_milestone_kind=target_milestone_kind,
         commitment_cutoff=commitment_cutoff,
     )
+
+
+def evaluate_supplier_load_exposure(
+    *,
+    current_load_count: int,
+    history_load_counts: list[int],
+    duration_basis: str,
+) -> dict[str, Any]:
+    """Evaluate the locked load threshold rules at their public seam."""
+    result: dict[str, Any] = {
+        "schema_version": _LOAD_EXPOSURE_SCHEMA_VERSION,
+        "duration_basis": duration_basis,
+        "current_load_count": current_load_count,
+        "valid_history_count": len(history_load_counts),
+        "history_load_counts": sorted(history_load_counts),
+        "variants": {},
+    }
+    if duration_basis not in {"CALENDAR_DAY", "ELAPSED_86400_SECOND_DAY"}:
+        result["primary"] = {
+            "state": "unresolved",
+            "eligibility_codes": ["SLIPPAGE_DURATION_BASIS_MIXED"],
+        }
+        result["variants"]["placebo_treatment_within_supplier"] = {
+            "state": "not_run",
+            "rule_id": "placebo-treatment-within-supplier.v1",
+            "replaces_primary": False,
+        }
+        return result
+    if (
+        not isinstance(current_load_count, int)
+        or isinstance(current_load_count, bool)
+        or current_load_count < 0
+        or any(
+            not isinstance(value, int)
+            or isinstance(value, bool)
+            or value < 0
+            for value in history_load_counts
+        )
+    ):
+        result["primary"] = {
+            "state": "unresolved",
+            "eligibility_codes": ["LOAD_SNAPSHOT_UNRESOLVABLE"],
+        }
+        result["variants"]["placebo_treatment_within_supplier"] = {
+            "state": "not_run",
+            "rule_id": "placebo-treatment-within-supplier.v1",
+            "replaces_primary": False,
+        }
+        return result
+
+    sorted_history = sorted(history_load_counts)
+    result["history_load_counts"] = sorted_history
+    for variant_id, percentile, minimum_history, rule_id in _LOAD_EXPOSURE_VARIANTS:
+        variant: dict[str, Any] = {
+            "state": "ineligible",
+            "variant_id": variant_id,
+            "threshold_rule_id": rule_id,
+            "percentile": percentile,
+            "minimum_history": minimum_history,
+            "valid_history_count": len(sorted_history),
+            "threshold_rank": None,
+            "threshold": None,
+            "high_load_exposure": None,
+            "load_percentile": None,
+            "eligibility_codes": [],
+            "replaces_primary": variant_id == "primary",
+        }
+        if len(sorted_history) < minimum_history:
+            variant["eligibility_codes"] = ["SUPPLIER_HISTORY_INSUFFICIENT"]
+        else:
+            rank = math.ceil(percentile * len(sorted_history))
+            threshold = sorted_history[rank - 1]
+            variant.update(
+                {
+                    "state": "present",
+                    "threshold_rank": rank,
+                    "threshold": threshold,
+                    "high_load_exposure": current_load_count > threshold,
+                    "load_percentile": (
+                        sum(value < current_load_count for value in sorted_history)
+                        + 0.5
+                        * sum(value == current_load_count for value in sorted_history)
+                    )
+                    / len(sorted_history),
+                }
+            )
+        result[variant_id] = variant
+        result["variants"][variant_id] = variant
+
+    continuous = {
+        "state": "ineligible",
+        "variant_id": "continuous_load",
+        "rule_id": "history-midranks.v1",
+        "minimum_history": _PRIMARY_LOAD_MINIMUM_HISTORY,
+        "valid_history_count": len(sorted_history),
+        "load_percentile": None,
+        "reuses_primary_first_exposure_block": True,
+        "eligibility_codes": [],
+        "replaces_primary": False,
+    }
+    if len(sorted_history) < _PRIMARY_LOAD_MINIMUM_HISTORY:
+        continuous["eligibility_codes"] = ["SUPPLIER_HISTORY_INSUFFICIENT"]
+    else:
+        continuous["state"] = "present"
+        continuous["load_percentile"] = result["primary"]["load_percentile"]
+    result["variants"]["continuous_load"] = continuous
+    result["variants"]["placebo_treatment_within_supplier"] = {
+        "state": "not_run",
+        "variant_id": "placebo_treatment_within_supplier",
+        "rule_id": "placebo-treatment-within-supplier.v1",
+        "replaces_primary": False,
+        "eligibility_codes": [],
+    }
+    return result
+
+
+def _event_reference(event: Mapping[str, Any], field_name: str) -> str | None:
+    raw = event.get(field_name)
+    if isinstance(raw, str) and raw:
+        return raw
+    value = _field_from_record(raw)
+    if value.get("state") == "present" and isinstance(value.get("value"), str):
+        return str(value["value"])
+    return None
+
+
+def _visible_terminal_events(
+    events: list[Mapping[str, Any]],
+    *,
+    cutoff: _Temporal,
+    target_milestone_kind: str,
+) -> tuple[list[Mapping[str, Any]], str | None]:
+    visible: dict[str, Mapping[str, Any]] = {}
+    for event in events:
+        kind = event.get("kind")
+        if kind not in {"milestone_reached", "cancelled"}:
+            continue
+        if kind == "milestone_reached":
+            milestone = _field_from_record(event.get("milestone_kind"))
+            if milestone.get("state") == "present":
+                if milestone.get("value") != target_milestone_kind:
+                    continue
+            elif milestone.get("state") in {"missing", "not_applicable"}:
+                known = _temporal_from_record(event.get("clocks", {}).get("known_at"))
+                known_order = _compare(known, cutoff)
+                if known_order == 1:
+                    continue
+                return [], "LOAD_SNAPSHOT_UNRESOLVABLE"
+            else:
+                known = _temporal_from_record(event.get("clocks", {}).get("known_at"))
+                if _compare(known, cutoff) == 1:
+                    continue
+                return [], "LOAD_SNAPSHOT_UNRESOLVABLE"
+
+        event_id = event.get("event_id")
+        if not isinstance(event_id, str) or not event_id or event_id in visible:
+            return [], "LOAD_SNAPSHOT_UNRESOLVABLE"
+        known = _temporal_from_record(event.get("clocks", {}).get("known_at"))
+        known_order = _compare(known, cutoff)
+        if known_order is None:
+            return [], "LOAD_SNAPSHOT_UNRESOLVABLE"
+        if known_order == 1:
+            continue
+        occurred = _temporal_from_record(event.get("clocks", {}).get("occurred_at"))
+        occurred_order = _compare(occurred, cutoff)
+        if occurred_order is None or _compare(known, occurred) == -1:
+            return [], "LOAD_SNAPSHOT_UNRESOLVABLE"
+        visible[event_id] = event
+
+    superseded: set[str] = set()
+    for event_id, event in visible.items():
+        parent_id = _event_reference(event, "supersedes_event_id")
+        raw_parent = event.get("supersedes_event_id")
+        parent_state = _field_from_record(raw_parent).get("state")
+        if isinstance(raw_parent, str) and raw_parent:
+            parent_state = "present"
+        if parent_state in {"missing", "not_applicable"}:
+            continue
+        if parent_state != "present" or parent_id is None:
+            return [], "LOAD_SNAPSHOT_UNRESOLVABLE"
+        parent = visible.get(parent_id)
+        if (
+            parent is None
+            or parent.get("kind") != event.get("kind")
+            or parent.get("order_line_id") != event.get("order_line_id")
+        ):
+            return [], "LOAD_SNAPSHOT_UNRESOLVABLE"
+        superseded.add(parent_id)
+
+    return [event for event_id, event in visible.items() if event_id not in superseded], None
+
+
+def _load_snapshot_failure(
+    *,
+    code: str,
+    duration_basis: str,
+    subject_id: str,
+    subject_supplier_id: str,
+    decision_cutoff: _Temporal,
+) -> dict[str, Any]:
+    identity = {
+        "subject_id": subject_id,
+        "subject_supplier_id": subject_supplier_id,
+        "decision_cutoff": decision_cutoff.field,
+        "duration_basis": duration_basis,
+        "eligibility_codes": [code],
+    }
+    return {
+        "schema_version": "supplier-load-snapshot.v1",
+        "state": "unresolved",
+        "duration_basis": duration_basis,
+        "decision_cutoff": decision_cutoff.field,
+        "concurrent_load_count": None,
+        "contributing_order_line_ids": [],
+        "lineage_refs": [],
+        "eligibility_codes": [code],
+        "snapshot_hash": _sha256(identity),
+    }
+
+
+def _has_commitment_at_or_before(
+    events: list[Mapping[str, Any]],
+    cutoff: _Temporal,
+) -> bool | None:
+    commitments = [event for event in events if event.get("kind") == "committed"]
+    if not commitments:
+        return False
+    candidate = False
+    for commitment in commitments:
+        occurred = _temporal_from_record(
+            commitment.get("clocks", {}).get("occurred_at")
+        )
+        order = _compare(occurred, cutoff)
+        if order is None:
+            return None
+        candidate = candidate or order in {-1, 0}
+    return candidate
+
+
+def resolve_supplier_load_snapshot(
+    lineage: Mapping[str, Any],
+    *,
+    subject_id: str,
+    subject_supplier_id: str,
+    decision_cutoff: _Temporal,
+    target_milestone_kind: str,
+    duration_basis: str,
+) -> dict[str, Any]:
+    """Resolve one canonical point-in-time Supplier Load Snapshot."""
+    if duration_basis not in {"CALENDAR_DAY", "ELAPSED_86400_SECOND_DAY"}:
+        return _load_snapshot_failure(
+            code="SLIPPAGE_DURATION_BASIS_MIXED",
+            duration_basis=duration_basis,
+            subject_id=subject_id,
+            subject_supplier_id=subject_supplier_id,
+            decision_cutoff=decision_cutoff,
+        )
+    if target_milestone_kind not in {"supplier_completion", "supplier_handoff"}:
+        return _load_snapshot_failure(
+            code="LOAD_SNAPSHOT_UNRESOLVABLE",
+            duration_basis=duration_basis,
+            subject_id=subject_id,
+            subject_supplier_id=subject_supplier_id,
+            decision_cutoff=decision_cutoff,
+        )
+    if (
+        not subject_id
+        or not subject_supplier_id
+        or decision_cutoff.field.get("state") != "present"
+    ):
+        return _load_snapshot_failure(
+            code="LOAD_SNAPSHOT_UNRESOLVABLE",
+            duration_basis=duration_basis,
+            subject_id=subject_id,
+            subject_supplier_id=subject_supplier_id,
+            decision_cutoff=decision_cutoff,
+        )
+
+    contributing: list[str] = []
+    evidence_refs: set[str] = set()
+    order_lines = lineage.get("order_lines", [])
+    if not isinstance(order_lines, list):
+        return _load_snapshot_failure(
+            code="LOAD_SNAPSHOT_UNRESOLVABLE",
+            duration_basis=duration_basis,
+            subject_id=subject_id,
+            subject_supplier_id=subject_supplier_id,
+            decision_cutoff=decision_cutoff,
+        )
+    events_by_line: dict[str, list[Mapping[str, Any]]] = {}
+    for event in lineage.get("order_line_events", []):
+        if not isinstance(event, Mapping):
+            continue
+        order_line_id = event.get("order_line_id")
+        if isinstance(order_line_id, str) and order_line_id:
+            events_by_line.setdefault(order_line_id, []).append(event)
+
+    seen_order_line_ids: set[str] = set()
+    for order_line in order_lines:
+        if not isinstance(order_line, Mapping):
+            return _load_snapshot_failure(
+                code="LOAD_SNAPSHOT_UNRESOLVABLE",
+                duration_basis=duration_basis,
+                subject_id=subject_id,
+                subject_supplier_id=subject_supplier_id,
+                decision_cutoff=decision_cutoff,
+            )
+        order_line_id = order_line.get("order_line_id")
+        if not isinstance(order_line_id, str) or not order_line_id:
+            return _load_snapshot_failure(
+                code="LOAD_SNAPSHOT_UNRESOLVABLE",
+                duration_basis=duration_basis,
+                subject_id=subject_id,
+                subject_supplier_id=subject_supplier_id,
+                decision_cutoff=decision_cutoff,
+            )
+        if order_line_id in seen_order_line_ids:
+            return _load_snapshot_failure(
+                code="LOAD_SNAPSHOT_UNRESOLVABLE",
+                duration_basis=duration_basis,
+                subject_id=subject_id,
+                subject_supplier_id=subject_supplier_id,
+                decision_cutoff=decision_cutoff,
+            )
+        seen_order_line_ids.add(order_line_id)
+        if order_line_id == subject_id:
+            continue
+
+        line_events = events_by_line.get(order_line_id, [])
+        candidate = _has_commitment_at_or_before(line_events, decision_cutoff)
+        if candidate is None:
+            return _load_snapshot_failure(
+                code="COMMITMENT_CUTOFF_UNUSABLE",
+                duration_basis=duration_basis,
+                subject_id=subject_id,
+                subject_supplier_id=subject_supplier_id,
+                decision_cutoff=decision_cutoff,
+            )
+        if not candidate:
+            continue
+        commitment, commitment_error = _resolve_commitment_event(
+            line_events,
+            known_cutoff=decision_cutoff,
+        )
+        if commitment is None:
+            return _load_snapshot_failure(
+                code=commitment_error or "COMMITMENT_CUTOFF_UNUSABLE",
+                duration_basis=duration_basis,
+                subject_id=subject_id,
+                subject_supplier_id=subject_supplier_id,
+                decision_cutoff=decision_cutoff,
+            )
+        commitment_occurred = _temporal_from_record(
+            commitment.get("clocks", {}).get("occurred_at")
+        )
+        commitment_known = _temporal_from_record(
+            commitment.get("clocks", {}).get("known_at")
+        )
+        if _compare(commitment_occurred, decision_cutoff) is None:
+            return _load_snapshot_failure(
+                code="LOAD_SNAPSHOT_UNRESOLVABLE",
+                duration_basis=duration_basis,
+                subject_id=subject_id,
+                subject_supplier_id=subject_supplier_id,
+                decision_cutoff=decision_cutoff,
+            )
+        if _compare(commitment_known, decision_cutoff) is None:
+            return _load_snapshot_failure(
+                code="COMMITMENT_CUTOFF_UNUSABLE",
+                duration_basis=duration_basis,
+                subject_id=subject_id,
+                subject_supplier_id=subject_supplier_id,
+                decision_cutoff=decision_cutoff,
+            )
+        if (
+            _compare(commitment_occurred, decision_cutoff) != -1
+            or _compare(commitment_known, decision_cutoff) == 1
+        ):
+            continue
+
+        supplier = _subject_field_as_of(
+            lineage,
+            order_line_id=order_line_id,
+            field_path="supplier_id",
+            canonical_value={"state": "present", "value": order_line.get("supplier_id")},
+            cutoff=decision_cutoff,
+        )
+        if supplier.get("state") != "present":
+            return _load_snapshot_failure(
+                code="LOAD_SNAPSHOT_UNRESOLVABLE",
+                duration_basis=duration_basis,
+                subject_id=subject_id,
+                subject_supplier_id=subject_supplier_id,
+                decision_cutoff=decision_cutoff,
+            )
+        if supplier.get("value") != subject_supplier_id:
+            continue
+
+        terminal_events, terminal_error = _visible_terminal_events(
+            line_events,
+            cutoff=decision_cutoff,
+            target_milestone_kind=target_milestone_kind,
+        )
+        if terminal_error is not None:
+            return _load_snapshot_failure(
+                code=terminal_error,
+                duration_basis=duration_basis,
+                subject_id=subject_id,
+                subject_supplier_id=subject_supplier_id,
+                decision_cutoff=decision_cutoff,
+            )
+        closed = False
+        for terminal in terminal_events:
+            occurred = _temporal_from_record(
+                terminal.get("clocks", {}).get("occurred_at")
+            )
+            relative_to_commitment = _compare(occurred, commitment_occurred)
+            relative_to_cutoff = _compare(occurred, decision_cutoff)
+            if relative_to_commitment is None or relative_to_cutoff is None:
+                return _load_snapshot_failure(
+                    code="LOAD_SNAPSHOT_UNRESOLVABLE",
+                    duration_basis=duration_basis,
+                    subject_id=subject_id,
+                    subject_supplier_id=subject_supplier_id,
+                    decision_cutoff=decision_cutoff,
+                )
+            if relative_to_commitment != 1:
+                return _load_snapshot_failure(
+                    code="LOAD_SNAPSHOT_UNRESOLVABLE",
+                    duration_basis=duration_basis,
+                    subject_id=subject_id,
+                    subject_supplier_id=subject_supplier_id,
+                    decision_cutoff=decision_cutoff,
+                )
+            if relative_to_cutoff in {-1, 0}:
+                closed = True
+                break
+        if not closed:
+            contributing.append(order_line_id)
+            event_ids = [
+                str(item.get("event_id"))
+                for item in line_events
+                if isinstance(item.get("event_id"), str)
+            ]
+            refs = _lineage_observation_refs(
+                lineage,
+                order_line_id,
+                event_ids,
+                known_at=decision_cutoff,
+            )
+            evidence_refs.update(refs)
+            evidence_refs.update(_lineage_evidence_refs(lineage, refs))
+
+    contributing.sort()
+    identity = {
+        "subject_id": subject_id,
+        "subject_supplier_id": subject_supplier_id,
+        "decision_cutoff": decision_cutoff.field,
+        "target_milestone_kind": target_milestone_kind,
+        "duration_basis": duration_basis,
+        "contributing_order_line_ids": contributing,
+        "lineage_refs": sorted(evidence_refs),
+    }
+    return {
+        "schema_version": "supplier-load-snapshot.v1",
+        "state": "present",
+        "duration_basis": duration_basis,
+        "decision_cutoff": decision_cutoff.field,
+        "concurrent_load_count": len(contributing),
+        "contributing_order_line_ids": contributing,
+        "lineage_refs": sorted(evidence_refs),
+        "eligibility_codes": [],
+        "snapshot_hash": _sha256(identity),
+    }
+
+
+def _unresolved_load_exposure(
+    *,
+    trigger_mode: str,
+    subject_id: str,
+    subject_supplier_id: str,
+    decision_cutoff: _Temporal,
+    duration_basis: str,
+    snapshot: Mapping[str, Any],
+) -> dict[str, Any]:
+    code_values = snapshot.get("eligibility_codes", [])
+    codes = sorted(
+        {
+            str(code)
+            for code in code_values
+            if isinstance(code, str) and code
+        }
+    )
+    result: dict[str, Any] = {
+        "schema_version": _LOAD_EXPOSURE_SCHEMA_VERSION,
+        "state": "unresolved",
+        "trigger_mode": trigger_mode,
+        "subject_id": subject_id,
+        "subject_supplier_id": subject_supplier_id,
+        "decision_cutoff": decision_cutoff.field,
+        "cutoff_source": (
+            "proactive_decision"
+            if trigger_mode == "proactive"
+            else "canonical_commitment"
+        ),
+        "duration_basis": duration_basis,
+        "eligibility_codes": codes,
+        "history": {
+            "state": "unavailable",
+            "load_counts": [],
+            "valid_history_count": 0,
+            "qualifying_snapshots": [],
+            "identity_hash": _sha256([]),
+            "selector": {
+                "selector_version": HISTORY_LOOKBACK_SELECTOR_VERSION,
+                "selected_identity_hash": _sha256([]),
+                "selected_count": 0,
+            },
+            "eligibility_codes": codes,
+        },
+        "variants": {
+            "placebo_treatment_within_supplier": {
+                "state": "not_run",
+                "variant_id": "placebo_treatment_within_supplier",
+                "rule_id": "placebo-treatment-within-supplier.v1",
+                "replaces_primary": False,
+                "eligibility_codes": [],
+            }
+        },
+    }
+    if trigger_mode == "proactive":
+        result["provisional_load_snapshot"] = _preview_snapshot(snapshot)
+    else:
+        result["load_snapshot"] = snapshot
+    result["derivation_hash"] = _sha256(result)
+    return result
+
+
+def _preview_variant(variant: Mapping[str, Any]) -> dict[str, Any]:
+    preview = deepcopy(dict(variant))
+    if "high_load_exposure" in preview:
+        preview["provisional_high_load_preview"] = preview.pop("high_load_exposure")
+    return preview
+
+
+def _preview_snapshot(snapshot: Mapping[str, Any]) -> dict[str, Any]:
+    preview = deepcopy(dict(snapshot))
+    identities = preview.pop("contributing_order_line_ids", [])
+    preview["contributing_canonical_line_identities"] = identities
+    return preview
+
+
+def _preview_history(history: Mapping[str, Any]) -> dict[str, Any]:
+    preview = deepcopy(dict(history))
+    snapshots = []
+    for snapshot in preview.get("qualifying_snapshots", []):
+        if not isinstance(snapshot, Mapping):
+            continue
+        item = dict(snapshot)
+        if "order_line_id" in item:
+            item["canonical_line_identity"] = item.pop("order_line_id")
+        snapshots.append(item)
+    preview["qualifying_snapshots"] = snapshots
+    return preview
+
+
+def derive_supplier_load_exposure(
+    lineage: Mapping[str, Any],
+    *,
+    subject_id: str,
+    subject_supplier_id: str,
+    decision_cutoff: _Temporal,
+    target_milestone_kind: str,
+    duration_basis: str,
+    trigger_mode: str,
+) -> dict[str, Any]:
+    """Derive a canonical exposure or a preview from frozen lineage facts."""
+    snapshot = resolve_supplier_load_snapshot(
+        lineage,
+        subject_id=subject_id,
+        subject_supplier_id=subject_supplier_id,
+        decision_cutoff=decision_cutoff,
+        target_milestone_kind=target_milestone_kind,
+        duration_basis=duration_basis,
+    )
+    if snapshot.get("state") != "present":
+        return _unresolved_load_exposure(
+            trigger_mode=trigger_mode,
+            subject_id=subject_id,
+            subject_supplier_id=subject_supplier_id,
+            decision_cutoff=decision_cutoff,
+            duration_basis=duration_basis,
+            snapshot=snapshot,
+        )
+
+    lines_by_id: dict[str, Mapping[str, Any]] = {}
+    for order_line in lineage.get("order_lines", []):
+        if not isinstance(order_line, Mapping):
+            continue
+        order_line_id = order_line.get("order_line_id")
+        if isinstance(order_line_id, str) and order_line_id:
+            lines_by_id[order_line_id] = order_line
+    events_by_line: dict[str, list[Mapping[str, Any]]] = {}
+    for event in lineage.get("order_line_events", []):
+        if not isinstance(event, Mapping):
+            continue
+        order_line_id = event.get("order_line_id")
+        if isinstance(order_line_id, str) and order_line_id:
+            events_by_line.setdefault(order_line_id, []).append(event)
+
+    history: list[dict[str, Any]] = []
+    candidate_ids: list[str] = []
+    history_codes: set[str] = set()
+    for order_line_id, order_line in lines_by_id.items():
+        if trigger_mode == "reactive" and order_line_id == subject_id:
+            continue
+        line_events = events_by_line.get(order_line_id, [])
+        candidate = _has_commitment_at_or_before(line_events, decision_cutoff)
+        if candidate is None:
+            history_codes.add("COMMITMENT_CUTOFF_UNUSABLE")
+            continue
+        if not candidate:
+            continue
+        commitment, commitment_error = _resolve_commitment_event(
+            line_events,
+            known_cutoff=decision_cutoff,
+        )
+        if commitment is None:
+            history_codes.add(commitment_error or "COMMITMENT_CUTOFF_UNUSABLE")
+            continue
+
+        commitment_cutoff = _temporal_from_record(
+            commitment.get("clocks", {}).get("occurred_at")
+        )
+        commitment_known = _temporal_from_record(
+            commitment.get("clocks", {}).get("known_at")
+        )
+        commitment_order = _compare(commitment_cutoff, decision_cutoff)
+        known_order = _compare(commitment_known, decision_cutoff)
+        if commitment_order is None or known_order is None:
+            history_codes.add("COMMITMENT_CUTOFF_UNUSABLE")
+            continue
+        if commitment_order != -1 or known_order == 1:
+            continue
+
+        supplier = _subject_field_as_of(
+            lineage,
+            order_line_id=order_line_id,
+            field_path="supplier_id",
+            canonical_value={
+                "state": "present",
+                "value": order_line.get("supplier_id"),
+            },
+            cutoff=commitment_cutoff,
+        )
+        if supplier.get("state") != "present":
+            history_codes.add("LOAD_SNAPSHOT_UNRESOLVABLE")
+            continue
+        if supplier.get("value") != subject_supplier_id:
+            continue
+
+        candidate_ids.append(order_line_id)
+        prior_snapshot = resolve_supplier_load_snapshot(
+            lineage,
+            subject_id=order_line_id,
+            subject_supplier_id=subject_supplier_id,
+            decision_cutoff=commitment_cutoff,
+            target_milestone_kind=target_milestone_kind,
+            duration_basis=duration_basis,
+        )
+        if prior_snapshot.get("state") != "present":
+            history_codes.update(
+                str(code)
+                for code in prior_snapshot.get("eligibility_codes", [])
+                if isinstance(code, str) and code
+            )
+            continue
+        history.append(
+            {
+                "order_line_id": order_line_id,
+                "commitment_cutoff": commitment_cutoff.field,
+                "concurrent_load_count": prior_snapshot["concurrent_load_count"],
+                "snapshot_hash": prior_snapshot["snapshot_hash"],
+                "lineage_refs": prior_snapshot.get("lineage_refs", []),
+            }
+        )
+
+    history.sort(
+        key=lambda item: (
+            _canonical_json(item["commitment_cutoff"]),
+            item["order_line_id"],
+        )
+    )
+    history_counts = [int(item["concurrent_load_count"]) for item in history]
+    history_identity = {
+        "subject_id": subject_id,
+        "subject_supplier_id": subject_supplier_id,
+        "decision_cutoff": decision_cutoff.field,
+        "duration_basis": duration_basis,
+        "qualifying_snapshots": history,
+    }
+    history_hash = _sha256(history_identity)
+    rule_result = evaluate_supplier_load_exposure(
+        current_load_count=int(snapshot["concurrent_load_count"]),
+        history_load_counts=history_counts,
+        duration_basis=duration_basis,
+    )
+    history_state = "present" if not history_codes else "present_with_exclusions"
+    history_output = {
+        "state": history_state,
+        "load_counts": sorted(history_counts),
+        "valid_history_count": len(history),
+        "qualifying_snapshots": history,
+        "identity_hash": history_hash,
+        "selector": {
+            "selector_version": HISTORY_LOOKBACK_SELECTOR_VERSION,
+            "selected_identity_hash": _sha256(sorted(candidate_ids)),
+            "selected_count": len(candidate_ids),
+        },
+        "eligibility_codes": sorted(history_codes),
+    }
+    variants = {
+        variant_id: {
+            **deepcopy(dict(variant)),
+            "duration_basis": duration_basis,
+            "history_identity_hash": history_hash,
+        }
+        for variant_id, variant in rule_result["variants"].items()
+    }
+    primary = {
+        **deepcopy(dict(rule_result["primary"])),
+        "duration_basis": duration_basis,
+        "history_identity_hash": history_hash,
+    }
+    if trigger_mode == "proactive":
+        primary = _preview_variant(primary)
+        variants = {
+            variant_id: _preview_variant(variant)
+            for variant_id, variant in variants.items()
+        }
+        history_output = _preview_history(history_output)
+
+    root: dict[str, Any] = {
+        "schema_version": _LOAD_EXPOSURE_SCHEMA_VERSION,
+        "state": "present",
+        "trigger_mode": trigger_mode,
+        "subject_id": subject_id,
+        "subject_supplier_id": subject_supplier_id,
+        "decision_cutoff": decision_cutoff.field,
+        "cutoff_source": (
+            "proactive_decision"
+            if trigger_mode == "proactive"
+            else "canonical_commitment"
+        ),
+        "duration_basis": duration_basis,
+        "history": history_output,
+        "valid_history_count": len(history),
+        "primary": primary,
+        "variants": variants,
+        "eligibility_codes": sorted(
+            set(history_codes)
+            | {
+                str(code)
+                for code in primary.get("eligibility_codes", [])
+                if isinstance(code, str)
+            }
+        ),
+    }
+    if trigger_mode == "proactive":
+        root.update(
+            {
+                "provisional_load_snapshot": _preview_snapshot(snapshot),
+                "provisional_concurrent_load_count": snapshot[
+                    "concurrent_load_count"
+                ],
+                "provisional_load_percentile": primary.get("load_percentile"),
+                "provisional_high_load_preview": primary.get(
+                    "provisional_high_load_preview"
+                ),
+            }
+        )
+    else:
+        root.update(
+            {
+                "load_snapshot": snapshot,
+                "concurrent_load_count": snapshot["concurrent_load_count"],
+                "load_percentile": primary.get("load_percentile"),
+                "high_load_exposure": primary.get("high_load_exposure"),
+            }
+        )
+    root["selector"] = {
+        "history_lookback": history_output["selector"],
+        "duration_basis": duration_basis,
+    }
+    root["hashes"] = {
+        "load_snapshot": snapshot["snapshot_hash"],
+        "qualifying_history": history_hash,
+        "derivation_inputs": _sha256(
+            {
+                "snapshot_hash": snapshot["snapshot_hash"],
+                "history_hash": history_hash,
+                "selector": root["selector"],
+                "duration_basis": duration_basis,
+            }
+        ),
+    }
+    root["derivation_hash"] = _sha256(root)
+    return root
 
 
 def _duration_basis_at_cutoff(
@@ -2538,6 +3355,7 @@ class ReactiveInvestigationMixin:
         subject_rejected = False
         selected_ids: list[str] = []
         load_snapshot_error: str | None = None
+        load_exposure: dict[str, Any] | None = None
         duration_basis: str | None = None
         duration_basis_evidence: dict[str, Any] = {
             "counts": {},
@@ -2883,6 +3701,38 @@ class ReactiveInvestigationMixin:
                     )
                 )
                 subject_rejected = True
+            elif duration_basis is not None:
+                load_exposure = derive_supplier_load_exposure(
+                    lineage,
+                    subject_id=canonical_order_line_id,
+                    subject_supplier_id=str(order_line.get("supplier_id", "")),
+                    decision_cutoff=commitment_cutoff,
+                    target_milestone_kind=signal.target_milestone_kind,
+                    duration_basis=duration_basis,
+                    trigger_mode="reactive",
+                )
+                exposure_codes = load_exposure.get("eligibility_codes", [])
+                blocking_exposure_codes = {
+                    str(code)
+                    for code in exposure_codes
+                    if isinstance(code, str)
+                }.intersection(
+                    {"LOAD_SNAPSHOT_UNRESOLVABLE", "COMMITMENT_CUTOFF_UNUSABLE"}
+                )
+                if blocking_exposure_codes:
+                    code = sorted(blocking_exposure_codes)[0]
+                    findings.append(
+                        _finding(
+                            code=code,
+                            severity="error",
+                            disposition="reject",
+                            affected_refs=[canonical_order_line_id],
+                            message="The point-in-time supplier load derivation contains an unresolved membership fact.",
+                            remediation="Repair the canonical clocks and field-level lineage before retrying.",
+                            phase=9,
+                        )
+                    )
+                    subject_rejected = True
 
         if (
             lineage is not None
@@ -3031,6 +3881,7 @@ class ReactiveInvestigationMixin:
                 "canonical_slippage_duration_basis": duration_basis,
                 "causal_question_version": CAUSAL_QUESTION_VERSION,
                 "engine_configuration_ref": ENGINE_CONFIGURATION_REF,
+                "supplier_load_exposure": load_exposure,
                 "estimator_window_ref": _window_ref(
                     selector_version=configuration[
                         "estimator_window_selector_version"
@@ -3384,6 +4235,7 @@ class ReactiveInvestigationMixin:
 
         selected_ids: list[str] = []
         load_snapshot_error: str | None = None
+        load_exposure: dict[str, Any] | None = None
         duration_basis: str | None = None
         duration_basis_evidence: dict[str, Any] = {
             "counts": {},
@@ -3420,6 +4272,37 @@ class ReactiveInvestigationMixin:
                             phase=9,
                         )
                     )
+                elif duration_basis is not None:
+                    load_exposure = derive_supplier_load_exposure(
+                        lineage,
+                        subject_id=preview_subject_digest,
+                        subject_supplier_id=str(resolved_supplier_field.get("value")),
+                        decision_cutoff=decision,
+                        target_milestone_kind=str(target_field.get("value")),
+                        duration_basis=duration_basis,
+                        trigger_mode="proactive",
+                    )
+                    exposure_codes = load_exposure.get("eligibility_codes", [])
+                    blocking_exposure_codes = {
+                        str(code)
+                        for code in exposure_codes
+                        if isinstance(code, str)
+                    }.intersection(
+                        {"LOAD_SNAPSHOT_UNRESOLVABLE", "COMMITMENT_CUTOFF_UNUSABLE"}
+                    )
+                    if blocking_exposure_codes:
+                        code = sorted(blocking_exposure_codes)[0]
+                        findings.append(
+                            _finding(
+                                code=code,
+                                severity="error",
+                                disposition="reject",
+                                affected_refs=[preview_subject_digest],
+                                message="The point-in-time supplier preview contains an unresolved membership fact.",
+                                remediation="Repair the frozen canonical clocks and retry the proposal.",
+                                phase=9,
+                            )
+                        )
 
         if CAUSAL_QUESTION_VERSION not in CAUSAL_QUESTION_REGISTRY:
             findings.append(
@@ -3496,6 +4379,7 @@ class ReactiveInvestigationMixin:
                 "canonical_slippage_duration_basis": duration_basis,
                 "causal_question_version": CAUSAL_QUESTION_VERSION,
                 "engine_configuration_ref": ENGINE_CONFIGURATION_REF,
+                "supplier_load_exposure": load_exposure,
                 "estimator_window_ref": _window_ref(
                     selector_version=configuration["estimator_window_selector_version"],
                     selected_ids=selected_ids,

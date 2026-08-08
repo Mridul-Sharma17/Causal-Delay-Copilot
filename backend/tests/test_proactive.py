@@ -73,6 +73,13 @@ def test_valid_proposal_creates_an_immutable_preview_request_and_replays(
         assert request["prediction_metadata"]["state"] == "not_applicable"
         assert "prediction_metadata" not in request["causal_engine_input"]
         assert "score_value" not in json.dumps(request["causal_engine_input"])
+        exposure = request["causal_engine_input"]["supplier_load_exposure"]
+        assert exposure["trigger_mode"] == "proactive"
+        assert exposure["cutoff_source"] == "proactive_decision"
+        assert exposure["provisional_load_snapshot"]["state"] == "present"
+        assert "load_snapshot" not in exposure
+        assert "high_load_exposure" not in json.dumps(exposure)
+        assert "order_line_id" not in json.dumps(exposure)
 
         lineage = client.get(f"/api/datasets/{dataset_version_id}/lineage")
         assert lineage.status_code == 200

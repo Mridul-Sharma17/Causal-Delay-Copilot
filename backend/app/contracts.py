@@ -893,6 +893,7 @@ class CausalEngineInputResponse(BaseModel):
     ]
     causal_question_version: str
     engine_configuration_ref: str
+    supplier_load_exposure: dict[str, Any] | None = None
     estimator_window_ref: CausalWindowResponse
     history_lookback_ref: CausalWindowResponse
     historical_population_digest: str

@@ -134,6 +134,14 @@ def test_reactive_signal_creates_one_immutable_request_and_replays_exactly(
             "history-lookback.v1"
         )
         assert projection["historical_population_digest"].startswith("sha256:")
+        exposure = projection["supplier_load_exposure"]
+        assert exposure["trigger_mode"] == "reactive"
+        assert exposure["cutoff_source"] == "canonical_commitment"
+        assert exposure["load_snapshot"]["state"] == "present"
+        assert exposure["primary"]["state"] == "ineligible"
+        assert exposure["primary"]["eligibility_codes"] == [
+            "SUPPLIER_HISTORY_INSUFFICIENT"
+        ]
 
         lineage_response = client.get(f"/api/datasets/{dataset_version_id}/lineage")
         assert lineage_response.status_code == 200

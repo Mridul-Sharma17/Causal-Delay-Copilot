@@ -213,6 +213,8 @@ export type CausalWindow = {
   };
 };
 
+export type SupplierLoadExposure = Record<string, unknown>;
+
 export type CausalEngineInput = {
   causal_input_schema_version: "causal-input-projection.v2";
   dataset_version_id: string;
@@ -230,6 +232,7 @@ export type CausalEngineInput = {
     | "ELAPSED_86400_SECOND_DAY";
   causal_question_version: string;
   engine_configuration_ref: string;
+  supplier_load_exposure?: SupplierLoadExposure;
   estimator_window_ref: CausalWindow;
   history_lookback_ref: CausalWindow;
   historical_population_digest: string;
@@ -943,6 +946,8 @@ function parseCausalEngineInput(value: unknown): CausalEngineInput {
       value.canonical_slippage_duration_basis !== "ELAPSED_86400_SECOND_DAY") ||
     typeof value.causal_question_version !== "string" ||
     typeof value.engine_configuration_ref !== "string" ||
+    (value.supplier_load_exposure !== undefined &&
+      !isRecord(value.supplier_load_exposure)) ||
     typeof value.historical_population_digest !== "string" ||
     !Array.isArray(value.analytical_fact_lineage_refs) ||
     !value.analytical_fact_lineage_refs.every((item) => typeof item === "string")
@@ -969,6 +974,7 @@ function parseCausalEngineInput(value: unknown): CausalEngineInput {
     canonical_slippage_duration_basis: value.canonical_slippage_duration_basis,
     causal_question_version: value.causal_question_version,
     engine_configuration_ref: value.engine_configuration_ref,
+    supplier_load_exposure: value.supplier_load_exposure,
     estimator_window_ref: parseCausalWindow(value.estimator_window_ref),
     history_lookback_ref: parseCausalWindow(value.history_lookback_ref),
     historical_population_digest: value.historical_population_digest,
