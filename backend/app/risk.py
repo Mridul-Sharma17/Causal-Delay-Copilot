@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import base64
 import json
 import math
@@ -96,6 +96,10 @@ _LOAD_EXPOSURE_VARIANTS = (
 )
 _PRIMARY_LOAD_MINIMUM_HISTORY = 10
 _LOAD_EXPOSURE_SCHEMA_VERSION = "supplier-load-exposure.v1"
+_SUPPLIER_MILESTONE_OUTCOME_SCHEMA_VERSION = "supplier-milestone-slippage.v1"
+_SUPPORTED_SUPPLIER_MILESTONE_KINDS = frozenset(
+    {"supplier_completion", "supplier_handoff"}
+)
 
 _SHA256_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
 _RISK_SIGNAL_CODES = (
@@ -116,6 +120,12 @@ _RISK_SIGNAL_CODES = (
     "CAUSAL_QUESTION_VERSION_UNAVAILABLE",
     "ENGINE_CONFIGURATION_UNAVAILABLE",
     "SLIPPAGE_DURATION_BASIS_MIXED",
+    "TARGET_MILESTONE_UNSUPPORTED",
+    "FOLLOW_UP_IMMATURE",
+    "FOLLOW_UP_UNRESOLVABLE",
+    "OUTCOME_UNOBSERVED",
+    "OUTCOME_TEMPORALLY_INVALID",
+    "CANCELLED_BEFORE_MILESTONE",
     "PREDICTOR_ARTIFACT_UNAVAILABLE",
     "PREDICTIVE_ATTRIBUTION_UNAVAILABLE",
     "PROACTIVE_SCHEMA_UNSUPPORTED",
@@ -366,6 +376,12 @@ _RECOVERY_ACTIONS = {
     "CAUSAL_QUESTION_VERSION_UNAVAILABLE": "RESTORE_VERSIONED_CORE_CONFIGURATION",
     "ENGINE_CONFIGURATION_UNAVAILABLE": "RESTORE_VERSIONED_CORE_CONFIGURATION",
     "SLIPPAGE_DURATION_BASIS_MIXED": "WAIT_FOR_ONE_RELEASED_DURATION_BASIS",
+    "TARGET_MILESTONE_UNSUPPORTED": "USE_CONFIGURED_SUPPLIER_MILESTONE_TARGET",
+    "FOLLOW_UP_IMMATURE": "WAIT_FOR_THE_DECLARED_FOLLOW_UP_HORIZON",
+    "FOLLOW_UP_UNRESOLVABLE": "REPAIR_PROMISE_AND_OBSERVATION_CLOCKS",
+    "OUTCOME_UNOBSERVED": "WAIT_FOR_A_KNOWN_SUPPLIER_MILESTONE",
+    "OUTCOME_TEMPORALLY_INVALID": "REPAIR_SUPPLIER_MILESTONE_CLOCKS",
+    "CANCELLED_BEFORE_MILESTONE": "REVIEW_CANCELLATION_AS_MISSING_OUTCOME",
     "FROZEN_PROMISE_UNAVAILABLE": "REVIEW_CANONICAL_PROMISE_HISTORY_AND_RETRY",
     "FROZEN_PROMISE_CONFLICT": "REPAIR_CANONICAL_PROMISE_HISTORY_AND_RETRY",
     "FROZEN_PROMISE_TEMPORALLY_INVALID": "REPAIR_CANONICAL_PROMISE_CLOCKS_AND_RETRY",
@@ -717,6 +733,8 @@ def resolve_commitment_cutoff(
 class FrozenPromiseResolution:
     value: _Temporal | None
     code: str | None
+    event_id: str | None = None
+    event_ids: tuple[str, ...] = ()
 
 
 def _lineage_observation_refs(
@@ -1058,9 +1076,20 @@ def _resolve_frozen_promise(
     target_milestone_kind: str,
     commitment_cutoff: _Temporal,
 ) -> FrozenPromiseResolution:
+    if target_milestone_kind not in _SUPPORTED_SUPPLIER_MILESTONE_KINDS:
+        return FrozenPromiseResolution(None, "TARGET_MILESTONE_UNSUPPORTED")
+    if (
+        commitment_cutoff.field.get("state") != "present"
+        or commitment_cutoff.comparable is None
+    ):
+        return FrozenPromiseResolution(None, "FROZEN_PROMISE_TEMPORALLY_INVALID")
+
     all_promises: dict[str, Mapping[str, Any]] = {}
     for event in events:
-        if event.get("kind") not in {"promise_recorded", "promise_revised"}:
+        if not isinstance(event, Mapping) or event.get("kind") not in {
+            "promise_recorded",
+            "promise_revised",
+        }:
             continue
         if _field_from_record(event.get("milestone_kind")).get("value") != (
             target_milestone_kind
@@ -1071,85 +1100,120 @@ def _resolve_frozen_promise(
             return FrozenPromiseResolution(None, "FROZEN_PROMISE_CONFLICT")
         all_promises[event_id] = event
 
-    # A correction remains evidence even when it was learned after the
-    # commitment cutoff. A contradictory supersession cannot silently rewrite
-    # the frozen baseline or disappear behind the point-in-time filter.
+    if not all_promises:
+        return FrozenPromiseResolution(None, "FROZEN_PROMISE_UNAVAILABLE")
+
+    revision_parents: dict[str, str] = {}
+    correction_parents: dict[str, str] = {}
     for event_id, event in all_promises.items():
+        revision = (
+            _field("missing")
+            if "revises_promise_event_id" not in event
+            else _field_from_record(event.get("revises_promise_event_id"))
+        )
+        if event.get("kind") == "promise_revised":
+            if revision.get("state") != "present":
+                return FrozenPromiseResolution(None, "FROZEN_PROMISE_CONFLICT")
+            parent_id = revision.get("value")
+            parent = all_promises.get(parent_id) if isinstance(parent_id, str) else None
+            if (
+                parent is None
+                or parent_id == event_id
+                or parent.get("order_line_id") != event.get("order_line_id")
+            ):
+                return FrozenPromiseResolution(None, "FROZEN_PROMISE_CONFLICT")
+            revision_parents[event_id] = parent_id
+        elif revision.get("state") not in {"missing", "not_applicable"}:
+            return FrozenPromiseResolution(None, "FROZEN_PROMISE_CONFLICT")
+
         supersedes = (
             _field("missing")
             if "supersedes_event_id" not in event
             else _field_from_record(event.get("supersedes_event_id"))
         )
-        if supersedes.get("state") != "present":
-            if supersedes.get("state") not in {"missing", "not_applicable"}:
+        if supersedes.get("state") == "present":
+            parent_id = supersedes.get("value")
+            parent = all_promises.get(parent_id) if isinstance(parent_id, str) else None
+            if (
+                parent is None
+                or parent_id == event_id
+                or parent.get("kind") != event.get("kind")
+                or parent.get("order_line_id") != event.get("order_line_id")
+            ):
                 return FrozenPromiseResolution(None, "FROZEN_PROMISE_CONFLICT")
-            continue
-        parent_id = supersedes.get("value")
-        parent = all_promises.get(parent_id) if isinstance(parent_id, str) else None
-        if (
-            parent is None
-            or parent_id == event_id
-            or parent.get("order_line_id") != event.get("order_line_id")
-        ):
-            return FrozenPromiseResolution(None, "FROZEN_PROMISE_CONFLICT")
-        parent_promise = _temporal_from_record(parent.get("promised_for"))
-        corrected_promise = _temporal_from_record(event.get("promised_for"))
-        if _equal_temporal(parent_promise, corrected_promise) is not True:
+            parent_promise = _temporal_from_record(parent.get("promised_for"))
+            corrected_promise = _temporal_from_record(event.get("promised_for"))
+            if _equal_temporal(parent_promise, corrected_promise) is not True:
+                return FrozenPromiseResolution(None, "FROZEN_PROMISE_CONFLICT")
+            correction_parents[event_id] = parent_id
+        elif supersedes.get("state") not in {"missing", "not_applicable"}:
             return FrozenPromiseResolution(None, "FROZEN_PROMISE_CONFLICT")
 
     eligible: dict[str, Mapping[str, Any]] = {}
     for event_id, event in all_promises.items():
-        occurred_at = _temporal_from_record(
-            event.get("clocks", {}).get("occurred_at")
-        )
-        known_at = _temporal_from_record(event.get("clocks", {}).get("known_at"))
-        if (
-            _compare(occurred_at, commitment_cutoff) not in {-1, 0}
-            or _compare(known_at, commitment_cutoff) not in {-1, 0}
-        ):
+        clocks = event.get("clocks")
+        if not isinstance(clocks, Mapping):
+            return FrozenPromiseResolution(None, "FROZEN_PROMISE_TEMPORALLY_INVALID")
+        occurred_at = _temporal_from_record(clocks.get("occurred_at"))
+        known_at = _temporal_from_record(clocks.get("known_at"))
+        occurred_order = _compare(occurred_at, commitment_cutoff)
+        known_order = _compare(known_at, commitment_cutoff)
+        if occurred_order is None or known_order is None:
+            return FrozenPromiseResolution(None, "FROZEN_PROMISE_TEMPORALLY_INVALID")
+        if occurred_order == 1 and known_order == 1:
             continue
+        if _compare(known_at, occurred_at) not in {0, 1}:
+            return FrozenPromiseResolution(None, "FROZEN_PROMISE_TEMPORALLY_INVALID")
+        if occurred_order == 1 or known_order == 1:
+            continue
+
         promised_for = _temporal_from_record(event.get("promised_for"))
         if promised_for.field.get("state") != "present":
             return FrozenPromiseResolution(None, "FROZEN_PROMISE_TEMPORALLY_INVALID")
         promise_order = _compare(promised_for, commitment_cutoff)
-        if promise_order is None or promise_order != 1:
+        if promise_order is None or promise_order == -1:
             return FrozenPromiseResolution(None, "FROZEN_PROMISE_TEMPORALLY_INVALID")
         eligible[event_id] = event
 
     if not eligible:
         return FrozenPromiseResolution(None, "FROZEN_PROMISE_UNAVAILABLE")
-    children: set[str] = set()
-    for event_id, event in eligible.items():
-        parent = (
-            _field("missing")
-            if "revises_promise_event_id" not in event
-            else _field_from_record(event.get("revises_promise_event_id"))
-        )
-        supersedes = (
-            _field("missing")
-            if "supersedes_event_id" not in event
-            else _field_from_record(event.get("supersedes_event_id"))
-        )
-        if parent.get("state") == "present":
-            parent_id = parent.get("value")
-            if not isinstance(parent_id, str) or parent_id not in eligible:
+
+    parents: dict[str, str] = {}
+    children: dict[str, str] = {}
+    for event_id in eligible:
+        for parent_id in (
+            revision_parents.get(event_id),
+            correction_parents.get(event_id),
+        ):
+            if parent_id is None:
+                continue
+            if parent_id not in eligible:
                 return FrozenPromiseResolution(None, "FROZEN_PROMISE_CONFLICT")
-            children.add(parent_id)
-        elif parent.get("state") not in {"missing", "not_applicable"}:
-            return FrozenPromiseResolution(None, "FROZEN_PROMISE_CONFLICT")
-        if supersedes.get("state") == "present":
-            parent_id = supersedes.get("value")
-            if not isinstance(parent_id, str) or parent_id not in eligible:
+            if parent_id in children and children[parent_id] != event_id:
                 return FrozenPromiseResolution(None, "FROZEN_PROMISE_CONFLICT")
-            children.add(parent_id)
-        elif supersedes.get("state") not in {"missing", "not_applicable"}:
-            return FrozenPromiseResolution(None, "FROZEN_PROMISE_CONFLICT")
+            children[parent_id] = event_id
+            if event_id in parents and parents[event_id] != parent_id:
+                return FrozenPromiseResolution(None, "FROZEN_PROMISE_CONFLICT")
+            parents[event_id] = parent_id
+
+    for start in parents:
+        seen: set[str] = set()
+        current = start
+        while current in parents:
+            if current in seen:
+                return FrozenPromiseResolution(None, "FROZEN_PROMISE_CONFLICT")
+            seen.add(current)
+            current = parents[current]
+
     heads = [event_id for event_id in eligible if event_id not in children]
     if len(heads) != 1:
         return FrozenPromiseResolution(None, "FROZEN_PROMISE_CONFLICT")
+    head = heads[0]
     return FrozenPromiseResolution(
-        _temporal_from_record(eligible[heads[0]].get("promised_for")),
+        _temporal_from_record(eligible[head].get("promised_for")),
         None,
+        event_id=head,
+        event_ids=tuple(sorted(eligible)),
     )
 
 
@@ -1165,6 +1229,637 @@ def resolve_frozen_promise(
         target_milestone_kind=target_milestone_kind,
         commitment_cutoff=commitment_cutoff,
     )
+
+
+_OUTCOME_REASONS = {
+    "TARGET_MILESTONE_UNSUPPORTED": "The target is not a reviewed supplier-controlled milestone.",
+    "FROZEN_PROMISE_UNAVAILABLE": "No eligible promised milestone was known by the commitment cutoff.",
+    "FROZEN_PROMISE_CONFLICT": "Promise revisions or corrections do not establish one immutable baseline.",
+    "FROZEN_PROMISE_TEMPORALLY_INVALID": "The promised milestone clocks or value cannot be compared safely.",
+    "SLIPPAGE_DURATION_BASIS_MIXED": "The outcome temporal basis does not match the request-wide basis.",
+    "FOLLOW_UP_IMMATURE": "The declared follow-up horizon had not matured by the observation cutoff.",
+    "FOLLOW_UP_UNRESOLVABLE": "Promise plus follow-up could not be compared without inventing temporal precision.",
+    "OUTCOME_UNOBSERVED": "No single target milestone was both reached and known by the observation cutoff.",
+    "OUTCOME_TEMPORALLY_INVALID": "The promise, milestone, or cancellation clocks do not establish one valid outcome.",
+    "CANCELLED_BEFORE_MILESTONE": "A reliable cancellation preceded a valid target milestone.",
+    "OUTCOME_NOT_REQUIRED_FOR_SUBJECT": "A current subject is evaluated for eligibility; it is not an estimation line.",
+}
+
+
+def _outcome_provenance(
+    events: list[Mapping[str, Any]],
+    promise_resolution: FrozenPromiseResolution,
+    *,
+    actual_event_id: str | None = None,
+    cancellation_event_id: str | None = None,
+) -> dict[str, Any]:
+    all_event_ids = sorted(
+        {
+            str(event.get("event_id"))
+            for event in events
+            if isinstance(event, Mapping)
+            and isinstance(event.get("event_id"), str)
+            and event.get("event_id")
+        }
+    )
+    promise_event_ids = list(promise_resolution.event_ids)
+    contributing = sorted(
+        {
+            *promise_event_ids,
+            *([actual_event_id] if actual_event_id is not None else []),
+            *([cancellation_event_id] if cancellation_event_id is not None else []),
+        }
+    )
+    return {
+        "selected_promise_event_id": promise_resolution.event_id,
+        "promise_event_ids": promise_event_ids,
+        "selected_actual_event_id": actual_event_id,
+        "selected_cancellation_event_id": cancellation_event_id,
+        "contributing_event_ids": contributing,
+        "considered_event_ids": all_event_ids,
+    }
+
+
+def _outcome_failure(
+    *,
+    role: str,
+    canonical_slippage_duration_basis: str,
+    code: str,
+    promise_resolution: FrozenPromiseResolution,
+    events: list[Mapping[str, Any]],
+    actual_event_id: str | None = None,
+    cancellation_event_id: str | None = None,
+    frozen_promised_milestone: _Temporal | None = None,
+    maturity: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "schema_version": _SUPPLIER_MILESTONE_OUTCOME_SCHEMA_VERSION,
+        "state": "unresolved",
+        "role": role,
+        "canonical_slippage_duration_basis": canonical_slippage_duration_basis,
+        "outcome_code": code,
+        "reason_code": code,
+        "reason": _OUTCOME_REASONS.get(code, "The supplier milestone outcome is unavailable."),
+        "eligibility_codes": [code],
+        "supplier_milestone_slippage_days": None,
+        "supplier_milestone_late": None,
+        "provenance": _outcome_provenance(
+            events,
+            promise_resolution,
+            actual_event_id=actual_event_id,
+            cancellation_event_id=cancellation_event_id,
+        ),
+    }
+    if frozen_promised_milestone is not None:
+        result["frozen_promised_milestone"] = frozen_promised_milestone.field
+    if maturity is not None:
+        result["follow_up"] = dict(maturity)
+    result["outcome_hash"] = _sha256(result)
+    return result
+
+
+def _active_terminal_events(
+    events: list[Mapping[str, Any]],
+    *,
+    kind: str,
+    target_milestone_kind: str | None = None,
+) -> tuple[list[Mapping[str, Any]], str | None]:
+    candidates: list[Mapping[str, Any]] = []
+    for event in events:
+        if not isinstance(event, Mapping) or event.get("kind") != kind:
+            continue
+        if target_milestone_kind is not None:
+            milestone = _field_from_record(event.get("milestone_kind"))
+            if milestone.get("state") != "present":
+                candidates.append(event)
+                continue
+            if milestone.get("value") != target_milestone_kind:
+                continue
+        candidates.append(event)
+
+    by_id: dict[str, Mapping[str, Any]] = {}
+    for event in candidates:
+        event_id = event.get("event_id")
+        if not isinstance(event_id, str) or not event_id or event_id in by_id:
+            return [], "OUTCOME_TEMPORALLY_INVALID"
+        by_id[event_id] = event
+
+    superseded: set[str] = set()
+    parents: dict[str, str] = {}
+    for event_id, event in by_id.items():
+        reference = (
+            _field("missing")
+            if "supersedes_event_id" not in event
+            else _field_from_record(event.get("supersedes_event_id"))
+        )
+        if reference.get("state") in {"missing", "not_applicable"}:
+            continue
+        if reference.get("state") != "present":
+            return [], "OUTCOME_TEMPORALLY_INVALID"
+        parent_id = reference.get("value")
+        parent = by_id.get(parent_id) if isinstance(parent_id, str) else None
+        if parent is None or parent_id == event_id:
+            return [], "OUTCOME_TEMPORALLY_INVALID"
+        if parent_id in superseded:
+            return [], "OUTCOME_TEMPORALLY_INVALID"
+        superseded.add(parent_id)
+        parents[event_id] = parent_id
+
+    for start in parents:
+        seen: set[str] = set()
+        current = start
+        while current in parents:
+            if current in seen:
+                return [], "OUTCOME_TEMPORALLY_INVALID"
+            seen.add(current)
+            current = parents[current]
+
+    return [
+        event for event_id, event in by_id.items() if event_id not in superseded
+    ], None
+
+
+def _event_temporal_pair(
+    event: Mapping[str, Any],
+) -> tuple[_Temporal, _Temporal] | None:
+    clocks = event.get("clocks")
+    if not isinstance(clocks, Mapping):
+        return None
+    occurred = _temporal_from_record(clocks.get("occurred_at"))
+    known = _temporal_from_record(clocks.get("known_at"))
+    if (
+        occurred.field.get("state") != "present"
+        or known.field.get("state") != "present"
+        or occurred.comparable is None
+        or known.comparable is None
+    ):
+        return None
+    return occurred, known
+
+
+def _outcome_temporal_value(value: _Temporal) -> Mapping[str, Any] | None:
+    raw = value.field.get("value")
+    return raw if isinstance(raw, Mapping) else None
+
+
+def _add_follow_up_horizon(
+    promise: _Temporal,
+    observation_cutoff: _Temporal,
+    horizon_days: int,
+) -> tuple[int | None, str | None]:
+    if (
+        not isinstance(horizon_days, int)
+        or isinstance(horizon_days, bool)
+        or horizon_days < 0
+        or observation_cutoff.field.get("state") != "present"
+        or observation_cutoff.comparable is None
+    ):
+        return None, "FOLLOW_UP_UNRESOLVABLE"
+    promise_value = _outcome_temporal_value(promise)
+    observation_value = _outcome_temporal_value(observation_cutoff)
+    if promise_value is None or observation_value is None:
+        return None, "FOLLOW_UP_UNRESOLVABLE"
+    promise_kind = promise_value.get("kind")
+    if promise_kind != observation_value.get("kind"):
+        return None, "FOLLOW_UP_UNRESOLVABLE"
+    if promise_kind not in {"date", "instant"}:
+        return None, "FOLLOW_UP_UNRESOLVABLE"
+    maturity = promise.comparable + timedelta(days=horizon_days)
+    comparison = _compare(
+        _Temporal(
+            _field(
+                "present",
+                {
+                    **dict(promise_value),
+                    "normalized_value": (
+                        maturity.isoformat()
+                        if isinstance(maturity, datetime)
+                        else maturity.isoformat()
+                    ),
+                },
+            ),
+            maturity,
+        ),
+        observation_cutoff,
+    )
+    if comparison is None:
+        return None, "FOLLOW_UP_UNRESOLVABLE"
+    return comparison, None
+
+
+def resolve_supplier_milestone_slippage(
+    events: list[Mapping[str, Any]],
+    *,
+    target_milestone_kind: str,
+    commitment_cutoff: _Temporal,
+    observation_cutoff: _Temporal,
+    canonical_slippage_duration_basis: str,
+    follow_up_horizon_days: int = 0,
+    role: str = "ESTIMATION_LINE",
+    frozen_promise: FrozenPromiseResolution | _Temporal | None = None,
+) -> dict[str, Any]:
+    """Resolve one signed, provenance-bearing supplier milestone outcome."""
+    if target_milestone_kind not in _SUPPORTED_SUPPLIER_MILESTONE_KINDS:
+        promise_resolution = FrozenPromiseResolution(
+            None, "TARGET_MILESTONE_UNSUPPORTED"
+        )
+        return _outcome_failure(
+            role=role,
+            canonical_slippage_duration_basis=canonical_slippage_duration_basis,
+            code="TARGET_MILESTONE_UNSUPPORTED",
+            promise_resolution=promise_resolution,
+            events=events,
+        )
+
+    if canonical_slippage_duration_basis not in {
+        "CALENDAR_DAY",
+        "ELAPSED_86400_SECOND_DAY",
+    }:
+        promise_resolution = FrozenPromiseResolution(None, None)
+        return _outcome_failure(
+            role=role,
+            canonical_slippage_duration_basis=canonical_slippage_duration_basis,
+            code="SLIPPAGE_DURATION_BASIS_MIXED",
+            promise_resolution=promise_resolution,
+            events=events,
+        )
+
+    if isinstance(frozen_promise, FrozenPromiseResolution):
+        promise_resolution = frozen_promise
+    elif isinstance(frozen_promise, _Temporal):
+        promise_resolution = FrozenPromiseResolution(frozen_promise, None)
+    else:
+        promise_resolution = _resolve_frozen_promise(
+            events,
+            target_milestone_kind=target_milestone_kind,
+            commitment_cutoff=commitment_cutoff,
+        )
+    if promise_resolution.code is not None or promise_resolution.value is None:
+        return _outcome_failure(
+            role=role,
+            canonical_slippage_duration_basis=canonical_slippage_duration_basis,
+            code=promise_resolution.code or "FROZEN_PROMISE_UNAVAILABLE",
+            promise_resolution=promise_resolution,
+            events=events,
+        )
+
+    promise = promise_resolution.value
+    if (
+        promise.field.get("state") != "present"
+        or promise.comparable is None
+        or commitment_cutoff.field.get("state") != "present"
+        or commitment_cutoff.comparable is None
+        or observation_cutoff.field.get("state") != "present"
+        or observation_cutoff.comparable is None
+    ):
+        return _outcome_failure(
+            role=role,
+            canonical_slippage_duration_basis=canonical_slippage_duration_basis,
+            code="FROZEN_PROMISE_TEMPORALLY_INVALID",
+            promise_resolution=promise_resolution,
+            events=events,
+        )
+    if role == "SUBJECT_LINE":
+        result: dict[str, Any] = {
+            "schema_version": _SUPPLIER_MILESTONE_OUTCOME_SCHEMA_VERSION,
+            "state": "not_applicable",
+            "role": "SUBJECT_LINE",
+            "canonical_slippage_duration_basis": canonical_slippage_duration_basis,
+            "outcome_code": "OUTCOME_NOT_REQUIRED_FOR_SUBJECT",
+            "reason_code": "OUTCOME_NOT_REQUIRED_FOR_SUBJECT",
+            "reason": _OUTCOME_REASONS["OUTCOME_NOT_REQUIRED_FOR_SUBJECT"],
+            "eligibility_codes": [],
+            "frozen_promised_milestone": promise.field,
+            "supplier_milestone_slippage_days": None,
+            "supplier_milestone_late": None,
+            "provenance": _outcome_provenance(events, promise_resolution),
+        }
+        result["outcome_hash"] = _sha256(result)
+        return result
+
+    maturity_comparison, maturity_error = _add_follow_up_horizon(
+        promise,
+        observation_cutoff,
+        follow_up_horizon_days,
+    )
+    maturity = {
+        "state": "present" if maturity_error is None else "unresolved",
+        "horizon_days": follow_up_horizon_days,
+        "comparison_to_observation_cutoff": maturity_comparison,
+    }
+    if maturity_error is not None:
+        return _outcome_failure(
+            role=role,
+            canonical_slippage_duration_basis=canonical_slippage_duration_basis,
+            code=maturity_error,
+            promise_resolution=promise_resolution,
+            events=events,
+            frozen_promised_milestone=promise,
+            maturity=maturity,
+        )
+    if maturity_comparison == 1:
+        return _outcome_failure(
+            role=role,
+            canonical_slippage_duration_basis=canonical_slippage_duration_basis,
+            code="FOLLOW_UP_IMMATURE",
+            promise_resolution=promise_resolution,
+            events=events,
+            frozen_promised_milestone=promise,
+            maturity=maturity,
+        )
+
+    active_actuals, actual_error = _active_terminal_events(
+        events,
+        kind="milestone_reached",
+        target_milestone_kind=target_milestone_kind,
+    )
+    if actual_error is not None:
+        return _outcome_failure(
+            role=role,
+            canonical_slippage_duration_basis=canonical_slippage_duration_basis,
+            code=actual_error,
+            promise_resolution=promise_resolution,
+            events=events,
+            frozen_promised_milestone=promise,
+            maturity=maturity,
+        )
+
+    valid_actuals: list[tuple[Mapping[str, Any], _Temporal, _Temporal]] = []
+    for actual in active_actuals:
+        milestone = _field_from_record(actual.get("milestone_kind"))
+        actual_pair = _event_temporal_pair(actual)
+        if milestone.get("state") != "present":
+            return _outcome_failure(
+                role=role,
+                canonical_slippage_duration_basis=canonical_slippage_duration_basis,
+                code="OUTCOME_TEMPORALLY_INVALID",
+                promise_resolution=promise_resolution,
+                events=events,
+                frozen_promised_milestone=promise,
+                maturity=maturity,
+            )
+        if actual_pair is None:
+            return _outcome_failure(
+                role=role,
+                canonical_slippage_duration_basis=canonical_slippage_duration_basis,
+                code="OUTCOME_TEMPORALLY_INVALID",
+                promise_resolution=promise_resolution,
+                events=events,
+                frozen_promised_milestone=promise,
+                maturity=maturity,
+            )
+        occurred, known = actual_pair
+        known_order = _compare(known, observation_cutoff)
+        if known_order is None:
+            return _outcome_failure(
+                role=role,
+                canonical_slippage_duration_basis=canonical_slippage_duration_basis,
+                code="OUTCOME_TEMPORALLY_INVALID",
+                promise_resolution=promise_resolution,
+                events=events,
+                frozen_promised_milestone=promise,
+                maturity=maturity,
+            )
+        if _compare(known, occurred) not in {0, 1}:
+            return _outcome_failure(
+                role=role,
+                canonical_slippage_duration_basis=canonical_slippage_duration_basis,
+                code="OUTCOME_TEMPORALLY_INVALID",
+                promise_resolution=promise_resolution,
+                events=events,
+                frozen_promised_milestone=promise,
+                maturity=maturity,
+            )
+        if known_order == 1:
+            continue
+        if (
+            _compare(occurred, commitment_cutoff) is None
+            or _compare(occurred, commitment_cutoff) == -1
+            or _compare(occurred, observation_cutoff) is None
+            or _compare(occurred, observation_cutoff) == 1
+        ):
+            return _outcome_failure(
+                role=role,
+                canonical_slippage_duration_basis=canonical_slippage_duration_basis,
+                code="OUTCOME_TEMPORALLY_INVALID",
+                promise_resolution=promise_resolution,
+                events=events,
+                frozen_promised_milestone=promise,
+                maturity=maturity,
+            )
+        valid_actuals.append((actual, occurred, known))
+
+    active_cancellations, cancellation_error = _active_terminal_events(
+        events,
+        kind="cancelled",
+    )
+    if cancellation_error is not None:
+        return _outcome_failure(
+            role=role,
+            canonical_slippage_duration_basis=canonical_slippage_duration_basis,
+            code=cancellation_error,
+            promise_resolution=promise_resolution,
+            events=events,
+            frozen_promised_milestone=promise,
+            maturity=maturity,
+        )
+
+    valid_cancellations: list[tuple[Mapping[str, Any], _Temporal, _Temporal]] = []
+    for cancellation in active_cancellations:
+        cancellation_pair = _event_temporal_pair(cancellation)
+        if cancellation_pair is None:
+            return _outcome_failure(
+                role=role,
+                canonical_slippage_duration_basis=canonical_slippage_duration_basis,
+                code="OUTCOME_TEMPORALLY_INVALID",
+                promise_resolution=promise_resolution,
+                events=events,
+                frozen_promised_milestone=promise,
+                maturity=maturity,
+            )
+        occurred, known = cancellation_pair
+        known_order = _compare(known, observation_cutoff)
+        if known_order is None:
+            return _outcome_failure(
+                role=role,
+                canonical_slippage_duration_basis=canonical_slippage_duration_basis,
+                code="OUTCOME_TEMPORALLY_INVALID",
+                promise_resolution=promise_resolution,
+                events=events,
+                frozen_promised_milestone=promise,
+                maturity=maturity,
+            )
+        if _compare(known, occurred) not in {0, 1}:
+            return _outcome_failure(
+                role=role,
+                canonical_slippage_duration_basis=canonical_slippage_duration_basis,
+                code="OUTCOME_TEMPORALLY_INVALID",
+                promise_resolution=promise_resolution,
+                events=events,
+                frozen_promised_milestone=promise,
+                maturity=maturity,
+            )
+        if known_order == 1:
+            continue
+        if (
+            _compare(occurred, commitment_cutoff) is None
+            or _compare(occurred, commitment_cutoff) != 1
+            or _compare(occurred, observation_cutoff) is None
+            or _compare(occurred, observation_cutoff) == 1
+        ):
+            return _outcome_failure(
+                role=role,
+                canonical_slippage_duration_basis=canonical_slippage_duration_basis,
+                code="OUTCOME_TEMPORALLY_INVALID",
+                promise_resolution=promise_resolution,
+                events=events,
+                frozen_promised_milestone=promise,
+                maturity=maturity,
+            )
+        valid_cancellations.append((cancellation, occurred, known))
+
+    if len(valid_actuals) > 1 or len(valid_cancellations) > 1:
+        return _outcome_failure(
+            role=role,
+            canonical_slippage_duration_basis=canonical_slippage_duration_basis,
+            code="OUTCOME_TEMPORALLY_INVALID",
+            promise_resolution=promise_resolution,
+            events=events,
+            frozen_promised_milestone=promise,
+            maturity=maturity,
+        )
+
+    actual = valid_actuals[0] if valid_actuals else None
+    cancellation = valid_cancellations[0] if valid_cancellations else None
+    if cancellation is not None and actual is not None:
+        terminal_order = _compare(cancellation[1], actual[1])
+        if terminal_order is None or terminal_order == 0:
+            return _outcome_failure(
+                role=role,
+                canonical_slippage_duration_basis=canonical_slippage_duration_basis,
+                code="OUTCOME_TEMPORALLY_INVALID",
+                promise_resolution=promise_resolution,
+                events=events,
+                actual_event_id=str(actual[0].get("event_id")),
+                cancellation_event_id=str(cancellation[0].get("event_id")),
+                frozen_promised_milestone=promise,
+                maturity=maturity,
+            )
+        if terminal_order == -1:
+            return _outcome_failure(
+                role=role,
+                canonical_slippage_duration_basis=canonical_slippage_duration_basis,
+                code="CANCELLED_BEFORE_MILESTONE",
+                promise_resolution=promise_resolution,
+                events=events,
+                cancellation_event_id=str(cancellation[0].get("event_id")),
+                frozen_promised_milestone=promise,
+                maturity=maturity,
+            )
+    if cancellation is not None and actual is None:
+        return _outcome_failure(
+            role=role,
+            canonical_slippage_duration_basis=canonical_slippage_duration_basis,
+            code="CANCELLED_BEFORE_MILESTONE",
+            promise_resolution=promise_resolution,
+            events=events,
+            cancellation_event_id=str(cancellation[0].get("event_id")),
+            frozen_promised_milestone=promise,
+            maturity=maturity,
+        )
+    if actual is None:
+        return _outcome_failure(
+            role=role,
+            canonical_slippage_duration_basis=canonical_slippage_duration_basis,
+            code="OUTCOME_UNOBSERVED",
+            promise_resolution=promise_resolution,
+            events=events,
+            frozen_promised_milestone=promise,
+            maturity=maturity,
+        )
+
+    actual_value = _outcome_temporal_value(actual[1])
+    promise_value = _outcome_temporal_value(promise)
+    if actual_value is None or promise_value is None:
+        return _outcome_failure(
+            role=role,
+            canonical_slippage_duration_basis=canonical_slippage_duration_basis,
+            code="OUTCOME_TEMPORALLY_INVALID",
+            promise_resolution=promise_resolution,
+            events=events,
+            actual_event_id=str(actual[0].get("event_id")),
+            frozen_promised_milestone=promise,
+            maturity=maturity,
+        )
+    actual_kind = actual_value.get("kind")
+    promise_kind = promise_value.get("kind")
+    if (
+        actual_kind != promise_kind
+        or actual_value.get("precision") != promise_value.get("precision")
+        or actual_kind not in {"date", "instant"}
+    ):
+        return _outcome_failure(
+            role=role,
+            canonical_slippage_duration_basis=canonical_slippage_duration_basis,
+            code="OUTCOME_TEMPORALLY_INVALID",
+            promise_resolution=promise_resolution,
+            events=events,
+            actual_event_id=str(actual[0].get("event_id")),
+            frozen_promised_milestone=promise,
+            maturity=maturity,
+        )
+
+    line_basis = (
+        "CALENDAR_DAY"
+        if actual_kind == "date"
+        else "ELAPSED_86400_SECOND_DAY"
+    )
+    if line_basis != canonical_slippage_duration_basis:
+        return _outcome_failure(
+            role=role,
+            canonical_slippage_duration_basis=canonical_slippage_duration_basis,
+            code="SLIPPAGE_DURATION_BASIS_MIXED",
+            promise_resolution=promise_resolution,
+            events=events,
+            actual_event_id=str(actual[0].get("event_id")),
+            frozen_promised_milestone=promise,
+            maturity=maturity,
+        )
+
+    difference = actual[1].comparable - promise.comparable
+    slippage_days = (
+        difference.days
+        if line_basis == "CALENDAR_DAY"
+        else difference.total_seconds() / 86400
+    )
+    result = {
+        "schema_version": _SUPPLIER_MILESTONE_OUTCOME_SCHEMA_VERSION,
+        "state": "present",
+        "role": role,
+        "canonical_slippage_duration_basis": canonical_slippage_duration_basis,
+        "supplier_milestone_slippage_duration_basis": line_basis,
+        "frozen_promised_milestone": promise.field,
+        "actual_target_milestone": actual[1].field,
+        "supplier_milestone_slippage_days": slippage_days,
+        "supplier_milestone_late": slippage_days > 0,
+        "outcome_code": None,
+        "reason_code": None,
+        "reason": "One valid supplier milestone outcome was resolved.",
+        "eligibility_codes": [],
+        "follow_up": maturity,
+        "provenance": _outcome_provenance(
+            events,
+            promise_resolution,
+            actual_event_id=str(actual[0].get("event_id")),
+            cancellation_event_id=(
+                str(cancellation[0].get("event_id"))
+                if cancellation is not None
+                else None
+            ),
+        ),
+    }
+    result["outcome_hash"] = _sha256(result)
+    return result
 
 
 def evaluate_supplier_load_exposure(
@@ -3347,6 +4042,7 @@ class ReactiveInvestigationMixin:
         dataset_id = ""
         commitment_event: dict[str, Any] | None = None
         original_promise: _Temporal | None = None
+        promise_resolution: FrozenPromiseResolution | None = None
         events: list[Mapping[str, Any]] = []
         event_ids: list[str] = []
         lineage_refs: list[str] = []
@@ -3835,6 +4531,15 @@ class ReactiveInvestigationMixin:
             )
             evidence_refs = _lineage_evidence_refs(lineage, lineage_refs)
             configuration = ENGINE_CONFIGURATION_REGISTRY[ENGINE_CONFIGURATION_REF]
+            supplier_milestone_outcome = resolve_supplier_milestone_slippage(
+                events,
+                target_milestone_kind=signal.target_milestone_kind,
+                commitment_cutoff=commitment_cutoff,
+                observation_cutoff=known,
+                canonical_slippage_duration_basis=duration_basis,
+                role="SUBJECT_LINE",
+                frozen_promise=promise_resolution,
+            )
             adjustment_fields = {
                 name: _subject_field_as_of(
                     lineage,
@@ -3882,6 +4587,7 @@ class ReactiveInvestigationMixin:
                 "causal_question_version": CAUSAL_QUESTION_VERSION,
                 "engine_configuration_ref": ENGINE_CONFIGURATION_REF,
                 "supplier_load_exposure": load_exposure,
+                "supplier_milestone_outcome": supplier_milestone_outcome,
                 "estimator_window_ref": _window_ref(
                     selector_version=configuration[
                         "estimator_window_selector_version"
@@ -4364,6 +5070,15 @@ class ReactiveInvestigationMixin:
             and duration_basis is not None
             and configuration is not None
         ):
+            supplier_milestone_outcome = resolve_supplier_milestone_slippage(
+                [],
+                target_milestone_kind=str(target_field.get("value")),
+                commitment_cutoff=decision,
+                observation_cutoff=decision,
+                canonical_slippage_duration_basis=duration_basis,
+                role="SUBJECT_LINE",
+                frozen_promise=promise,
+            )
             projection = {
                 "causal_input_schema_version": CAUSAL_INPUT_SCHEMA_VERSION,
                 "dataset_version_id": proposal.dataset_version_id,
@@ -4380,6 +5095,7 @@ class ReactiveInvestigationMixin:
                 "causal_question_version": CAUSAL_QUESTION_VERSION,
                 "engine_configuration_ref": ENGINE_CONFIGURATION_REF,
                 "supplier_load_exposure": load_exposure,
+                "supplier_milestone_outcome": supplier_milestone_outcome,
                 "estimator_window_ref": _window_ref(
                     selector_version=configuration["estimator_window_selector_version"],
                     selected_ids=selected_ids,

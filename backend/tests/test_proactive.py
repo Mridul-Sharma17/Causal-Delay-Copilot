@@ -80,6 +80,13 @@ def test_valid_proposal_creates_an_immutable_preview_request_and_replays(
         assert "load_snapshot" not in exposure
         assert "high_load_exposure" not in json.dumps(exposure)
         assert "order_line_id" not in json.dumps(exposure)
+        outcome = request["causal_engine_input"]["supplier_milestone_outcome"]
+        assert outcome["state"] == "not_applicable"
+        assert outcome["role"] == "SUBJECT_LINE"
+        assert outcome["canonical_slippage_duration_basis"] == "CALENDAR_DAY"
+        assert outcome["outcome_code"] == "OUTCOME_NOT_REQUIRED_FOR_SUBJECT"
+        assert outcome["supplier_milestone_slippage_days"] is None
+        assert outcome["actual_target_milestone"] is None
 
         lineage = client.get(f"/api/datasets/{dataset_version_id}/lineage")
         assert lineage.status_code == 200

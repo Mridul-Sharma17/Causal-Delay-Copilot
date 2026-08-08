@@ -215,6 +215,29 @@ export type CausalWindow = {
 
 export type SupplierLoadExposure = Record<string, unknown>;
 
+export type SupplierMilestoneOutcome = {
+  schema_version: "supplier-milestone-slippage.v1";
+  state: "present" | "unresolved" | "not_applicable";
+  role: "ESTIMATION_LINE" | "SUBJECT_LINE";
+  canonical_slippage_duration_basis:
+    | "CALENDAR_DAY"
+    | "ELAPSED_86400_SECOND_DAY";
+  supplier_milestone_slippage_duration_basis?:
+    | "CALENDAR_DAY"
+    | "ELAPSED_86400_SECOND_DAY";
+  frozen_promised_milestone?: CausalTemporalField;
+  actual_target_milestone?: CausalTemporalField;
+  supplier_milestone_slippage_days: number | null;
+  supplier_milestone_late: boolean | null;
+  outcome_code: string | null;
+  reason_code: string | null;
+  reason: string;
+  eligibility_codes: string[];
+  follow_up?: Record<string, unknown>;
+  provenance: Record<string, unknown>;
+  outcome_hash: string;
+};
+
 export type CausalEngineInput = {
   causal_input_schema_version: "causal-input-projection.v2";
   dataset_version_id: string;
@@ -233,6 +256,7 @@ export type CausalEngineInput = {
   causal_question_version: string;
   engine_configuration_ref: string;
   supplier_load_exposure?: SupplierLoadExposure;
+  supplier_milestone_outcome?: SupplierMilestoneOutcome;
   estimator_window_ref: CausalWindow;
   history_lookback_ref: CausalWindow;
   historical_population_digest: string;
@@ -894,6 +918,71 @@ function parseCausalTemporalField(value: unknown): CausalTemporalField {
   };
 }
 
+function parseSupplierMilestoneOutcome(value: unknown): SupplierMilestoneOutcome {
+  if (
+    !isRecord(value) ||
+    value.schema_version !== "supplier-milestone-slippage.v1" ||
+    (value.state !== "present" &&
+      value.state !== "unresolved" &&
+      value.state !== "not_applicable") ||
+    (value.role !== "ESTIMATION_LINE" && value.role !== "SUBJECT_LINE") ||
+    (value.canonical_slippage_duration_basis !== "CALENDAR_DAY" &&
+      value.canonical_slippage_duration_basis !==
+        "ELAPSED_86400_SECOND_DAY") ||
+    (value.supplier_milestone_slippage_duration_basis !== undefined &&
+      value.supplier_milestone_slippage_duration_basis !== null &&
+      value.supplier_milestone_slippage_duration_basis !== "CALENDAR_DAY" &&
+      value.supplier_milestone_slippage_duration_basis !==
+        "ELAPSED_86400_SECOND_DAY") ||
+    (typeof value.supplier_milestone_slippage_days !== "number" &&
+      value.supplier_milestone_slippage_days !== null) ||
+    (typeof value.supplier_milestone_late !== "boolean" &&
+      value.supplier_milestone_late !== null) ||
+    (typeof value.outcome_code !== "string" && value.outcome_code !== null) ||
+    (typeof value.reason_code !== "string" && value.reason_code !== null) ||
+    typeof value.reason !== "string" ||
+    !Array.isArray(value.eligibility_codes) ||
+    !value.eligibility_codes.every((item) => typeof item === "string") ||
+    (value.follow_up !== undefined &&
+      value.follow_up !== null &&
+      !isRecord(value.follow_up)) ||
+    !isRecord(value.provenance) ||
+    typeof value.outcome_hash !== "string"
+  ) {
+    throw new Error("invalid reactive response");
+  }
+  return {
+    schema_version: value.schema_version,
+    state: value.state,
+    role: value.role,
+    canonical_slippage_duration_basis: value.canonical_slippage_duration_basis,
+    supplier_milestone_slippage_duration_basis:
+      value.supplier_milestone_slippage_duration_basis === null
+        ? undefined
+        : value.supplier_milestone_slippage_duration_basis,
+    frozen_promised_milestone:
+      value.frozen_promised_milestone === undefined ||
+      value.frozen_promised_milestone === null
+        ? undefined
+        : parseCausalTemporalField(value.frozen_promised_milestone),
+    actual_target_milestone:
+      value.actual_target_milestone === undefined ||
+      value.actual_target_milestone === null
+        ? undefined
+        : parseCausalTemporalField(value.actual_target_milestone),
+    supplier_milestone_slippage_days: value.supplier_milestone_slippage_days,
+    supplier_milestone_late: value.supplier_milestone_late,
+    outcome_code: value.outcome_code,
+    reason_code: value.reason_code,
+    reason: value.reason,
+    eligibility_codes: value.eligibility_codes,
+    follow_up:
+      value.follow_up === null ? undefined : value.follow_up,
+    provenance: value.provenance,
+    outcome_hash: value.outcome_hash,
+  };
+}
+
 function parseCausalWindow(value: unknown): CausalWindow {
   if (
     !isRecord(value) ||
@@ -948,6 +1037,8 @@ function parseCausalEngineInput(value: unknown): CausalEngineInput {
     typeof value.engine_configuration_ref !== "string" ||
     (value.supplier_load_exposure !== undefined &&
       !isRecord(value.supplier_load_exposure)) ||
+    (value.supplier_milestone_outcome !== undefined &&
+      !isRecord(value.supplier_milestone_outcome)) ||
     typeof value.historical_population_digest !== "string" ||
     !Array.isArray(value.analytical_fact_lineage_refs) ||
     !value.analytical_fact_lineage_refs.every((item) => typeof item === "string")
@@ -975,6 +1066,10 @@ function parseCausalEngineInput(value: unknown): CausalEngineInput {
     causal_question_version: value.causal_question_version,
     engine_configuration_ref: value.engine_configuration_ref,
     supplier_load_exposure: value.supplier_load_exposure,
+    supplier_milestone_outcome:
+      value.supplier_milestone_outcome === undefined
+        ? undefined
+        : parseSupplierMilestoneOutcome(value.supplier_milestone_outcome),
     estimator_window_ref: parseCausalWindow(value.estimator_window_ref),
     history_lookback_ref: parseCausalWindow(value.history_lookback_ref),
     historical_population_digest: value.historical_population_digest,

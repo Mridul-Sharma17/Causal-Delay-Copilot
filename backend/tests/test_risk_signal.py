@@ -142,6 +142,13 @@ def test_reactive_signal_creates_one_immutable_request_and_replays_exactly(
         assert exposure["primary"]["eligibility_codes"] == [
             "SUPPLIER_HISTORY_INSUFFICIENT"
         ]
+        outcome = projection["supplier_milestone_outcome"]
+        assert outcome["state"] == "not_applicable"
+        assert outcome["role"] == "SUBJECT_LINE"
+        assert outcome["canonical_slippage_duration_basis"] == "CALENDAR_DAY"
+        assert outcome["outcome_code"] == "OUTCOME_NOT_REQUIRED_FOR_SUBJECT"
+        assert outcome["supplier_milestone_slippage_days"] is None
+        assert outcome["actual_target_milestone"] is None
 
         lineage_response = client.get(f"/api/datasets/{dataset_version_id}/lineage")
         assert lineage_response.status_code == 200

@@ -24,6 +24,7 @@ import {
   type ProactiveProposalFixture,
   type ReactiveIngressAttempt,
   type RiskSignalFixture,
+  type SupplierMilestoneOutcome,
 } from "./contracts";
 import "./styles.css";
 
@@ -126,6 +127,50 @@ function temporalSummary(value: LineageRecord): string {
       ? temporal.timezone_status
       : "Unavailable";
   return `State: ${state} · ${source} → ${normalized} · ${precision} · timezone ${timezone}`;
+}
+
+function EligibilityStage({
+  outcome,
+  badge,
+  headingId,
+}: {
+  outcome: SupplierMilestoneOutcome | undefined;
+  badge: string;
+  headingId: string;
+}) {
+  if (outcome === undefined) {
+    return null;
+  }
+  return (
+    <section className="eligibility-stage" aria-labelledby={headingId}>
+      <div className="record-heading">
+        <div>
+          <p className="eyebrow">Eligibility stage</p>
+          <h4 id={headingId}>Supplier milestone outcome eligibility</h4>
+        </div>
+        <span>{badge}</span>
+      </div>
+      <dl className="risk-facts">
+        <div>
+          <dt>Outcome basis</dt>
+          <dd>
+            <code>{outcome.canonical_slippage_duration_basis}</code>
+          </dd>
+        </div>
+        <div>
+          <dt>Outcome reason</dt>
+          <dd>
+            <code>{outcome.reason_code ?? "Unavailable"}</code>
+            <span>{outcome.reason}</span>
+          </dd>
+        </div>
+      </dl>
+      <p className="risk-note">
+        This subject is not an estimation line. No slippage estimate is displayed; an actual
+        supplier milestone is not required at this stage.
+      </p>
+    </section>
+  );
 }
 
 function sourceObservationIds(
@@ -582,6 +627,14 @@ function App() {
                   </dd>
                 </div>
               </dl>
+              <EligibilityStage
+                outcome={
+                  riskAttempt.investigation_request?.causal_engine_input
+                    .supplier_milestone_outcome
+                }
+                badge="SUBJECT"
+                headingId="reactive-eligibility-heading"
+              />
               <p className="supporting-copy">
                 Predictive attribution - not causal evidence. Manual investigation remains
                 available when predictive artifacts are unavailable.
@@ -717,6 +770,12 @@ function App() {
                   </dd>
                 </div>
               </dl>
+
+              <EligibilityStage
+                outcome={proactiveRequest?.causal_engine_input.supplier_milestone_outcome}
+                badge="PREVIEW ONLY"
+                headingId="proactive-eligibility-heading"
+              />
 
               <p className="risk-note">
                 No canonical Order Line, commitment event, actual milestone, or post-commitment

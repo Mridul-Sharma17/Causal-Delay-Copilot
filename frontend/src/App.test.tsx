@@ -271,6 +271,32 @@ const reactiveAttemptResponse = {
         canonical_slippage_duration_basis: "CALENDAR_DAY",
         causal_question_version: "supplier-load-slippage.v1",
         engine_configuration_ref: "causal-engine-config.v1",
+        supplier_milestone_outcome: {
+          schema_version: "supplier-milestone-slippage.v1",
+          state: "not_applicable",
+          role: "SUBJECT_LINE",
+          canonical_slippage_duration_basis: "CALENDAR_DAY",
+          supplier_milestone_slippage_duration_basis: null,
+          frozen_promised_milestone: null,
+          actual_target_milestone: null,
+          supplier_milestone_slippage_days: null,
+          supplier_milestone_late: null,
+          outcome_code: "OUTCOME_NOT_REQUIRED_FOR_SUBJECT",
+          reason_code: "OUTCOME_NOT_REQUIRED_FOR_SUBJECT",
+          reason:
+            "A current subject is evaluated for eligibility; it is not an estimation line.",
+          eligibility_codes: [],
+          provenance: {
+            selected_promise_event_id: "promise-1",
+            promise_event_ids: ["promise-1"],
+            selected_actual_event_id: null,
+            selected_cancellation_event_id: null,
+            contributing_event_ids: ["promise-1"],
+            considered_event_ids: ["promise-1"],
+          },
+          follow_up: null,
+          outcome_hash: "sha256:outcome",
+        },
         estimator_window_ref: {
           selector_version: "estimator-window.v1",
           bounds: {
@@ -583,6 +609,10 @@ describe("Core health journey", () => {
     expect(await screen.findByText("Canonical lineage")).toBeInTheDocument();
     expect(await screen.findByText("Investigation request accepted")).toBeInTheDocument();
     expect(await screen.findByText("Proactive preview accepted")).toBeInTheDocument();
+    expect(screen.getAllByText("Eligibility stage")).toHaveLength(2);
+    expect(screen.getAllByText("CALENDAR_DAY")).toHaveLength(2);
+    expect(screen.getAllByText("OUTCOME_NOT_REQUIRED_FOR_SUBJECT")).toHaveLength(2);
+    expect(screen.getAllByText(/No slippage estimate is displayed/)).toHaveLength(2);
     expect(screen.getByText("PROACTIVE · PREVIEW-ONLY")).toBeInTheDocument();
     expect(
       screen.getByText(/No canonical Order Line, commitment event, actual milestone/),

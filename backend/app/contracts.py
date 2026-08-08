@@ -109,6 +109,12 @@ class AuditOccurrenceViewResponse(BaseModel):
         "FROZEN_PROMISE_UNAVAILABLE",
         "FROZEN_PROMISE_CONFLICT",
         "FROZEN_PROMISE_TEMPORALLY_INVALID",
+        "TARGET_MILESTONE_UNSUPPORTED",
+        "FOLLOW_UP_IMMATURE",
+        "FOLLOW_UP_UNRESOLVABLE",
+        "OUTCOME_UNOBSERVED",
+        "OUTCOME_TEMPORALLY_INVALID",
+        "CANCELLED_BEFORE_MILESTONE",
     ]
     created_at: datetime
 
@@ -878,6 +884,33 @@ class CausalSubjectAnalyticalValuesResponse(BaseModel):
     subject_exclusion_identity: str
 
 
+class SupplierMilestoneOutcomeResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["supplier-milestone-slippage.v1"]
+    state: Literal["present", "unresolved", "not_applicable"]
+    role: Literal["ESTIMATION_LINE", "SUBJECT_LINE"]
+    canonical_slippage_duration_basis: Literal[
+        "CALENDAR_DAY",
+        "ELAPSED_86400_SECOND_DAY",
+    ]
+    supplier_milestone_slippage_duration_basis: Literal[
+        "CALENDAR_DAY",
+        "ELAPSED_86400_SECOND_DAY",
+    ] | None = None
+    frozen_promised_milestone: TemporalFieldResponse | None = None
+    actual_target_milestone: TemporalFieldResponse | None = None
+    supplier_milestone_slippage_days: float | None = None
+    supplier_milestone_late: bool | None = None
+    outcome_code: str | None
+    reason_code: str | None
+    reason: str
+    eligibility_codes: list[str]
+    follow_up: dict[str, Any] | None = None
+    provenance: dict[str, Any]
+    outcome_hash: str
+
+
 class CausalEngineInputResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -894,6 +927,7 @@ class CausalEngineInputResponse(BaseModel):
     causal_question_version: str
     engine_configuration_ref: str
     supplier_load_exposure: dict[str, Any] | None = None
+    supplier_milestone_outcome: SupplierMilestoneOutcomeResponse | None = None
     estimator_window_ref: CausalWindowResponse
     history_lookback_ref: CausalWindowResponse
     historical_population_digest: str

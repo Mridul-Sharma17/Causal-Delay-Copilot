@@ -214,6 +214,22 @@ code {
   overflow-wrap: anywhere;
 }
 
+.eligibility-stage {
+  margin-top: 24px;
+  padding: 24px;
+  background: #ffffff;
+  border-left: 4px solid #8a3ffc;
+}
+
+.eligibility-stage h4 {
+  margin: 0;
+  font-size: 1.125rem;
+}
+
+.eligibility-stage .risk-facts {
+  margin-bottom: 0;
+}
+
 .risk-note,
 .risk-failure {
   display: grid;
