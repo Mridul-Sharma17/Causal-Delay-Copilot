@@ -42,6 +42,12 @@ TERMINAL_OPERATION_STATES = frozenset(
     {"SUCCEEDED", "FAILED", "CANCELLED", "TIMED_OUT", "INTERRUPTED", "REJECTED"}
 )
 OUTSTANDING_OPERATION_STATES = frozenset({"QUEUED", "RUNNING", "CANCELLING"})
+_TYPED_WORKER_FAILURE_CODES = frozenset(
+    {
+        "RUN_REPRODUCTION_TARGET_UNAVAILABLE",
+        "RUN_REPRODUCIBILITY_VIOLATION",
+    }
+)
 MAX_RUNNING_OPERATIONS = 1
 MAX_WAITING_OPERATIONS = 2
 MAX_OUTSTANDING_OPERATIONS_PER_WORKSPACE = 1
@@ -356,7 +362,7 @@ class DurableOperationsMixin:
 
                 workspace_row = self._active_row_locked(workspace_id, current_time)
                 if (
-                    operation_kind == "FRESH_ANALYSIS"
+                    operation_kind in {"FRESH_ANALYSIS", "FRESH_REPRODUCTION"}
                     and int(workspace_row["terminal_fresh_bundle_count"])
                     >= self._quotas.max_workspace_terminal_fresh_bundles
                 ):
@@ -489,6 +495,22 @@ class DurableOperationsMixin:
                 workspace_id=workspace_id,
                 operation_id=operation_id,
             )
+            return None if row is None else self._operation_from_row(connection, row)
+
+    def get_operation_by_idempotency_key(
+        self,
+        workspace_id: str,
+        idempotency_key: str,
+    ) -> DurableOperation | None:
+        with self._lock:
+            connection = self._connection_or_raise()
+            row = connection.execute(
+                """
+                SELECT * FROM durable_operations
+                WHERE workspace_id = ? AND idempotency_key = ?
+                """,
+                (workspace_id, idempotency_key),
+            ).fetchone()
             return None if row is None else self._operation_from_row(connection, row)
 
     def get_operation_request(
@@ -1003,6 +1025,24 @@ def _quarantine_operation_material(
     )
 
 
+def _read_typed_worker_failure_code(temporary_root: Path) -> str | None:
+    marker = temporary_root / "analysis-run-failure.json"
+    try:
+        payload = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, TypeError, ValueError):
+        return None
+    if not isinstance(payload, Mapping):
+        return None
+    if payload.get("schema_version") != "analysis-run-failure.v1":
+        return None
+    failure_code = payload.get("failure_code")
+    return (
+        failure_code
+        if isinstance(failure_code, str) and failure_code in _TYPED_WORKER_FAILURE_CODES
+        else None
+    )
+
+
 class OperationRunner:
     """One durable queue claimant and one bounded compute subprocess."""
 
@@ -1089,7 +1129,7 @@ class OperationRunner:
                 operation.operation_id,
             )
             if (
-                operation.operation_kind == "FRESH_ANALYSIS"
+                operation.operation_kind in {"FRESH_ANALYSIS", "FRESH_REPRODUCTION"}
                 and isinstance(operation_request, Mapping)
                 and operation_request.get("schema_version") == "analysis-run-admission.v1"
             ):
@@ -1153,15 +1193,19 @@ class OperationRunner:
                     self._record_terminal_fresh_bundle(operation)
                     return
                 terminal_state = "CANCELLED"
-            reason_code = (
-                "RUN_EXECUTION_INTERRUPTED"
-                if terminal_state == "INTERRUPTED"
-                else "OPERATION_CANCELLED"
-                if terminal_state == "CANCELLED"
-                else "OPERATION_TIMEOUT"
-                if terminal_state == "TIMED_OUT"
-                else "OPERATION_WORKER_FAILED"
-            )
+            if terminal_state == "INTERRUPTED":
+                reason_code = "RUN_EXECUTION_INTERRUPTED"
+            elif terminal_state == "CANCELLED":
+                reason_code = "OPERATION_CANCELLED"
+            elif terminal_state == "TIMED_OUT":
+                reason_code = "OPERATION_TIMEOUT"
+            else:
+                reason_code = "OPERATION_WORKER_FAILED"
+                if operation.operation_kind == "FRESH_REPRODUCTION":
+                    reason_code = (
+                        _read_typed_worker_failure_code(temporary_root)
+                        or reason_code
+                    )
             self._quarantine_and_finish(
                 operation,
                 state=terminal_state,
@@ -1224,7 +1268,7 @@ class OperationRunner:
         os.replace(temporary_root, destination)
 
     def _record_terminal_fresh_bundle(self, operation: DurableOperation) -> None:
-        if operation.operation_kind != "FRESH_ANALYSIS":
+        if operation.operation_kind not in {"FRESH_ANALYSIS", "FRESH_REPRODUCTION"}:
             return
         recorder = getattr(self._store, "record_terminal_fresh_bundle", None)
         if not callable(recorder):

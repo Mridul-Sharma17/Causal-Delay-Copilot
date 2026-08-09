@@ -115,6 +115,9 @@ export type AnalysisRunStatus = {
     | "invalid";
   availability_state: "available" | "suppressed";
   delivery_mode: "fresh_execution" | "existing_run_reuse";
+  run_relationship: "fresh" | "reproduction" | "refresh";
+  reproduces_run_id: string | null;
+  refresh_of_request_id: string | null;
   reason_code: string | null;
   failure_code: string | null;
   recovery_action: string | null;
@@ -138,6 +141,7 @@ export type AnalysisRunStatus = {
   rendered_verdict: RenderedEvidenceVerdict | null;
   subject_verdict: EvidenceVerdict | null;
   rendered_subject_verdict: RenderedEvidenceVerdict | null;
+  reproduction_comparison: Record<string, unknown> | null;
 };
 
 export type DurableOperation = {
@@ -635,6 +639,29 @@ export type ProactiveInvestigationResponse = {
   attempt: ProactiveIngressAttempt;
 };
 
+export type RefreshInvestigationSnapshot = {
+  schema_version: "refresh-investigation-snapshot.v1";
+  snapshot_id: string;
+  predecessor_request_id: string;
+  investigation_request_id: string;
+  trigger_mode: "reactive" | "proactive";
+  dataset_version_id: string;
+  observation_cutoff: Record<string, unknown>;
+  causal_input_digest: string;
+  content_hash: string;
+  occurrence_id: string;
+  event_seq: number;
+  created_at: string;
+};
+
+export type RefreshInvestigationResponse = {
+  result: "CREATED" | "IDEMPOTENT_REPLAY";
+  trigger_mode: "reactive" | "proactive";
+  attempt: ReactiveIngressAttempt | ProactiveIngressAttempt;
+  snapshot: RefreshInvestigationSnapshot | null;
+  operation: DurableOperation | null;
+};
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
@@ -824,6 +851,16 @@ function parseAnalysisRunStatus(value: unknown): AnalysisRunStatus {
       value.availability_state !== "suppressed") ||
     (value.delivery_mode !== "fresh_execution" &&
       value.delivery_mode !== "existing_run_reuse") ||
+    (value.run_relationship !== undefined &&
+      value.run_relationship !== "fresh" &&
+      value.run_relationship !== "reproduction" &&
+      value.run_relationship !== "refresh") ||
+    (value.reproduces_run_id !== undefined &&
+      value.reproduces_run_id !== null &&
+      typeof value.reproduces_run_id !== "string") ||
+    (value.refresh_of_request_id !== undefined &&
+      value.refresh_of_request_id !== null &&
+      typeof value.refresh_of_request_id !== "string") ||
     (value.reason_code !== null && typeof value.reason_code !== "string") ||
     (value.failure_code !== null && typeof value.failure_code !== "string") ||
     (value.recovery_action !== null && typeof value.recovery_action !== "string") ||
@@ -846,7 +883,10 @@ function parseAnalysisRunStatus(value: unknown): AnalysisRunStatus {
       !isRecord(value.primary_result)) ||
     (value.bundle_manifest_hash !== undefined &&
       value.bundle_manifest_hash !== null &&
-      typeof value.bundle_manifest_hash !== "string")
+      typeof value.bundle_manifest_hash !== "string") ||
+    (value.reproduction_comparison !== undefined &&
+      value.reproduction_comparison !== null &&
+      !isRecord(value.reproduction_comparison))
   ) {
     throw new Error("invalid analysis run response");
   }
@@ -893,6 +933,16 @@ function parseAnalysisRunStatus(value: unknown): AnalysisRunStatus {
     verification_state: value.verification_state,
     availability_state: value.availability_state,
     delivery_mode: value.delivery_mode,
+    run_relationship:
+      value.run_relationship === undefined ? "fresh" : value.run_relationship,
+    reproduces_run_id:
+      value.reproduces_run_id === undefined
+        ? null
+        : nullableString(value.reproduces_run_id),
+    refresh_of_request_id:
+      value.refresh_of_request_id === undefined
+        ? null
+        : nullableString(value.refresh_of_request_id),
     reason_code: nullableString(value.reason_code),
     failure_code: nullableString(value.failure_code),
     recovery_action: nullableString(value.recovery_action),
@@ -925,6 +975,11 @@ function parseAnalysisRunStatus(value: unknown): AnalysisRunStatus {
     rendered_verdict: renderedVerdict,
     subject_verdict: subjectVerdict,
     rendered_subject_verdict: renderedSubjectVerdict,
+    reproduction_comparison:
+      value.reproduction_comparison === undefined ||
+      value.reproduction_comparison === null
+        ? null
+        : value.reproduction_comparison,
   };
 }
 
@@ -2363,5 +2418,74 @@ export function parseProactiveInvestigationResponse(
   return {
     result: value.result,
     attempt: parseProactiveIngressAttempt(value.attempt),
+  };
+}
+
+function parseRefreshInvestigationSnapshot(
+  value: unknown,
+): RefreshInvestigationSnapshot {
+  if (
+    !isRecord(value) ||
+    value.schema_version !== "refresh-investigation-snapshot.v1" ||
+    typeof value.snapshot_id !== "string" ||
+    typeof value.predecessor_request_id !== "string" ||
+    typeof value.investigation_request_id !== "string" ||
+    (value.trigger_mode !== "reactive" && value.trigger_mode !== "proactive") ||
+    typeof value.dataset_version_id !== "string" ||
+    !isRecord(value.observation_cutoff) ||
+    typeof value.causal_input_digest !== "string" ||
+    typeof value.content_hash !== "string" ||
+    typeof value.occurrence_id !== "string" ||
+    !isNonNegativeInteger(value.event_seq) ||
+    value.event_seq < 1 ||
+    typeof value.created_at !== "string"
+  ) {
+    throw new Error("invalid refresh response");
+  }
+  return {
+    schema_version: "refresh-investigation-snapshot.v1",
+    snapshot_id: value.snapshot_id,
+    predecessor_request_id: value.predecessor_request_id,
+    investigation_request_id: value.investigation_request_id,
+    trigger_mode: value.trigger_mode,
+    dataset_version_id: value.dataset_version_id,
+    observation_cutoff: value.observation_cutoff,
+    causal_input_digest: value.causal_input_digest,
+    content_hash: value.content_hash,
+    occurrence_id: value.occurrence_id,
+    event_seq: value.event_seq,
+    created_at: value.created_at,
+  };
+}
+
+export function parseRefreshInvestigationResponse(
+  value: unknown,
+): RefreshInvestigationResponse {
+  if (
+    !isRecord(value) ||
+    (value.result !== "CREATED" && value.result !== "IDEMPOTENT_REPLAY") ||
+    (value.trigger_mode !== "reactive" && value.trigger_mode !== "proactive") ||
+    !isRecord(value.attempt)
+  ) {
+    throw new Error("invalid refresh response");
+  }
+  const attempt =
+    value.trigger_mode === "reactive"
+      ? parseReactiveIngressAttempt(value.attempt)
+      : parseProactiveIngressAttempt(value.attempt);
+  const snapshot =
+    value.snapshot === undefined || value.snapshot === null
+      ? null
+      : parseRefreshInvestigationSnapshot(value.snapshot);
+  const operation =
+    value.operation === undefined || value.operation === null
+      ? null
+      : parseOperationResponse(value.operation);
+  return {
+    result: value.result,
+    trigger_mode: value.trigger_mode,
+    attempt,
+    snapshot,
+    operation,
   };
 }

@@ -4,6 +4,7 @@ import hashlib
 import json
 from copy import deepcopy
 from pathlib import Path
+import time
 
 from fastapi.testclient import TestClient
 import pytest
@@ -208,6 +209,119 @@ def test_reactive_signal_creates_one_immutable_request_and_replays_exactly(
             "LINEAGE_SNAPSHOT_VIEW",
         ]
         assert audit.json()["items"][1]["outcome_code"] == "RISK_SIGNAL_ACCEPTED"
+
+
+def test_refresh_investigation_creates_new_request_snapshot_run_and_bundle(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(state_root=tmp_path / "state")
+    with TestClient(create_app(settings, start_operation_runner=True)) as client:
+        dataset_version_id = import_hero(client)
+        signal = get_signal(client, dataset_version_id)
+        original = client.post("/api/investigations/reactive", json=signal)
+        assert original.status_code == 201
+        predecessor = original.json()["attempt"]["investigation_request"]
+
+        refresh = {
+            "idempotency_key": "refresh-reactive-1",
+            "trigger_mode": "reactive",
+            "request": signal,
+            "observation_cutoff": {
+                "value": "2026-01-11T03:35:00+00:00",
+                "kind": "instant",
+                "precision": "minute",
+                "timezone_status": "known",
+                "source_timezone": "UTC",
+            },
+            "root_seed": 17,
+        }
+        created = client.post(
+            f"/api/investigations/{predecessor['investigation_request_id']}/refresh",
+            json=refresh,
+        )
+        replay = client.post(
+            f"/api/investigations/{predecessor['investigation_request_id']}/refresh",
+            json=refresh,
+        )
+
+        assert created.status_code == 202
+        assert replay.status_code == 200
+        body = created.json()
+        replay_body = replay.json()
+        assert body["result"] == "CREATED"
+        assert replay_body["result"] == "IDEMPOTENT_REPLAY"
+        attempt = body["attempt"]
+        refreshed = attempt["investigation_request"]
+        assert refreshed["investigation_request_id"] != predecessor[
+            "investigation_request_id"
+        ]
+        assert refreshed["rerun_of_request_id"]["state"] == "present"
+        assert refreshed["rerun_of_request_id"]["value"] == predecessor[
+            "investigation_request_id"
+        ]
+        assert refreshed["observation_cutoff"]["value"]["normalized_value"] == (
+            "2026-01-11T03:35:00+00:00"
+        )
+        assert body["snapshot"]["snapshot_id"] != predecessor["content_hash"]
+        assert body["snapshot"]["investigation_request_id"] == refreshed[
+            "investigation_request_id"
+        ]
+        assert body["snapshot"]["predecessor_request_id"] == predecessor[
+            "investigation_request_id"
+        ]
+        assert body["operation"]["operation_kind"] == "FRESH_ANALYSIS"
+        assert body["operation"]["analysis_run"]["run_relationship"] == "refresh"
+        assert replay_body["snapshot"]["snapshot_id"] == body["snapshot"]["snapshot_id"]
+        assert replay_body["operation"]["operation_id"] == body["operation"]["operation_id"]
+
+        operation_id = body["operation"]["operation_id"]
+        terminal = body["operation"]
+        for _ in range(200):
+            terminal = client.get(f"/api/operations/{operation_id}").json()
+            if terminal["state"] in {"SUCCEEDED", "FAILED"}:
+                break
+            time.sleep(0.05)
+        assert terminal["state"] == "SUCCEEDED"
+        assert terminal["analysis_run"]["run_relationship"] == "refresh"
+        assert terminal["analysis_run"]["bundle_manifest_hash"].startswith("sha256:")
+
+        audit = client.get("/api/audit/occurrences").json()["items"]
+        assert any(
+            item["occurrence_kind"] == "REFRESH_INVESTIGATION_SNAPSHOT"
+            and item["outcome_code"] == "REFRESH_SNAPSHOT_CREATED"
+            for item in audit
+        )
+
+
+def test_refresh_rejects_a_nonadvancing_cutoff_without_creating_snapshot(
+    tmp_path: Path,
+) -> None:
+    with make_client(tmp_path / "core.sqlite3") as client:
+        dataset_version_id = import_hero(client)
+        signal = get_signal(client, dataset_version_id)
+        original = client.post("/api/investigations/reactive", json=signal)
+        assert original.status_code == 201
+        predecessor = original.json()["attempt"]["investigation_request"]
+
+        response = client.post(
+            f"/api/investigations/{predecessor['investigation_request_id']}/refresh",
+            json={
+                "idempotency_key": "refresh-reactive-not-later",
+                "trigger_mode": "reactive",
+                "request": signal,
+                "observation_cutoff": signal["known_at"],
+                "root_seed": 17,
+            },
+        )
+
+        assert response.status_code == 202
+        body = response.json()
+        assert body["result"] == "CREATED"
+        assert body["attempt"]["status"] == "rejected"
+        assert body["attempt"]["primary_code"] == "REFRESH_CUTOFF_NOT_LATER"
+        assert body["attempt"]["investigation_request_id"] is None
+        assert body["snapshot"] is None
+        assert body["operation"] is None
 
 
 def test_replay_key_does_not_bypass_mode_validation(tmp_path: Path) -> None:

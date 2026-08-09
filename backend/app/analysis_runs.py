@@ -158,6 +158,44 @@ NUMERIC_TOLERANCE_REGISTRY = {
     "processed_propensity_absolute": 1e-15,
     "external_prediction_absolute": 1e-12,
 }
+REPRODUCTION_PROJECTION_SCHEMA_VERSION = "analysis-run-reproduction-projection.v1"
+REPRODUCTION_COMPARISON_SCHEMA_VERSION = "analysis-run-reproduction-comparison.v1"
+_REPRODUCTION_ADMINISTRATIVE_KEYS = frozenset(
+    {
+        "accepted_at",
+        "analysis_run_id",
+        "audit_actor",
+        "audit_event_id",
+        "bundle_manifest_hash",
+        "bundle_ref",
+        "completed_at",
+        "content_hash",
+        "created_at",
+        "delivery_attempt_id",
+        "delivery_mode",
+        "diagnostic_identity",
+        "developer_diagnostic_id",
+        "effect_result_hash",
+        "effect_result_ref",
+        "event_seq",
+        "investigation_request_id",
+        "occurrence_id",
+        "received_at",
+        "reference_validated",
+        "reproduces_run_id",
+        "retries_run_id",
+        "result_identity_digest",
+        "run_relationship",
+        "started_at",
+        "validated_at",
+        "validation_attestation_id",
+        "validation_attestation_ref",
+        "robustness_grade_ref",
+        "verification_report",
+        "verification_state",
+    }
+)
+_REPRODUCTION_OMIT = object()
 REQUIRED_RUNTIME_DEPENDENCIES = {
     "doubleml": "0.11.3",
     "numpy": "2.2.6",
@@ -180,6 +218,250 @@ class AnalysisRunRequestError(ValueError):
         self.recovery_action = recovery_action
         self.status_code = status_code
         super().__init__(code)
+
+
+def _reproduction_projection_value(value: Any, *, key: str | None = None) -> Any:
+    if key is not None and key in _REPRODUCTION_ADMINISTRATIVE_KEYS:
+        return _REPRODUCTION_OMIT
+    if isinstance(value, Mapping):
+        projected: dict[str, Any] = {}
+        for child_key in sorted(value, key=lambda item: str(item).encode("utf-8")):
+            text_key = str(child_key)
+            child = _reproduction_projection_value(value[child_key], key=text_key)
+            if child is not _REPRODUCTION_OMIT:
+                projected[text_key] = child
+        return projected
+    if isinstance(value, (list, tuple)):
+        return [
+            _reproduction_projection_value(item)
+            for item in value
+        ]
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("RUN_REPRODUCIBILITY_VIOLATION")
+        return value
+    return deepcopy(value)
+
+
+def build_reproduction_projection(
+    payloads: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build the run-neutral scientific projection used by exact reproduction."""
+
+    if not isinstance(payloads, Mapping):
+        raise ValueError("RUN_REPRODUCIBILITY_VIOLATION")
+    projections: dict[str, Any] = {}
+    entries = [
+        (str(key), value)
+        for key, value in payloads.items()
+        if str(key) not in {"dataset_version_id", "intended_role"}
+    ]
+    for role, raw_value in sorted(
+        entries,
+        key=lambda item: item[0].encode("utf-8"),
+    ):
+        if role in {"verification_report", "reproduction_comparison"}:
+            continue
+        value = _reproduction_projection_value(raw_value)
+        if value is not _REPRODUCTION_OMIT:
+            projections[role] = value
+    role_digests = {
+        role: scientific_sha256(value)
+        for role, value in projections.items()
+    }
+    digest_payload = {
+        "schema_version": REPRODUCTION_PROJECTION_SCHEMA_VERSION,
+        "roles": list(projections),
+        "projections": projections,
+    }
+    return {
+        **digest_payload,
+        "role_digests": role_digests,
+        "projection_digest": scientific_sha256(digest_payload),
+    }
+
+
+def _compare_reproduction_values(
+    expected: Any,
+    observed: Any,
+    *,
+    path: str,
+    mismatches: list[dict[str, Any]],
+) -> None:
+    if isinstance(expected, Mapping) and isinstance(observed, Mapping):
+        expected_keys = {str(key) for key in expected}
+        observed_keys = {str(key) for key in observed}
+        for missing in sorted(expected_keys - observed_keys):
+            mismatches.append({"path": f"{path}.{missing}", "reason": "missing"})
+        for unexpected in sorted(observed_keys - expected_keys):
+            mismatches.append({"path": f"{path}.{unexpected}", "reason": "unexpected"})
+        for key in sorted(expected_keys & observed_keys):
+            _compare_reproduction_values(
+                expected[key],
+                observed[key],
+                path=f"{path}.{key}",
+                mismatches=mismatches,
+            )
+        return
+    if isinstance(expected, list) and isinstance(observed, list):
+        if len(expected) != len(observed):
+            mismatches.append(
+                {
+                    "path": path,
+                    "reason": "length",
+                    "expected": len(expected),
+                    "observed": len(observed),
+                }
+            )
+            return
+        for index, (expected_item, observed_item) in enumerate(zip(expected, observed, strict=True)):
+            _compare_reproduction_values(
+                expected_item,
+                observed_item,
+                path=f"{path}[{index}]",
+                mismatches=mismatches,
+            )
+        return
+    if isinstance(expected, (int, float)) and not isinstance(expected, bool) and isinstance(
+        observed, (int, float)
+    ) and not isinstance(observed, bool):
+        absolute = abs(float(observed) - float(expected))
+        allowed = NUMERIC_TOLERANCE_REGISTRY["replay_absolute"] + (
+            NUMERIC_TOLERANCE_REGISTRY["replay_relative"] * abs(float(expected))
+        )
+        if absolute > allowed:
+            mismatches.append(
+                {
+                    "path": path,
+                    "reason": "out_of_tolerance",
+                    "expected": float(expected),
+                    "observed": float(observed),
+                    "absolute_error": absolute,
+                    "allowed_error": allowed,
+                }
+            )
+        return
+    if expected != observed:
+        mismatches.append(
+            {
+                "path": path,
+                "reason": "value",
+                "expected": deepcopy(expected),
+                "observed": deepcopy(observed),
+            }
+        )
+
+
+def compare_reproduction_projections(
+    expected: Mapping[str, Any],
+    observed: Mapping[str, Any],
+    *,
+    expected_member_hashes: Mapping[str, str] | None = None,
+    observed_member_hashes: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    """Compare two run-neutral projections under the locked numeric tolerances."""
+
+    if not isinstance(expected, Mapping) or not isinstance(observed, Mapping):
+        raise ValueError("RUN_REPRODUCIBILITY_VIOLATION")
+    if (
+        expected.get("schema_version") != REPRODUCTION_PROJECTION_SCHEMA_VERSION
+        or observed.get("schema_version") != REPRODUCTION_PROJECTION_SCHEMA_VERSION
+    ):
+        raise ValueError("RUN_REPRODUCIBILITY_VIOLATION")
+    mismatches: list[dict[str, Any]] = []
+    try:
+        expected_recomputed = build_reproduction_projection(
+            expected.get("projections")
+        )
+        observed_recomputed = build_reproduction_projection(
+            observed.get("projections")
+        )
+    except (TypeError, ValueError):
+        raise ValueError("RUN_REPRODUCIBILITY_VIOLATION") from None
+    for label, supplied, recomputed in (
+        ("expected", expected, expected_recomputed),
+        ("observed", observed, observed_recomputed),
+    ):
+        if supplied.get("roles") != recomputed["roles"]:
+            mismatches.append(
+                {
+                    "path": f"{label}.roles",
+                    "reason": "identity",
+                    "expected": deepcopy(recomputed["roles"]),
+                    "observed": deepcopy(supplied.get("roles")),
+                }
+            )
+        if supplied.get("role_digests") != recomputed["role_digests"]:
+            mismatches.append(
+                {
+                    "path": f"{label}.role_digests",
+                    "reason": "identity",
+                    "expected": deepcopy(recomputed["role_digests"]),
+                    "observed": deepcopy(supplied.get("role_digests")),
+                }
+            )
+        if supplied.get("projection_digest") != recomputed["projection_digest"]:
+            mismatches.append(
+                {
+                    "path": f"{label}.projection_digest",
+                    "reason": "identity",
+                    "expected": recomputed["projection_digest"],
+                    "observed": supplied.get("projection_digest"),
+                }
+            )
+    _compare_reproduction_values(
+        expected.get("projections"),
+        observed.get("projections"),
+        path="projections",
+        mismatches=mismatches,
+    )
+    expected_roles = expected.get("roles")
+    observed_roles = observed.get("roles")
+    if expected_roles != observed_roles:
+        mismatches.append(
+            {
+                "path": "roles",
+                "reason": "role_set",
+                "expected": deepcopy(expected_roles),
+                "observed": deepcopy(observed_roles),
+            }
+        )
+    if expected_member_hashes is not None or observed_member_hashes is not None:
+        expected_hashes = dict(expected_member_hashes or {})
+        observed_hashes = dict(observed_member_hashes or {})
+        if expected_hashes != observed_hashes:
+            mismatches.append(
+                {
+                    "path": "member_hashes",
+                    "reason": "value",
+                    "expected": deepcopy(expected_hashes),
+                    "observed": deepcopy(observed_hashes),
+                }
+            )
+    comparison_class: dict[str, Any] = {
+        "comparison_id": "run_neutral_scientific_projection",
+        "status": "passed" if not mismatches else "failed",
+        "expected_digest": expected.get("projection_digest"),
+        "observed_digest": observed.get("projection_digest"),
+        "tolerance": deepcopy(NUMERIC_TOLERANCE_REGISTRY),
+    }
+    if mismatches:
+        comparison_class["mismatches"] = mismatches[:32]
+    result: dict[str, Any] = {
+        "schema_version": REPRODUCTION_COMPARISON_SCHEMA_VERSION,
+        "status": "passed" if not mismatches else "failed",
+        "failure_code": None if not mismatches else "RUN_REPRODUCIBILITY_VIOLATION",
+        "declared_tolerances": deepcopy(NUMERIC_TOLERANCE_REGISTRY),
+        "comparison_classes": [comparison_class],
+        "expected_projection": deepcopy(dict(expected)),
+        "observed_projection": deepcopy(dict(observed)),
+    }
+    if expected_member_hashes is not None or observed_member_hashes is not None:
+        result["member_hashes"] = {
+            "expected": deepcopy(dict(expected_member_hashes or {})),
+            "observed": deepcopy(dict(observed_member_hashes or {})),
+        }
+    return result
 
 
 class PropensityStageError(ValueError):
@@ -1219,6 +1501,127 @@ def build_fresh_analysis_payload(
             "sequential_variants": True,
         },
     }
+
+
+def build_fresh_reproduction_payload(
+    store: Any,
+    workspace_id: str,
+    request: Mapping[str, Any],
+    settings: Any,
+) -> dict[str, Any]:
+    """Admit a new process against one exact, currently verified source run."""
+
+    if not isinstance(request, Mapping):
+        raise AnalysisRunRequestError(
+            "ENGINE_INPUT_SCHEMA_UNSUPPORTED",
+            "USE_THE_TYPED_FRESH_REPRODUCTION_REQUEST",
+        )
+    target_run_id = request.get("target_analysis_run_id")
+    if not isinstance(target_run_id, str):
+        raise AnalysisRunRequestError(
+            "RUN_REPRODUCTION_TARGET_UNAVAILABLE",
+            "SELECT_A_VERIFIED_ANALYSIS_RUN_AND_RETRY",
+        )
+    try:
+        operation_id = "operation-" + target_run_id.removeprefix("analysis-run-")
+        if analysis_run_id_for_operation(operation_id) != target_run_id:
+            raise ValueError
+    except ValueError:
+        raise AnalysisRunRequestError(
+            "RUN_REPRODUCTION_TARGET_UNAVAILABLE",
+            "SELECT_A_VERIFIED_ANALYSIS_RUN_AND_RETRY",
+            404,
+        ) from None
+
+    target_operation = store.get_operation(workspace_id, operation_id)
+    target_request = store.get_operation_request(workspace_id, operation_id)
+    if (
+        target_operation is None
+        or target_operation.state != "SUCCEEDED"
+        or not isinstance(target_request, Mapping)
+        or target_request.get("schema_version") != "analysis-run-admission.v1"
+    ):
+        raise AnalysisRunRequestError(
+            "RUN_REPRODUCTION_TARGET_UNAVAILABLE",
+            "SELECT_A_VERIFIED_ANALYSIS_RUN_AND_RETRY",
+            404,
+        )
+    suite_request = target_request.get("suite_request")
+    target_runtime = target_request.get("runtime_fingerprint")
+    target_request_digest = target_request.get("scientific_request_digest")
+    target_runtime_digest = target_request.get("runtime_fingerprint_digest")
+    if (
+        not isinstance(suite_request, Mapping)
+        or not isinstance(target_runtime, Mapping)
+        or not isinstance(target_request_digest, str)
+        or not isinstance(target_runtime_digest, str)
+    ):
+        raise AnalysisRunRequestError(
+            "RUN_REPRODUCTION_TARGET_UNAVAILABLE",
+            "SELECT_A_VERIFIED_ANALYSIS_RUN_AND_RETRY",
+            404,
+        )
+
+    from .references import read_verified_analysis_bundle
+
+    try:
+        manifest, payloads = read_verified_analysis_bundle(
+            Path(settings.artifact_root),
+            analysis_run_id=target_run_id,
+            expected_build_id=str(settings.build_manifest_id),
+            expected_runtime=target_runtime,
+        )
+    except (OSError, TypeError, ValueError):
+        raise AnalysisRunRequestError(
+            "RUN_REPRODUCTION_TARGET_UNAVAILABLE",
+            "RESTORE_THE_VERIFIED_SOURCE_RUN_AND_RETRY",
+            409,
+        ) from None
+    engine_payload = payloads.get("engine_result")
+    if (
+        manifest.get("scientific_request_digest") != target_request_digest
+        or manifest.get("runtime_fingerprint_digest") != target_runtime_digest
+        or not isinstance(engine_payload, Mapping)
+        or engine_payload.get("status") not in {"estimated", "abstained"}
+    ):
+        raise AnalysisRunRequestError(
+            "RUN_REPRODUCTION_TARGET_UNAVAILABLE",
+            "RESTORE_THE_VERIFIED_SOURCE_RUN_AND_RETRY",
+            409,
+        )
+
+    supplied_seed = request.get("root_seed", suite_request.get("root_seed"))
+    if supplied_seed != suite_request.get("root_seed"):
+        raise AnalysisRunRequestError(
+            "ENGINE_INPUT_INTEGRITY_MISMATCH",
+            "REPRODUCE_WITH_THE_SOURCE_ROOT_SEED",
+        )
+    admission = build_fresh_analysis_payload(
+        store,
+        workspace_id,
+        {
+            "suite_request": deepcopy(dict(suite_request)),
+            "root_seed": supplied_seed,
+            "scientific_request_digest": target_request_digest,
+        },
+        settings,
+    )
+    if (
+        admission["scientific_request_digest"] != target_request_digest
+        or admission["runtime_fingerprint_digest"] != target_runtime_digest
+        or admission["runtime_fingerprint"] != dict(target_runtime)
+    ):
+        raise AnalysisRunRequestError(
+            "ENGINE_RUNTIME_INCOMPATIBLE",
+            "USE_THE_SEALED_ENGINE_RUNTIME_AND_RETRY",
+            503,
+        )
+    admission["investigation_request_id"] = target_request.get(
+        "investigation_request_id"
+    )
+    admission["run_relationship"] = "reproduction"
+    admission["reproduces_run_id"] = target_run_id
+    return admission
 
 
 def _field_definition_map(adjustment_set: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
@@ -4923,6 +5326,70 @@ def finalize_fresh_analysis(
         diagnostic_payload=diagnostic_payload,
         inputs=inputs,
     )
+    reproduces_run_id = admission.get("reproduces_run_id")
+    reproduction_comparison: dict[str, Any] | None = None
+    if reproduces_run_id is not None:
+        if not isinstance(reproduces_run_id, str):
+            raise FreshAnalysisFinalizationError("RUN_REPRODUCTION_TARGET_UNAVAILABLE")
+        from .references import read_verified_analysis_bundle
+
+        try:
+            target_manifest, target_payloads = read_verified_analysis_bundle(
+                artifact_root,
+                analysis_run_id=reproduces_run_id,
+                expected_build_id=str(runtime_value.get("application_build_id", "")),
+                expected_runtime=runtime_value,
+            )
+        except (OSError, TypeError, ValueError):
+            raise FreshAnalysisFinalizationError(
+                "RUN_REPRODUCTION_TARGET_UNAVAILABLE"
+            ) from None
+        if (
+            target_manifest.get("scientific_request_digest")
+            != admission.get("scientific_request_digest")
+            or target_manifest.get("runtime_fingerprint_digest")
+            != admission.get("runtime_fingerprint_digest")
+            or target_payloads.get("runtime_fingerprint") != dict(runtime_value)
+        ):
+            raise FreshAnalysisFinalizationError("RUN_REPRODUCIBILITY_VIOLATION")
+        try:
+            candidate_payloads = {
+                member.logical_role: json.loads(member.content.decode("utf-8"))
+                for member in members
+            }
+        except (UnicodeError, TypeError, ValueError):
+            raise FreshAnalysisFinalizationError("RUN_REPRODUCIBILITY_VIOLATION") from None
+        expected_projection = build_reproduction_projection(target_payloads)
+        observed_projection = build_reproduction_projection(candidate_payloads)
+        reproduction_comparison = compare_reproduction_projections(
+            expected_projection,
+            observed_projection,
+            expected_member_hashes=expected_projection["role_digests"],
+            observed_member_hashes=observed_projection["role_digests"],
+        )
+        reproduction_comparison.update(
+            {
+                "target_run_id": reproduces_run_id,
+                "scientific_request_digest": admission["scientific_request_digest"],
+                "runtime_fingerprint_digest": admission["runtime_fingerprint_digest"],
+            }
+        )
+        if reproduction_comparison["status"] != "passed":
+            raise FreshAnalysisFinalizationError("RUN_REPRODUCIBILITY_VIOLATION")
+        members.append(
+            _fresh_artifact_member(
+                logical_role="reproduction_comparison",
+                logical_id="comparison",
+                producer_schema_id="analysis-run-reproduction-comparison",
+                producer_schema_version="v1",
+                payload=reproduction_comparison,
+                evidence_refs=(
+                    "engine_request:request",
+                    "engine_result:result",
+                ),
+                scientific_content=False,
+            )
+        )
     started_at = datetime.now(timezone.utc).isoformat()
     completed_at = datetime.now(timezone.utc).isoformat()
     runtime_digest = str(admission["runtime_fingerprint_digest"])
@@ -4955,6 +5422,8 @@ def finalize_fresh_analysis(
     investigation_request_id = admission.get("investigation_request_id")
     if isinstance(investigation_request_id, str) and investigation_request_id:
         manifest["investigation_request_id"] = investigation_request_id
+    if isinstance(reproduces_run_id, str) and reproduces_run_id:
+        manifest["reproduces_run_id"] = reproduces_run_id
     published = publish_analysis_bundle(
         artifact_root,
         analysis_run_id=analysis_run_id,
@@ -5005,6 +5474,16 @@ def finalize_fresh_analysis(
             diagnostic_payload["rendered_subject_verdict"]
         ),
     }
+    if reproduction_comparison is not None:
+        result["reproduces_run_id"] = reproduces_run_id
+        result["reproduction_comparison"] = deepcopy(reproduction_comparison)
+    result["run_relationship"] = (
+        admission.get("run_relationship")
+        if admission.get("run_relationship") in {"fresh", "reproduction", "refresh"}
+        else "fresh"
+    )
+    if isinstance(admission.get("refresh_of_request_id"), str):
+        result["refresh_of_request_id"] = admission["refresh_of_request_id"]
     result["result_identity_digest"] = scientific_sha256(result)
     return result
 
@@ -5205,6 +5684,26 @@ def load_fresh_analysis_result(layout: Any, operation_id: str) -> dict[str, Any]
             if isinstance(result.get("rendered_subject_verdict"), Mapping)
             else None
         ),
+        "reproduces_run_id": (
+            result.get("reproduces_run_id")
+            if isinstance(result.get("reproduces_run_id"), str)
+            else None
+        ),
+        "run_relationship": (
+            result.get("run_relationship")
+            if result.get("run_relationship") in {"fresh", "reproduction", "refresh"}
+            else "fresh"
+        ),
+        "refresh_of_request_id": (
+            result.get("refresh_of_request_id")
+            if isinstance(result.get("refresh_of_request_id"), str)
+            else None
+        ),
+        "reproduction_comparison": (
+            deepcopy(dict(result["reproduction_comparison"]))
+            if isinstance(result.get("reproduction_comparison"), Mapping)
+            else None
+        ),
     }
 
 
@@ -5317,6 +5816,23 @@ def analysis_run_status(
         "verification_state": verification,
         "availability_state": availability,
         "delivery_mode": "fresh_execution",
+        "run_relationship": (
+            payload.get("run_relationship")
+            if payload.get("run_relationship") in {"fresh", "reproduction", "refresh"}
+            else "reproduction"
+            if isinstance(payload.get("reproduces_run_id"), str)
+            else "fresh"
+        ),
+        "reproduces_run_id": (
+            payload.get("reproduces_run_id")
+            if isinstance(payload.get("reproduces_run_id"), str)
+            else None
+        ),
+        "refresh_of_request_id": (
+            payload.get("refresh_of_request_id")
+            if isinstance(payload.get("refresh_of_request_id"), str)
+            else None
+        ),
         "reason_code": reason_code,
         "failure_code": operation.failure_code or execution_failure_code,
         "recovery_action": operation.recovery_action,
@@ -5374,6 +5890,11 @@ def analysis_run_status(
         "rendered_subject_verdict": (
             deepcopy(final_evidence.get("rendered_subject_verdict"))
             if isinstance(final_evidence.get("rendered_subject_verdict"), Mapping)
+            else None
+        ),
+        "reproduction_comparison": (
+            deepcopy(final_evidence.get("reproduction_comparison"))
+            if isinstance(final_evidence.get("reproduction_comparison"), Mapping)
             else None
         ),
     }

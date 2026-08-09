@@ -12,6 +12,8 @@ from backend.app import analysis_runs as analysis_runs_module
 from backend.app.analysis_runs import (
     ENGINE_INPUT_SCHEMA_VERSION,
     analysis_run_id_for_operation,
+    build_reproduction_projection,
+    compare_reproduction_projections,
     estimate_primary_atte_and_context,
     materialize_propensity_and_s9,
     scientific_json,
@@ -163,6 +165,104 @@ def test_scientific_encoding_is_float_stable_and_excludes_delivery_metadata() ->
         },
     }
     assert scientific_sha256(base) == scientific_sha256(with_delivery_metadata)
+
+
+def test_reproduction_projection_ignores_run_identity_and_compares_declared_tolerances() -> None:
+    target = {
+        "engine_request": {
+            "dataset_version_id": "dataset-1",
+            "root_seed": 17,
+            "analysis_run_id": "analysis-run-target",
+            "accepted_at": "2026-08-09T00:00:00+00:00",
+        },
+        "runtime_fingerprint": {
+            "schema_version": "analysis-runtime-fingerprint.v1",
+            "python": {"version": "3.12.13"},
+            "analysis_run_id": "analysis-run-target",
+        },
+        "engine_result": {
+            "status": "estimated",
+            "estimate": 1.0,
+            "analysis_run_id": "analysis-run-target",
+        },
+    }
+    candidate = {
+        **target,
+        "engine_request": {
+            **target["engine_request"],
+            "analysis_run_id": "analysis-run-candidate",
+            "accepted_at": "2026-08-09T00:01:00+00:00",
+        },
+        "runtime_fingerprint": {
+            **target["runtime_fingerprint"],
+            "analysis_run_id": "analysis-run-candidate",
+        },
+        "engine_result": {
+            **target["engine_result"],
+            "analysis_run_id": "analysis-run-candidate",
+            "estimate": 1.000000001,
+        },
+    }
+
+    expected = build_reproduction_projection(target)
+    observed = build_reproduction_projection(candidate)
+    comparison = compare_reproduction_projections(expected, observed)
+
+    assert expected["schema_version"] == "analysis-run-reproduction-projection.v1"
+    assert "analysis_run_id" not in json.dumps(expected)
+    assert comparison["status"] == "passed"
+    assert comparison["declared_tolerances"]["schema_version"] == (
+        "causal-engine-numeric-tolerances.v1"
+    )
+
+
+def test_reproduction_projection_mismatch_is_typed_and_fails_closed() -> None:
+    expected = build_reproduction_projection(
+        {"engine_result": {"status": "abstained", "reason_code": "A"}}
+    )
+    observed = build_reproduction_projection(
+        {"engine_result": {"status": "abstained", "reason_code": "B"}}
+    )
+
+    comparison = compare_reproduction_projections(expected, observed)
+
+    assert comparison["status"] == "failed"
+    assert comparison["failure_code"] == "RUN_REPRODUCIBILITY_VIOLATION"
+    assert comparison["comparison_classes"][0]["status"] == "failed"
+
+
+def test_reproduction_member_hash_mismatch_is_typed_and_fails_closed() -> None:
+    expected = build_reproduction_projection(
+        {"engine_result": {"status": "abstained", "reason_code": "A"}}
+    )
+    observed = build_reproduction_projection(
+        {"engine_result": {"status": "abstained", "reason_code": "A"}}
+    )
+
+    comparison = compare_reproduction_projections(
+        expected,
+        observed,
+        expected_member_hashes={"engine_result": "sha256:expected"},
+        observed_member_hashes={"engine_result": "sha256:observed"},
+    )
+
+    assert comparison["status"] == "failed"
+    assert comparison["failure_code"] == "RUN_REPRODUCIBILITY_VIOLATION"
+    assert comparison["comparison_classes"][0]["status"] == "failed"
+
+
+def test_reproduction_projection_preserves_scientific_null_presence() -> None:
+    expected = build_reproduction_projection(
+        {"engine_result": {"status": "abstained", "reason_code": None}}
+    )
+    observed = build_reproduction_projection(
+        {"engine_result": {"status": "abstained"}}
+    )
+
+    comparison = compare_reproduction_projections(expected, observed)
+
+    assert comparison["status"] == "failed"
+    assert comparison["failure_code"] == "RUN_REPRODUCIBILITY_VIOLATION"
 
 
 def test_suite_request_validation_has_closed_schema_and_fixed_variant_order() -> None:
@@ -1113,7 +1213,7 @@ def test_fresh_worker_publishes_sealed_estimated_result_with_verdict(
         )
         operation_id = response.json()["operation"]["operation_id"]
         terminal = response.json()["operation"]
-        for _ in range(300):
+        for _ in range(900):
             terminal = client.get(f"/api/operations/{operation_id}").json()
             if terminal["state"] in {
                 "SUCCEEDED",
@@ -1146,4 +1246,94 @@ def test_fresh_worker_publishes_sealed_estimated_result_with_verdict(
         "state": "sealed_machine_verified",
         "claim_scope": analysis_run["evidence_verdict"]["permitted_claim_scope"],
         "effect_display": "ADJUSTED_ASSOCIATION",
+    }
+
+
+def test_fresh_reproduction_is_a_new_run_with_a_verified_comparison(
+    tmp_path: Path,
+) -> None:
+    with _client(tmp_path / "state", start_operation_runner=True) as client:
+        original = client.post(
+            "/api/operations",
+            json={
+                "idempotency_key": "reproduction-source",
+                "operation_kind": "FRESH_ANALYSIS",
+                "memory_required_bytes": 1024,
+                "request": {"suite_request": _suite_request()},
+            },
+        )
+        assert original.status_code == 202
+        original_operation = original.json()["operation"]
+        original_operation_id = original_operation["operation_id"]
+        original_terminal = original_operation
+        for _ in range(200):
+            original_terminal = client.get(
+                f"/api/operations/{original_operation_id}"
+            ).json()
+            if original_terminal["state"] in {"SUCCEEDED", "FAILED"}:
+                break
+            time.sleep(0.05)
+        assert original_terminal["state"] == "SUCCEEDED"
+        target = original_terminal["analysis_run"]
+
+        reproduction = client.post(
+            "/api/operations",
+            json={
+                "idempotency_key": "reproduction-candidate",
+                "operation_kind": "FRESH_REPRODUCTION",
+                "memory_required_bytes": 1024,
+                "request": {
+                    "target_analysis_run_id": target["analysis_run_id"],
+                },
+            },
+        )
+        assert reproduction.status_code == 202
+        accepted = reproduction.json()["operation"]
+        assert accepted["operation_kind"] == "FRESH_REPRODUCTION"
+        assert accepted["analysis_run"]["run_relationship"] == "reproduction"
+        assert accepted["analysis_run"]["reproduces_run_id"] == target[
+            "analysis_run_id"
+        ]
+
+        terminal = accepted
+        for _ in range(200):
+            terminal = client.get(
+                f"/api/operations/{accepted['operation_id']}"
+            ).json()
+            if terminal["state"] in {"SUCCEEDED", "FAILED"}:
+                break
+            time.sleep(0.05)
+
+    assert terminal["state"] == "SUCCEEDED"
+    reproduced = terminal["analysis_run"]
+    assert reproduced["status"] == target["status"]
+    assert reproduced["analysis_run_id"] != target["analysis_run_id"]
+    assert reproduced["scientific_request_digest"] == target[
+        "scientific_request_digest"
+    ]
+    assert reproduced["runtime_fingerprint_digest"] == target[
+        "runtime_fingerprint_digest"
+    ]
+    assert reproduced["reproduces_run_id"] == target["analysis_run_id"]
+    assert reproduced["reproduction_comparison"]["status"] == "passed"
+
+
+def test_fresh_reproduction_rejects_an_unavailable_target_without_admission(
+    tmp_path: Path,
+) -> None:
+    with _client(tmp_path / "state", start_operation_runner=False) as client:
+        response = client.post(
+            "/api/operations",
+            json={
+                "idempotency_key": "reproduction-missing-target",
+                "operation_kind": "FRESH_REPRODUCTION",
+                "memory_required_bytes": 1024,
+                "request": {"target_analysis_run_id": "analysis-run-missing"},
+            },
+        )
+
+    assert response.status_code == 404
+    assert response.json() == {
+        "code": "RUN_REPRODUCTION_TARGET_UNAVAILABLE",
+        "recovery_action": "SELECT_A_VERIFIED_ANALYSIS_RUN_AND_RETRY",
     }

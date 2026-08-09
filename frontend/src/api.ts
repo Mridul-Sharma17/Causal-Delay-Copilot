@@ -9,6 +9,7 @@ import {
   parseProactiveInvestigationResponse,
   parseProactiveProposalListResponse,
   parseReactiveInvestigationResponse,
+  parseRefreshInvestigationResponse,
   parseRiskSignalListResponse,
   parseReplayResponse,
   parseValidatedReferenceDelivery,
@@ -23,6 +24,7 @@ import {
   type ProactiveInvestigationResponse,
   type ProactiveProposalListResponse,
   type ReactiveInvestigationResponse,
+  type RefreshInvestigationResponse,
   type RiskSignalListResponse,
   type ReplayResponse,
   type ValidatedReferenceDelivery,
@@ -324,5 +326,30 @@ export function submitProactiveInvestigation(
       }),
     },
     parseProactiveInvestigationResponse,
+  );
+}
+
+export function refreshInvestigation(
+  investigationRequestId: string,
+  request: {
+    idempotency_key: string;
+    trigger_mode: "reactive" | "proactive";
+    request: Record<string, unknown>;
+    observation_cutoff: Record<string, unknown>;
+    root_seed: number;
+  },
+): Promise<RefreshInvestigationResponse> {
+  return requestJson(
+    `/api/investigations/${encodeURIComponent(investigationRequestId)}/refresh`,
+    {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        "content-type": "application/json",
+      },
+      credentials: "same-origin",
+      body: JSON.stringify(request),
+    },
+    parseRefreshInvestigationResponse,
   );
 }

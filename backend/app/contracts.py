@@ -43,8 +43,19 @@ class AuditOccurrenceRequest(BaseModel):
         max_length=128,
         pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
     )
-    occurrence_kind: Literal["BOOT_HEALTH_CHECK"]
-    outcome_code: Literal["CORE_READY", "CORE_READY_GEMINI_DEGRADED"]
+    occurrence_kind: Literal[
+        "BOOT_HEALTH_CHECK",
+        "ANALYSIS_RUN_DELIVERY",
+        "REFRESH_INVESTIGATION_SNAPSHOT",
+    ]
+    outcome_code: Literal[
+        "CORE_READY",
+        "CORE_READY_GEMINI_DEGRADED",
+        "FRESH_ANALYSIS_REQUESTED",
+        "FRESH_REPRODUCTION_REQUESTED",
+        "REFRESH_ANALYSIS_REQUESTED",
+        "REFRESH_SNAPSHOT_CREATED",
+    ]
 
 
 class AuditOccurrenceResponse(BaseModel):
@@ -79,6 +90,8 @@ class AuditOccurrenceViewResponse(BaseModel):
         "REACTIVE_INGRESS",
         "PROACTIVE_INGRESS",
         "DECISION_BRIEF_SNAPSHOT",
+        "ANALYSIS_RUN_DELIVERY",
+        "REFRESH_INVESTIGATION_SNAPSHOT",
     ]
     outcome_code: Literal[
         "CORE_READY",
@@ -89,6 +102,7 @@ class AuditOccurrenceViewResponse(BaseModel):
         "RISK_SIGNAL_INTEGRITY_FAILED",
         "RISK_SIGNAL_REVISION_CONFLICT",
         "RISK_SIGNAL_CLOCK_UNUSABLE",
+        "REFRESH_CUTOFF_NOT_LATER",
         "RISK_SIGNAL_SUBJECT_UNRESOLVED",
         "RISK_SIGNAL_SUBJECT_AMBIGUOUS",
         "RISK_SIGNAL_SUBJECT_NOT_OPEN",
@@ -117,6 +131,10 @@ class AuditOccurrenceViewResponse(BaseModel):
         "OUTCOME_TEMPORALLY_INVALID",
         "CANCELLED_BEFORE_MILESTONE",
         "DECISION_BRIEF_PUBLISHED",
+        "FRESH_ANALYSIS_REQUESTED",
+        "FRESH_REPRODUCTION_REQUESTED",
+        "REFRESH_ANALYSIS_REQUESTED",
+        "REFRESH_SNAPSHOT_CREATED",
     ]
     created_at: datetime
     source_role_ceiling: SourceRoleCeilingResponse | None = None
@@ -726,6 +744,9 @@ class AnalysisRunStatusResponse(BaseModel):
     verification_state: Literal["pending", "machine_verified", "reference_validated", "invalid"]
     availability_state: Literal["available", "suppressed"]
     delivery_mode: Literal["fresh_execution", "existing_run_reuse"]
+    run_relationship: Literal["fresh", "reproduction", "refresh"] = "fresh"
+    reproduces_run_id: str | None = None
+    refresh_of_request_id: str | None = None
     reason_code: str | None
     failure_code: str | None
     recovery_action: str | None
@@ -749,6 +770,7 @@ class AnalysisRunStatusResponse(BaseModel):
     rendered_verdict: dict[str, str] | None = None
     subject_verdict: dict[str, Any] | None = None
     rendered_subject_verdict: dict[str, str] | None = None
+    reproduction_comparison: dict[str, Any] | None = None
 
 
 class OperationResponse(BaseModel):
@@ -887,6 +909,20 @@ class RiskSignalRequest(BaseModel):
         default_factory=lambda: RiskSignalFieldValueRequest(state="missing")
     )
     advisory_context: RiskSignalFieldValueRequest | None = None
+
+
+class RefreshInvestigationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    idempotency_key: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+    )
+    trigger_mode: Literal["reactive", "proactive"]
+    request: dict[str, Any]
+    observation_cutoff: TemporalValueRequest
+    root_seed: int = Field(ge=0, le=2**64 - 1)
 
 
 class ProactiveSubjectFieldRequest(BaseModel):
@@ -1266,3 +1302,30 @@ class ProactiveInvestigationResponse(BaseModel):
 
     result: Literal["CREATED", "IDEMPOTENT_REPLAY"]
     attempt: ProactiveIngressAttemptResponse
+
+
+class RefreshInvestigationSnapshotResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["refresh-investigation-snapshot.v1"]
+    snapshot_id: str
+    predecessor_request_id: str
+    investigation_request_id: str
+    trigger_mode: Literal["reactive", "proactive"]
+    dataset_version_id: str
+    observation_cutoff: dict[str, Any]
+    causal_input_digest: str
+    content_hash: str
+    occurrence_id: str
+    event_seq: int = Field(gt=0)
+    created_at: datetime
+
+
+class RefreshInvestigationResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    result: Literal["CREATED", "IDEMPOTENT_REPLAY"]
+    trigger_mode: Literal["reactive", "proactive"]
+    attempt: ReactiveIngressAttemptResponse | ProactiveIngressAttemptResponse
+    snapshot: RefreshInvestigationSnapshotResponse | None
+    operation: OperationResponse | None

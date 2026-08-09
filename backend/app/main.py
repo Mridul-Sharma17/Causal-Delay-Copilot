@@ -39,6 +39,9 @@ from .contracts import (
     ProactiveFixtureRequest,
     ProactiveProposalListResponse,
     ProactiveProposalRequest,
+    RefreshInvestigationRequest,
+    RefreshInvestigationResponse,
+    RefreshInvestigationSnapshotResponse,
     ReactiveInvestigationResponse,
     ReactiveFixtureRequest,
     ReplayResponse,
@@ -58,6 +61,7 @@ from .analysis_runs import (
     analysis_run_id_for_operation,
     analysis_run_status,
     build_fresh_analysis_payload,
+    build_fresh_reproduction_payload,
     is_strict_fresh_analysis_request,
     load_fresh_analysis_result,
 )
@@ -198,10 +202,18 @@ class ReactiveBodyLimitMiddleware:
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         path = scope.get("path")
-        if scope.get("type") != "http" or path not in {
-            "/api/investigations/reactive",
-            "/api/investigations/proactive",
-        }:
+        is_refresh = (
+            isinstance(path, str)
+            and path.startswith("/api/investigations/")
+            and path.endswith("/refresh")
+        )
+        if scope.get("type") != "http" or (
+            path not in {
+                "/api/investigations/reactive",
+                "/api/investigations/proactive",
+            }
+            and not is_refresh
+        ):
             await self.app(scope, receive, send)
             return
         proactive = path == "/api/investigations/proactive"
@@ -574,7 +586,7 @@ def create_app(
         )
         analysis_run = None
         if (
-            operation.operation_kind == "FRESH_ANALYSIS"
+            operation.operation_kind in {"FRESH_ANALYSIS", "FRESH_REPRODUCTION"}
             and isinstance(operation_request, dict)
             and operation_request.get("schema_version") == "analysis-run-admission.v1"
         ):
@@ -705,6 +717,20 @@ def create_app(
                     error.recovery_action,
                     error.status_code,
                 ) from error
+        elif request.operation_kind == "FRESH_REPRODUCTION":
+            try:
+                stored_request = build_fresh_reproduction_payload(
+                    core_store,
+                    resolution.snapshot.workspace_id,
+                    request.request,
+                    resolved_settings,
+                )
+            except AnalysisRunRequestError as error:
+                raise WorkspaceRequestError(
+                    SafeErrorCode(error.code),
+                    error.recovery_action,
+                    error.status_code,
+                ) from error
         stored = core_store.admit_operation(
             resolution.snapshot.workspace_id,
             operation_kind=request.operation_kind,
@@ -713,6 +739,19 @@ def create_app(
             memory_required_bytes=memory_required_bytes,
             state_root=resolved_settings.state_root,
         )
+        if request.operation_kind in {"FRESH_ANALYSIS", "FRESH_REPRODUCTION"}:
+            core_store.append_occurrence(
+                AuditOccurrenceRequest(
+                    idempotency_key=f"analysis-run-request:{stored.operation.operation_id}",
+                    occurrence_kind="ANALYSIS_RUN_DELIVERY",
+                    outcome_code=(
+                        "FRESH_REPRODUCTION_REQUESTED"
+                        if request.operation_kind == "FRESH_REPRODUCTION"
+                        else "FRESH_ANALYSIS_REQUESTED"
+                    ),
+                ),
+                resolution.snapshot.workspace_id,
+            )
         response = OperationMutationResponse(
             result="IDEMPOTENT_REPLAY" if stored.replayed else "CREATED",
             operation=operation_response(stored.operation),
@@ -1235,6 +1274,128 @@ def create_app(
         return attach_workspace_cookie(
             JSONResponse(
                 status_code=200 if stored.result == "IDEMPOTENT_REPLAY" else 201,
+                content=response.model_dump(mode="json"),
+            ),
+            resolution,
+        )
+
+    @app.post(
+        "/api/investigations/{investigation_request_id}/refresh",
+        response_model=RefreshInvestigationResponse,
+        status_code=202,
+    )
+    async def refresh_investigation(
+        request_context: Request,
+        investigation_request_id: str,
+        request: RefreshInvestigationRequest,
+    ) -> JSONResponse:
+        resolution = resolve_workspace(request_context)
+        try:
+            if request.trigger_mode == "reactive":
+                source_request = RiskSignalRequest.model_validate(request.request)
+                if source_request.trigger_mode != "reactive":
+                    raise ValueError
+                stored = core_store.create_reactive_investigation(
+                    source_request,
+                    resolution.snapshot.workspace_id,
+                    idempotency_key=request.idempotency_key,
+                    rerun_of_request_id=investigation_request_id,
+                    refresh_observation_cutoff=request.observation_cutoff,
+                )
+            else:
+                source_request = ProactiveProposalRequest.model_validate(request.request)
+                if source_request.trigger_mode != "proactive":
+                    raise ValueError
+                stored = core_store.create_proactive_investigation(
+                    source_request,
+                    resolution.snapshot.workspace_id,
+                    idempotency_key=request.idempotency_key,
+                    rerun_of_request_id=investigation_request_id,
+                    refresh_observation_cutoff=request.observation_cutoff,
+                )
+        except ValueError as error:
+            raise WorkspaceRequestError(
+                SafeErrorCode(
+                    "RISK_SIGNAL_SCHEMA_UNSUPPORTED"
+                    if request.trigger_mode == "reactive"
+                    else "PROACTIVE_SCHEMA_UNSUPPORTED"
+                ),
+                "USE_THE_TYPED_REFRESH_SOURCE_REQUEST_AND_RETRY",
+                422,
+            ) from error
+
+        operation = None
+        refreshed_request_id = stored.attempt.get("investigation_request_id")
+        if (
+            stored.attempt.get("status")
+            in {"accepted", "accepted_with_warning"}
+            and isinstance(refreshed_request_id, str)
+        ):
+            try:
+                stored_operation_request = build_fresh_analysis_payload(
+                    core_store,
+                    resolution.snapshot.workspace_id,
+                    {
+                        "investigation_request_id": refreshed_request_id,
+                        "root_seed": request.root_seed,
+                    },
+                    resolved_settings,
+                )
+            except AnalysisRunRequestError as error:
+                raise WorkspaceRequestError(
+                    SafeErrorCode(error.code),
+                    error.recovery_action,
+                    error.status_code,
+                ) from error
+            stored_operation_request["run_relationship"] = "refresh"
+            stored_operation_request["refresh_of_request_id"] = investigation_request_id
+            stored_operation = core_store.admit_operation(
+                resolution.snapshot.workspace_id,
+                operation_kind="FRESH_ANALYSIS",
+                idempotency_key=f"refresh-analysis:{request.idempotency_key}",
+                request=stored_operation_request,
+                memory_required_bytes=resolved_settings.quotas.compute_memory_request_bytes,
+                state_root=resolved_settings.state_root,
+            )
+            operation = operation_response(stored_operation.operation)
+            core_store.append_occurrence(
+                AuditOccurrenceRequest(
+                    idempotency_key=f"analysis-run-request:{stored_operation.operation.operation_id}",
+                    occurrence_kind="ANALYSIS_RUN_DELIVERY",
+                    outcome_code="REFRESH_ANALYSIS_REQUESTED",
+                ),
+                resolution.snapshot.workspace_id,
+            )
+        elif stored.result == "IDEMPOTENT_REPLAY":
+            replayed_operation = core_store.get_operation_by_idempotency_key(
+                resolution.snapshot.workspace_id,
+                f"refresh-analysis:{request.idempotency_key}",
+            )
+            if replayed_operation is not None:
+                operation = operation_response(replayed_operation)
+
+        snapshot = (
+            core_store.get_refresh_investigation_snapshot(
+                resolution.snapshot.workspace_id,
+                refreshed_request_id,
+            )
+            if isinstance(refreshed_request_id, str)
+            else None
+        )
+        response = RefreshInvestigationResponse(
+            result="IDEMPOTENT_REPLAY" if stored.result == "IDEMPOTENT_REPLAY" else "CREATED",
+            trigger_mode=request.trigger_mode,
+            attempt=stored.attempt,
+            snapshot=(
+                RefreshInvestigationSnapshotResponse(**snapshot)
+                if isinstance(snapshot, dict)
+                else None
+            ),
+            operation=operation,
+        )
+        return attach_workspace_cookie(
+            JSONResponse(
+                status_code=200 if stored.result == "IDEMPOTENT_REPLAY" else 202,
                 content=response.model_dump(mode="json"),
             ),
             resolution,

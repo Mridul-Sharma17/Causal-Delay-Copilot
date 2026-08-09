@@ -11,12 +11,14 @@ import {
   publishDecisionBrief,
   pollOperation,
   recordBootOccurrence,
+  refreshInvestigation,
   replayDecisionBrief,
   submitReactiveInvestigation,
   submitProactiveInvestigation,
 } from "./api";
 import {
   auditOutcomeCode,
+  type AnalysisRunStatus,
   type AuditOccurrenceResponse,
   type DecisionBriefSnapshot,
   type DiagnosticResult,
@@ -35,7 +37,9 @@ import {
   type RiskSignalFixture,
   type RobustnessGrade,
   type RenderedEvidenceVerdict,
+  type RefreshInvestigationSnapshot,
   type ReplayResponse,
+  type RiskSignal,
   type SupplierMilestoneOutcome,
   type ValidatedReferenceDelivery,
 } from "./contracts";
@@ -49,6 +53,19 @@ type LineageState = "pending" | "loading" | "ready" | "failed";
 type RiskState = "pending" | "loading" | "ready" | "failed";
 type DecisionBriefState = "pending" | "publishing" | "ready" | "failed";
 type FreshOperationState = "idle" | "starting" | "polling" | "terminal" | "failed";
+
+function runRelationshipLabel(
+  relationship: AnalysisRunStatus["run_relationship"],
+): string {
+  switch (relationship) {
+    case "reproduction":
+      return "Fresh reproduction";
+    case "refresh":
+      return "Refresh investigation";
+    default:
+      return "Fresh run";
+  }
+}
 
 function createBootKey(outcomeCode: string): string {
   return `core-boot-health-v1:${outcomeCode}`;
@@ -117,6 +134,19 @@ function hasVerifiedPredictiveArtifacts(fixture: RiskSignalFixture | undefined):
     fixture.signal.predictor_artifact_ref.state === "present" &&
     fixture.signal.predictive_attribution_ref.state === "present"
   );
+}
+
+function laterObservationCutoff(signal: RiskSignal): Record<string, unknown> {
+  const source = signal.known_at;
+  const parsed = new Date(source.value);
+  if (Number.isNaN(parsed.getTime())) {
+    return { ...source };
+  }
+  const later = new Date(parsed.getTime() + 24 * 60 * 60 * 1000);
+  return {
+    ...source,
+    value: source.kind === "date" ? later.toISOString().slice(0, 10) : later.toISOString(),
+  };
 }
 
 function fieldState(value: LineageRecord): string {
@@ -1028,8 +1058,20 @@ function App() {
     useState<FreshOperationState>("idle");
   const [freshOperation, setFreshOperation] =
     useState<DurableOperation | null>(null);
+  const [reproductionOperationState, setReproductionOperationState] =
+    useState<FreshOperationState>("idle");
+  const [reproductionOperation, setReproductionOperation] =
+    useState<DurableOperation | null>(null);
+  const [refreshOperationState, setRefreshOperationState] =
+    useState<FreshOperationState>("idle");
+  const [refreshOperation, setRefreshOperation] =
+    useState<DurableOperation | null>(null);
+  const [refreshSnapshot, setRefreshSnapshot] =
+    useState<RefreshInvestigationSnapshot | null>(null);
   const bootKey = useRef<string | null>(null);
   const freshOperationKey = useRef<string | null>(null);
+  const reproductionOperationKey = useRef<string | null>(null);
+  const refreshOperationKey = useRef<string | null>(null);
 
   const loadHealth = useCallback(async () => {
     setJourneyState("loading");
@@ -1059,6 +1101,13 @@ function App() {
       setFreshOperationState("idle");
       setFreshOperation(null);
       freshOperationKey.current = null;
+      setReproductionOperationState("idle");
+      setReproductionOperation(null);
+      reproductionOperationKey.current = null;
+      setRefreshOperationState("idle");
+      setRefreshOperation(null);
+      setRefreshSnapshot(null);
+      refreshOperationKey.current = null;
 
       try {
         const nextWorkspace = await getWorkspace();
@@ -1281,6 +1330,97 @@ function App() {
     }
   }, [reference, riskAttempt]);
 
+  const requestFreshReproduction = useCallback(async () => {
+    const targetRun = freshOperation?.analysis_run;
+    if (
+      freshOperation === null ||
+      targetRun === null ||
+      targetRun === undefined ||
+      freshOperation.state !== "SUCCEEDED"
+    ) {
+      return;
+    }
+    const idempotencyKey =
+      reproductionOperationKey.current ??
+      `fresh-reproduction:${targetRun.analysis_run_id}`;
+    reproductionOperationKey.current = idempotencyKey;
+    setReproductionOperationState("starting");
+    try {
+      const accepted = await createOperation({
+        idempotency_key: idempotencyKey,
+        operation_kind: "FRESH_REPRODUCTION",
+        request: { target_analysis_run_id: targetRun.analysis_run_id },
+      });
+      setReproductionOperation(accepted.operation);
+      if (
+        accepted.operation.state === "SUCCEEDED" ||
+        accepted.operation.state === "FAILED" ||
+        accepted.operation.state === "CANCELLED" ||
+        accepted.operation.state === "TIMED_OUT" ||
+        accepted.operation.state === "INTERRUPTED" ||
+        accepted.operation.state === "REJECTED"
+      ) {
+        setReproductionOperationState("terminal");
+        return;
+      }
+      setReproductionOperationState("polling");
+      const terminal = await pollOperation(accepted.operation.operation_id);
+      setReproductionOperation(terminal);
+      setReproductionOperationState("terminal");
+    } catch {
+      setReproductionOperationState("failed");
+    }
+  }, [freshOperation]);
+
+  const requestRefreshInvestigation = useCallback(async () => {
+    const fixture = preferredRiskFixture(riskFixtures);
+    const investigationRequestId = riskAttempt?.investigation_request_id;
+    if (
+      fixture === undefined ||
+      investigationRequestId === null ||
+      investigationRequestId === undefined
+    ) {
+      return;
+    }
+    const idempotencyKey =
+      refreshOperationKey.current ??
+      `refresh-investigation:${investigationRequestId}:later-cutoff`;
+    refreshOperationKey.current = idempotencyKey;
+    setRefreshOperationState("starting");
+    try {
+      const response = await refreshInvestigation(investigationRequestId, {
+        idempotency_key: idempotencyKey,
+        trigger_mode: "reactive",
+        request: fixture.signal as unknown as Record<string, unknown>,
+        observation_cutoff: laterObservationCutoff(fixture.signal),
+        root_seed: 0,
+      });
+      setRefreshSnapshot(response.snapshot);
+      setRefreshOperation(response.operation);
+      if (response.operation === null) {
+        setRefreshOperationState("terminal");
+        return;
+      }
+      if (
+        response.operation.state === "SUCCEEDED" ||
+        response.operation.state === "FAILED" ||
+        response.operation.state === "CANCELLED" ||
+        response.operation.state === "TIMED_OUT" ||
+        response.operation.state === "INTERRUPTED" ||
+        response.operation.state === "REJECTED"
+      ) {
+        setRefreshOperationState("terminal");
+        return;
+      }
+      setRefreshOperationState("polling");
+      const terminal = await pollOperation(response.operation.operation_id);
+      setRefreshOperation(terminal);
+      setRefreshOperationState("terminal");
+    } catch {
+      setRefreshOperationState("failed");
+    }
+  }, [riskAttempt, riskFixtures]);
+
   useEffect(() => {
     void loadHealth();
   }, [loadHealth]);
@@ -1448,6 +1588,42 @@ function App() {
                       Fresh work is admitted durably and polled over the typed API. Existing
                       reference evidence is never presented as a fresh run.
                     </p>
+                    <p className="supporting-copy">
+                      A refresh investigation creates a new request, cutoff, and causal
+                      snapshot; replay reuses an earlier response, while reproduction reruns
+                      the same scientific projection.
+                    </p>
+                    {freshOperation?.analysis_run !== null &&
+                      freshOperation?.analysis_run !== undefined && (
+                        <dl className="risk-facts">
+                          <div>
+                            <dt>Run relationship</dt>
+                            <dd>
+                              {runRelationshipLabel(
+                                freshOperation.analysis_run.run_relationship,
+                              )}
+                            </dd>
+                          </div>
+                          {freshOperation.analysis_run.reproduces_run_id !== null && (
+                            <div>
+                              <dt>Reproduction target</dt>
+                              <dd>
+                                <code>{freshOperation.analysis_run.reproduces_run_id}</code>
+                              </dd>
+                            </div>
+                          )}
+                          {freshOperation.analysis_run.refresh_of_request_id !== null && (
+                            <div>
+                              <dt>Refresh predecessor</dt>
+                              <dd>
+                                <code>
+                                  {freshOperation.analysis_run.refresh_of_request_id}
+                                </code>
+                              </dd>
+                            </div>
+                          )}
+                        </dl>
+                      )}
                     <button
                       className="retry-button"
                       type="button"
@@ -1465,6 +1641,55 @@ function App() {
                           ? "Polling fresh analysis"
                           : "Request fresh analysis"}
                     </button>
+                    <button
+                      className="retry-button"
+                      type="button"
+                      onClick={() => void requestRefreshInvestigation()}
+                      disabled={
+                        riskAttempt?.investigation_request_id === null ||
+                        riskAttempt?.investigation_request_id === undefined ||
+                        refreshOperationState === "starting" ||
+                        refreshOperationState === "polling"
+                      }
+                    >
+                      {refreshOperationState === "starting"
+                        ? "Admitting refresh investigation"
+                        : refreshOperationState === "polling"
+                          ? "Polling refresh investigation"
+                          : "Refresh investigation"}
+                    </button>
+                    <button
+                      className="retry-button"
+                      type="button"
+                      onClick={() => void requestFreshReproduction()}
+                      disabled={
+                        freshOperation?.state !== "SUCCEEDED" ||
+                        reproductionOperationState === "starting" ||
+                        reproductionOperationState === "polling"
+                      }
+                    >
+                      {reproductionOperationState === "starting"
+                        ? "Admitting fresh reproduction"
+                        : reproductionOperationState === "polling"
+                          ? "Polling fresh reproduction"
+                      : "Reproduce this fresh run"}
+                    </button>
+                    {refreshOperationState === "failed" && (
+                      <p className="lineage-warning" role="status">
+                        Refresh investigation is unavailable. The predecessor request was not
+                        changed or reused as a refresh.
+                      </p>
+                    )}
+                    {refreshOperationState === "terminal" && (
+                      <p className="supporting-copy" role="status">
+                        {refreshOperation?.analysis_run?.run_relationship === "refresh" &&
+                        refreshSnapshot !== null
+                          ? `Refresh investigation created a new request and causal snapshot at audit event ${refreshSnapshot.event_seq}.`
+                          : refreshOperation?.state === "SUCCEEDED"
+                            ? "Refresh investigation completed without a comparable new run."
+                            : `Refresh investigation ended ${refreshOperation?.state ?? "UNAVAILABLE"}; the predecessor remains unchanged.`}
+                      </p>
+                    )}
                     {freshOperationState === "failed" && (
                       <p className="lineage-warning" role="status">
                         Fresh operation status is unavailable. No result was substituted.
@@ -1508,6 +1733,23 @@ function App() {
                         />
                       </>
                     )}
+                    {reproductionOperationState === "failed" && (
+                      <p className="lineage-warning" role="status">
+                        Fresh reproduction is unavailable. The source run was not repaired or
+                        replaced.
+                      </p>
+                    )}
+                    {reproductionOperationState === "terminal" &&
+                      reproductionOperation !== null && (
+                        <p className="supporting-copy" role="status">
+                          {reproductionOperation.analysis_run?.reproduction_comparison
+                            ?.status === "passed"
+                            ? "Fresh reproduction completed and its declared scientific projection matched the target under the registered tolerances."
+                            : reproductionOperation.state === "SUCCEEDED"
+                              ? "Fresh reproduction completed without a comparable scientific projection."
+                              : `Fresh reproduction ended ${reproductionOperation.state}; no source result was substituted.`}
+                        </p>
+                      )}
                   </section>
                 </>
               )}

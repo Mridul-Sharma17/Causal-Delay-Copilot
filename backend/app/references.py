@@ -756,6 +756,66 @@ def _verify_bundle(
             raise ReferenceVerificationError("reproduction comparison schema is unsupported")
         if comparison.get("status") != "passed":
             raise ReferenceVerificationError("reproduction comparison did not pass")
+        if comparison.get("target_run_id") != manifest.get("reproduces_run_id"):
+            raise ReferenceVerificationError("reproduction target binding does not match")
+        if comparison.get("scientific_request_digest") != manifest.get(
+            "scientific_request_digest"
+        ) or comparison.get("runtime_fingerprint_digest") != manifest.get(
+            "runtime_fingerprint_digest"
+        ):
+            raise ReferenceVerificationError("reproduction identity does not match")
+        declared_tolerances = comparison.get("declared_tolerances")
+        from .analysis_runs import (
+            NUMERIC_TOLERANCE_REGISTRY,
+            REPRODUCTION_PROJECTION_SCHEMA_VERSION,
+            build_reproduction_projection,
+            compare_reproduction_projections,
+        )
+
+        if declared_tolerances != NUMERIC_TOLERANCE_REGISTRY:
+            raise ReferenceVerificationError("reproduction tolerances are unsupported")
+        expected_projection = comparison.get("expected_projection")
+        observed_projection = comparison.get("observed_projection")
+        if not isinstance(expected_projection, Mapping) or not isinstance(
+            observed_projection, Mapping
+        ) or expected_projection.get("schema_version") != REPRODUCTION_PROJECTION_SCHEMA_VERSION or observed_projection.get(
+            "schema_version"
+        ) != REPRODUCTION_PROJECTION_SCHEMA_VERSION:
+            raise ReferenceVerificationError("reproduction projections are unsupported")
+        for projection in (expected_projection, observed_projection):
+            projection_values = projection.get("projections")
+            role_digests = projection.get("role_digests")
+            if not isinstance(projection_values, Mapping) or not isinstance(
+                role_digests, Mapping
+            ):
+                raise ReferenceVerificationError(
+                    "reproduction projection values are unsupported"
+                )
+            recomputed_projection = build_reproduction_projection(projection_values)
+            if (
+                projection.get("roles") != recomputed_projection["roles"]
+                or role_digests != recomputed_projection["role_digests"]
+                or projection.get("projection_digest")
+                != recomputed_projection["projection_digest"]
+            ):
+                raise ReferenceVerificationError(
+                    "reproduction projection identity is inconsistent"
+                )
+        checked_comparison = compare_reproduction_projections(
+            expected_projection,
+            observed_projection,
+            expected_member_hashes=expected_projection["role_digests"],
+            observed_member_hashes=observed_projection["role_digests"],
+        )
+        if checked_comparison["status"] != "passed":
+            raise ReferenceVerificationError("reproduction comparison is inconsistent")
+        if comparison.get("member_hashes") != {
+            "expected": dict(expected_projection["role_digests"]),
+            "observed": dict(observed_projection["role_digests"]),
+        }:
+            raise ReferenceVerificationError("reproduction member hashes are inconsistent")
+        if comparison.get("comparison_classes") != checked_comparison["comparison_classes"]:
+            raise ReferenceVerificationError("reproduction comparison identity is inconsistent")
     return manifest, payloads
 
 
@@ -1188,4 +1248,21 @@ def verify_published_analysis_bundle(
     return PublishedBundle(
         analysis_run_id=analysis_run_id,
         bundle_manifest_hash=str(manifest["bundle_manifest_hash"]),
+    )
+
+
+def read_verified_analysis_bundle(
+    artifact_root: Path,
+    *,
+    analysis_run_id: str,
+    expected_build_id: str,
+    expected_runtime: Mapping[str, Any],
+) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
+    """Read a verified manifest and its safe payloads for reproduction only."""
+
+    return _verify_bundle(
+        artifact_root,
+        analysis_run_id,
+        expected_build_id,
+        expected_runtime,
     )

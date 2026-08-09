@@ -12,7 +12,7 @@ import sqlite3
 from typing import Any, Mapping
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
-from .audit import AuditStoreUnavailable
+from .audit import AuditIdempotencyConflict, AuditStoreUnavailable
 from .canonical import (
     Temporal as _Temporal,
     canonical_json as _canonical_json,
@@ -32,7 +32,9 @@ from .contracts import (
     RiskSignalFixtureResponse,
     RiskSignalPreviewResponse,
     RiskSignalRequest,
+    TemporalValueRequest,
 )
+from .governance import InvestigationRequestUnavailable
 from .eligibility_contract import (
     ADJUSTMENT_SET_FIELDS,
     LOAD_EXPOSURE_VARIANTS,
@@ -49,6 +51,7 @@ SCORE_SEMANTIC = "probability_supplier_milestone_miss"
 CONFIGURED_TARGET_MILESTONE_KIND = "supplier_handoff"
 CANONICAL_SLIPPAGE_DURATION_BASIS = "CALENDAR_DAY"
 TEMPORAL_ELIGIBILITY_RELEASE_REF = "temporal-eligibility-release.v1"
+REFRESH_SNAPSHOT_SCHEMA_VERSION = "refresh-investigation-snapshot.v1"
 ESTIMATOR_WINDOW_SELECTOR_VERSION = "estimator-window.v1"
 HISTORY_LOOKBACK_SELECTOR_VERSION = "history-lookback.v1"
 DEFAULT_FOLLOW_UP_HORIZON_DAYS = 0
@@ -106,6 +109,7 @@ _RISK_SIGNAL_CODES = (
     "RISK_SIGNAL_INTEGRITY_FAILED",
     "RISK_SIGNAL_REVISION_CONFLICT",
     "RISK_SIGNAL_CLOCK_UNUSABLE",
+    "REFRESH_CUTOFF_NOT_LATER",
     "RISK_SIGNAL_SUBJECT_UNRESOLVED",
     "RISK_SIGNAL_SUBJECT_AMBIGUOUS",
     "RISK_SIGNAL_SUBJECT_NOT_OPEN",
@@ -248,6 +252,32 @@ INVESTIGATION_REQUESTS_COLUMNS = [
     "payload_json",
 ]
 
+REFRESH_INVESTIGATION_SNAPSHOTS_TABLE = """
+    CREATE TABLE IF NOT EXISTS refresh_investigation_snapshots (
+        snapshot_id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL REFERENCES demo_workspaces(workspace_id),
+        predecessor_request_id TEXT NOT NULL REFERENCES investigation_requests(investigation_request_id),
+        investigation_request_id TEXT NOT NULL UNIQUE REFERENCES investigation_requests(investigation_request_id),
+        content_hash TEXT NOT NULL,
+        occurrence_id TEXT NOT NULL UNIQUE,
+        event_seq INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        UNIQUE (workspace_id, investigation_request_id)
+    )
+"""
+REFRESH_INVESTIGATION_SNAPSHOTS_COLUMNS = [
+    "snapshot_id",
+    "workspace_id",
+    "predecessor_request_id",
+    "investigation_request_id",
+    "content_hash",
+    "occurrence_id",
+    "event_seq",
+    "created_at",
+    "payload_json",
+]
+
 
 def _ensure_table(
     connection: sqlite3.Connection,
@@ -288,11 +318,19 @@ def ensure_risk_schema(connection: sqlite3.Connection, *, create: bool) -> None:
         PROACTIVE_INGRESS_ATTEMPTS_COLUMNS,
         create=create,
     )
+    _ensure_table(
+        connection,
+        "refresh_investigation_snapshots",
+        REFRESH_INVESTIGATION_SNAPSHOTS_TABLE,
+        REFRESH_INVESTIGATION_SNAPSHOTS_COLUMNS,
+        create=create,
+    )
     if create:
         for table_name in (
             "reactive_ingress_attempts",
             "proactive_ingress_attempts",
             "investigation_requests",
+            "refresh_investigation_snapshots",
         ):
             connection.execute(
                 f"""
@@ -372,6 +410,7 @@ _RECOVERY_ACTIONS = {
     "RISK_SIGNAL_INTEGRITY_FAILED": "REPAIR_PROTECTED_SIGNAL_AND_RETRY",
     "RISK_SIGNAL_REVISION_CONFLICT": "SUBMIT_A_NEW_SOURCE_REVISION",
     "RISK_SIGNAL_CLOCK_UNUSABLE": "PROVIDE_COMPARABLE_GENERATED_AND_KNOWN_CLOCKS",
+    "REFRESH_CUTOFF_NOT_LATER": "PROVIDE_A_LATER_REFRESH_OBSERVATION_CUTOFF",
     "RISK_SIGNAL_SUBJECT_UNRESOLVED": "SELECT_ONE_PUBLISHED_DATASET_VERSION_AND_SOURCE_ORDER_LINE",
     "RISK_SIGNAL_SUBJECT_AMBIGUOUS": "SELECT_EXACT_VERSION_AND_SOURCE_ORDER_LINE",
     "RISK_SIGNAL_SUBJECT_NOT_OPEN": "USE_AN_OPEN_ORDER_LINE_SIGNAL",
@@ -3334,6 +3373,18 @@ class ReactiveInvestigationMixin:
                     _canonical_json(request),
                 ),
             )
+            if (
+                isinstance(request.get("rerun_of_request_id"), Mapping)
+                and request["rerun_of_request_id"].get("state") == "present"
+            ):
+                self._persist_refresh_snapshot_locked(
+                    connection,
+                    workspace_id=workspace_id,
+                    request=request,
+                    predecessor_request_id=str(
+                        request["rerun_of_request_id"]["value"]
+                    ),
+                )
         connection.execute(
             """
             INSERT INTO reactive_ingress_attempts (
@@ -3363,6 +3414,116 @@ class ReactiveInvestigationMixin:
             ),
         )
         return attempt
+
+    def _persist_refresh_snapshot_locked(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        workspace_id: str,
+        request: Mapping[str, Any],
+        predecessor_request_id: str,
+    ) -> dict[str, Any]:
+        investigation_request_id = str(request["investigation_request_id"])
+        snapshot_id = "refresh-snapshot-" + uuid5(
+            NAMESPACE_URL,
+            f"causal-delay-copilot:refresh-snapshot:{workspace_id}:{predecessor_request_id}:{investigation_request_id}",
+        ).hex
+        snapshot = {
+            "schema_version": REFRESH_SNAPSHOT_SCHEMA_VERSION,
+            "snapshot_id": snapshot_id,
+            "predecessor_request_id": predecessor_request_id,
+            "investigation_request_id": investigation_request_id,
+            "trigger_mode": request["trigger_mode"],
+            "dataset_version_id": request["dataset_version_id"],
+            "observation_cutoff": deepcopy(request["observation_cutoff"]),
+            "causal_input_digest": request["causal_input_digest"],
+            "created_at": request["accepted_at"],
+        }
+        content_hash = _sha256(snapshot)
+        occurrence_id = uuid5(
+            NAMESPACE_URL,
+            f"causal-delay-copilot:refresh-snapshot-audit:{workspace_id}:{snapshot_id}",
+        ).hex
+        cursor = connection.execute(
+            """
+            INSERT INTO audit_events (
+                workspace_id, occurrence_id, idempotency_key,
+                occurrence_kind, outcome_code, content_hash, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                workspace_id,
+                occurrence_id,
+                f"refresh-snapshot:{snapshot_id}",
+                "REFRESH_INVESTIGATION_SNAPSHOT",
+                "REFRESH_SNAPSHOT_CREATED",
+                content_hash,
+                request["accepted_at"],
+            ),
+        )
+        if cursor.lastrowid is None:
+            raise sqlite3.DatabaseError("refresh snapshot audit event was not sequenced")
+        snapshot.update(
+            {
+                "content_hash": content_hash,
+                "occurrence_id": occurrence_id,
+                "event_seq": int(cursor.lastrowid),
+            }
+        )
+        connection.execute(
+            """
+            INSERT INTO refresh_investigation_snapshots (
+                snapshot_id, workspace_id, predecessor_request_id,
+                investigation_request_id, content_hash, occurrence_id,
+                event_seq, created_at, payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                snapshot_id,
+                workspace_id,
+                predecessor_request_id,
+                investigation_request_id,
+                content_hash,
+                occurrence_id,
+                int(cursor.lastrowid),
+                request["accepted_at"],
+                _canonical_json(snapshot),
+            ),
+        )
+        return snapshot
+
+    def get_refresh_investigation_snapshot(
+        self,
+        workspace_id: str,
+        investigation_request_id: str,
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            connection = self._connection_or_raise()
+            row = connection.execute(
+                """
+                SELECT content_hash, payload_json
+                FROM refresh_investigation_snapshots
+                WHERE workspace_id = ? AND investigation_request_id = ?
+                """,
+                (workspace_id, investigation_request_id),
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            snapshot = json.loads(str(row["payload_json"]))
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(snapshot, dict):
+            return None
+        content_hash = snapshot.get("content_hash")
+        content = {
+            key: value
+            for key, value in snapshot.items()
+            if key not in {"content_hash", "occurrence_id", "event_seq"}
+        }
+        if content_hash != row["content_hash"] or _sha256(content) != content_hash:
+            return None
+        return snapshot
 
     def _persist_proactive_ingress_attempt_locked(
         self,
@@ -3421,6 +3582,18 @@ class ReactiveInvestigationMixin:
                     _canonical_json(request),
                 ),
             )
+            if (
+                isinstance(request.get("rerun_of_request_id"), Mapping)
+                and request["rerun_of_request_id"].get("state") == "present"
+            ):
+                self._persist_refresh_snapshot_locked(
+                    connection,
+                    workspace_id=workspace_id,
+                    request=request,
+                    predecessor_request_id=str(
+                        request["rerun_of_request_id"]["value"]
+                    ),
+                )
         connection.execute(
             """
             INSERT INTO proactive_ingress_attempts (
@@ -3615,13 +3788,25 @@ class ReactiveInvestigationMixin:
         workspace_id: str,
         *,
         now: datetime | None = None,
+        idempotency_key: str | None = None,
+        rerun_of_request_id: str | None = None,
+        refresh_observation_cutoff: TemporalValueRequest | None = None,
     ) -> StoredReactiveIngress:
         received_at = now or datetime.now(timezone.utc)
         signal_payload = signal.model_dump(mode="json")
+        if rerun_of_request_id is not None:
+            signal_payload["refresh_command"] = {
+                "rerun_of_request_id": rerun_of_request_id,
+                "observation_cutoff": (
+                    refresh_observation_cutoff.model_dump(mode="json")
+                    if refresh_observation_cutoff is not None
+                    else None
+                ),
+            }
         source = signal.source
         source_payload_hash = source.source_payload_sha256
         content_hash = _safe_sha256(signal_payload)
-        idempotency_key = _sha256(
+        derived_idempotency_key = _sha256(
             {
                 "source_system": source.source_system,
                 "source_signal_id": signal.source_signal_id,
@@ -3635,20 +3820,35 @@ class ReactiveInvestigationMixin:
                 "content_hash": content_hash,
             }
         )
+        effective_idempotency_key = idempotency_key or derived_idempotency_key
 
         with self._lock:
             connection = self._connection_or_raise()
             try:
                 connection.execute("BEGIN IMMEDIATE")
+                predecessor_request = None
+                if rerun_of_request_id is not None:
+                    predecessor_request = self._get_investigation_request_locked(
+                        connection,
+                        workspace_id,
+                        rerun_of_request_id,
+                    )
+                    if (
+                        predecessor_request is None
+                        or predecessor_request.get("trigger_mode") != "reactive"
+                    ):
+                        raise InvestigationRequestUnavailable
                 existing = connection.execute(
                     """
-                    SELECT payload_json, attempt_id
+                    SELECT payload_json, attempt_id, content_hash
                     FROM reactive_ingress_attempts
                     WHERE workspace_id = ? AND idempotency_key = ?
                     """,
-                    (workspace_id, idempotency_key),
+                    (workspace_id, effective_idempotency_key),
                 ).fetchone()
                 if existing is not None:
+                    if str(existing["content_hash"]) != content_hash:
+                        raise AuditIdempotencyConflict
                     replay = json.loads(str(existing["payload_json"]))
                     duplicate_attempt_id = "attempt_" + uuid4().hex
                     replay["status"] = "duplicate"
@@ -3669,7 +3869,7 @@ class ReactiveInvestigationMixin:
                     self._persist_ingress_attempt_locked(
                         connection,
                         workspace_id=workspace_id,
-                        idempotency_key=idempotency_key,
+                        idempotency_key=effective_idempotency_key,
                         content_hash=content_hash,
                         attempt=replay,
                         request=None,
@@ -3706,10 +3906,13 @@ class ReactiveInvestigationMixin:
                     received_at=received_at,
                     revision_conflict=revision_conflict,
                     workspace_id=workspace_id,
+                    rerun_of_request_id=rerun_of_request_id,
+                    refresh_observation_cutoff=refresh_observation_cutoff,
+                    predecessor_request=predecessor_request,
                 )
                 mutation = self._record_mutation_locked(
                     workspace_id,
-                    idempotency_key=idempotency_key,
+                    idempotency_key=effective_idempotency_key,
                     mutation_kind="REACTIVE_INGRESS",
                     content_hash=content_hash,
                     terminal_fresh_bundle=False,
@@ -3720,17 +3923,17 @@ class ReactiveInvestigationMixin:
 
                 attempt_id = "attempt_" + uuid5(
                     NAMESPACE_URL,
-                    f"causal-delay-copilot:reactive-attempt:{workspace_id}:{idempotency_key}",
+                    f"causal-delay-copilot:reactive-attempt:{workspace_id}:{effective_idempotency_key}",
                 ).hex
                 self._persist_ingress_attempt_locked(
                     connection,
                     workspace_id=workspace_id,
-                    idempotency_key=idempotency_key,
+                    idempotency_key=effective_idempotency_key,
                     content_hash=content_hash,
                     attempt=attempt,
                     request=request,
                     attempt_id=attempt_id,
-                    audit_idempotency_key=f"reactive:{idempotency_key}",
+                    audit_idempotency_key=f"reactive:{effective_idempotency_key}",
                 )
                 connection.commit()
                 return StoredReactiveIngress("CREATED", attempt)
@@ -3747,13 +3950,25 @@ class ReactiveInvestigationMixin:
         workspace_id: str,
         *,
         now: datetime | None = None,
+        idempotency_key: str | None = None,
+        rerun_of_request_id: str | None = None,
+        refresh_observation_cutoff: TemporalValueRequest | None = None,
     ) -> StoredProactiveIngress:
         received_at = now or datetime.now(timezone.utc)
         proposal_payload = proposal.model_dump(mode="json")
+        if rerun_of_request_id is not None:
+            proposal_payload["refresh_command"] = {
+                "rerun_of_request_id": rerun_of_request_id,
+                "observation_cutoff": (
+                    refresh_observation_cutoff.model_dump(mode="json")
+                    if refresh_observation_cutoff is not None
+                    else None
+                ),
+            }
         source = proposal.source
         source_payload_hash = source.source_payload_sha256
         content_hash = _safe_sha256(proposal_payload)
-        idempotency_key = _sha256(
+        derived_idempotency_key = _sha256(
             {
                 "source_system": source.source_system,
                 "proposal_id": proposal.proposal_id,
@@ -3766,20 +3981,35 @@ class ReactiveInvestigationMixin:
                 "content_hash": content_hash,
             }
         )
+        effective_idempotency_key = idempotency_key or derived_idempotency_key
 
         with self._lock:
             connection = self._connection_or_raise()
             try:
                 connection.execute("BEGIN IMMEDIATE")
+                predecessor_request = None
+                if rerun_of_request_id is not None:
+                    predecessor_request = self._get_investigation_request_locked(
+                        connection,
+                        workspace_id,
+                        rerun_of_request_id,
+                    )
+                    if (
+                        predecessor_request is None
+                        or predecessor_request.get("trigger_mode") != "proactive"
+                    ):
+                        raise InvestigationRequestUnavailable
                 existing = connection.execute(
                     """
-                    SELECT payload_json
+                    SELECT payload_json, content_hash
                     FROM proactive_ingress_attempts
                     WHERE workspace_id = ? AND idempotency_key = ?
                     """,
-                    (workspace_id, idempotency_key),
+                    (workspace_id, effective_idempotency_key),
                 ).fetchone()
                 if existing is not None:
+                    if str(existing["content_hash"]) != content_hash:
+                        raise AuditIdempotencyConflict
                     replay = json.loads(str(existing["payload_json"]))
                     duplicate_attempt_id = "attempt_" + uuid4().hex
                     replay["status"] = "duplicate"
@@ -3800,7 +4030,7 @@ class ReactiveInvestigationMixin:
                     self._persist_proactive_ingress_attempt_locked(
                         connection,
                         workspace_id=workspace_id,
-                        idempotency_key=idempotency_key,
+                        idempotency_key=effective_idempotency_key,
                         content_hash=content_hash,
                         attempt=replay,
                         request=None,
@@ -3835,10 +4065,13 @@ class ReactiveInvestigationMixin:
                     received_at=received_at,
                     revision_conflict=revision_conflict,
                     workspace_id=workspace_id,
+                    rerun_of_request_id=rerun_of_request_id,
+                    refresh_observation_cutoff=refresh_observation_cutoff,
+                    predecessor_request=predecessor_request,
                 )
                 mutation = self._record_mutation_locked(
                     workspace_id,
-                    idempotency_key=idempotency_key,
+                    idempotency_key=effective_idempotency_key,
                     mutation_kind="PROACTIVE_INGRESS",
                     content_hash=content_hash,
                     terminal_fresh_bundle=False,
@@ -3851,17 +4084,17 @@ class ReactiveInvestigationMixin:
 
                 attempt_id = "attempt_" + uuid5(
                     NAMESPACE_URL,
-                    f"causal-delay-copilot:proactive-attempt:{workspace_id}:{idempotency_key}",
+                    f"causal-delay-copilot:proactive-attempt:{workspace_id}:{effective_idempotency_key}",
                 ).hex
                 self._persist_proactive_ingress_attempt_locked(
                     connection,
                     workspace_id=workspace_id,
-                    idempotency_key=idempotency_key,
+                    idempotency_key=effective_idempotency_key,
                     content_hash=content_hash,
                     attempt=attempt,
                     request=request,
                     attempt_id=attempt_id,
-                    audit_idempotency_key=f"proactive:{idempotency_key}",
+                    audit_idempotency_key=f"proactive:{effective_idempotency_key}",
                 )
                 connection.commit()
                 return StoredProactiveIngress("CREATED", attempt)
@@ -3879,6 +4112,9 @@ class ReactiveInvestigationMixin:
         received_at: datetime,
         revision_conflict: bool,
         workspace_id: str,
+        rerun_of_request_id: str | None = None,
+        refresh_observation_cutoff: TemporalValueRequest | None = None,
+        predecessor_request: Mapping[str, Any] | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any] | None]:
         source = signal.source
         findings: list[dict[str, Any]] = []
@@ -3946,7 +4182,13 @@ class ReactiveInvestigationMixin:
             )
 
         generated = _normalise_temporal(signal.generated_at.model_dump(mode="json"))
-        known = _normalise_temporal(signal.known_at.model_dump(mode="json"))
+        known = _normalise_temporal(
+            (
+                refresh_observation_cutoff.model_dump(mode="json")
+                if refresh_observation_cutoff is not None
+                else signal.known_at.model_dump(mode="json")
+            )
+        )
         received_temporal = _Temporal(
             _field(
                 "present",
@@ -3978,6 +4220,23 @@ class ReactiveInvestigationMixin:
                     phase=4,
                 )
             )
+
+        if rerun_of_request_id is not None and predecessor_request is not None:
+            predecessor_cutoff = _temporal_from_record(
+                predecessor_request.get("observation_cutoff")
+            )
+            if _compare(known, predecessor_cutoff) != 1:
+                findings.append(
+                    _finding(
+                        code="REFRESH_CUTOFF_NOT_LATER",
+                        severity="error",
+                        disposition="reject",
+                        affected_refs=[rerun_of_request_id],
+                        message="The refresh observation cutoff does not advance the predecessor request.",
+                        remediation="Provide a later explicit refresh observation cutoff.",
+                        phase=4,
+                    )
+                )
 
         target_valid = (
             signal.target_definition_id == TARGET_DEFINITION_ID
@@ -4692,7 +4951,11 @@ class ReactiveInvestigationMixin:
                 "schema_version": "investigation-request.v1",
                 "trigger_mode": "reactive",
                 "ingress_ref": ingress_ref,
-                "rerun_of_request_id": _field("missing"),
+                "rerun_of_request_id": (
+                    _field("present", rerun_of_request_id)
+                    if rerun_of_request_id is not None
+                    else _field("missing")
+                ),
                 "dataset_version_id": signal.scored_dataset_version_ref,
                 "subject": {"order_line_id": canonical_order_line_id},
                 "decision_cutoff": commitment_cutoff.field,
@@ -4706,6 +4969,11 @@ class ReactiveInvestigationMixin:
                 ],
                 "provenance_refs": [
                     f"risk-signal:{source.source_system}:{signal.source_signal_id}:{signal.source_revision}",
+                    *(
+                        [f"refresh-of:{rerun_of_request_id}"]
+                        if rerun_of_request_id is not None
+                        else []
+                    ),
                     *mapping_refs,
                     *evidence_refs,
                     *lineage_refs,
@@ -4770,6 +5038,9 @@ class ReactiveInvestigationMixin:
         received_at: datetime,
         revision_conflict: bool,
         workspace_id: str,
+        rerun_of_request_id: str | None = None,
+        refresh_observation_cutoff: TemporalValueRequest | None = None,
+        predecessor_request: Mapping[str, Any] | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any] | None]:
         source = proposal.source
         findings: list[dict[str, Any]] = []
@@ -4866,7 +5137,32 @@ class ReactiveInvestigationMixin:
                 dataset_id = str(dataset.get("dataset_id", ""))
                 mapping_refs = _lineage_mapping_refs(lineage)
 
-        decision = _normalise_proactive_temporal(proposal.decision_at)
+        refresh_decision = (
+            refresh_observation_cutoff
+            if refresh_observation_cutoff is not None
+            else proposal.decision_at
+        )
+        decision = (
+            _normalise_temporal(refresh_decision.model_dump(mode="json"))
+            if refresh_observation_cutoff is not None
+            else _normalise_proactive_temporal(proposal.decision_at)
+        )
+        if rerun_of_request_id is not None and predecessor_request is not None:
+            predecessor_cutoff = _temporal_from_record(
+                predecessor_request.get("observation_cutoff")
+            )
+            if _compare(decision, predecessor_cutoff) != 1:
+                findings.append(
+                    _finding(
+                        code="REFRESH_CUTOFF_NOT_LATER",
+                        severity="error",
+                        disposition="reject",
+                        affected_refs=[rerun_of_request_id],
+                        message="The refresh observation cutoff does not advance the predecessor request.",
+                        remediation="Provide a later explicit refresh observation cutoff.",
+                        phase=4,
+                    )
+                )
         supplier_source = _proactive_source_reference(
             proposal.proposed_supplier_ref,
             dataset_id=dataset_id,
@@ -4888,7 +5184,7 @@ class ReactiveInvestigationMixin:
                     mode="json"
                 ),
                 "resolved_supplier_id": supplier_source,
-                "decision_at": proposal.decision_at.model_dump(mode="json"),
+                "decision_at": refresh_decision.model_dump(mode="json"),
                 "target_milestone_kind": proposal.target_milestone_kind.model_dump(
                     mode="json"
                 ),
@@ -5202,7 +5498,11 @@ class ReactiveInvestigationMixin:
                     "proposal_revision": proposal.proposal_revision,
                     "source_payload_sha256": source.source_payload_sha256,
                 },
-                "rerun_of_request_id": _field("missing"),
+                "rerun_of_request_id": (
+                    _field("present", rerun_of_request_id)
+                    if rerun_of_request_id is not None
+                    else _field("missing")
+                ),
                 "dataset_version_id": proposal.dataset_version_id,
                 "subject": subject,
                 "decision_cutoff": decision.field,
@@ -5216,6 +5516,11 @@ class ReactiveInvestigationMixin:
                 ],
                 "provenance_refs": [
                     f"proactive-proposal:{source.source_system}:{proposal.proposal_id}:{proposal.proposal_revision}",
+                    *(
+                        [f"refresh-of:{rerun_of_request_id}"]
+                        if rerun_of_request_id is not None
+                        else []
+                    ),
                     *mapping_refs,
                     *field_lineage_refs,
                 ],

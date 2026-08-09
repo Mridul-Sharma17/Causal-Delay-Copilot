@@ -5,11 +5,26 @@ from pathlib import Path
 import sys
 
 from .analysis_runs import (
+    FreshAnalysisFinalizationError,
     analysis_run_id_for_operation,
     estimate_primary_atte_and_context,
     finalize_fresh_analysis,
     materialize_propensity_and_s9,
 )
+
+
+def _write_typed_reproduction_failure(temporary_root: Path, code: str) -> None:
+    (temporary_root / "analysis-run-failure.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "analysis-run-failure.v1",
+                "failure_code": code,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        encoding="utf-8",
+    )
 
 
 def main() -> int:
@@ -18,7 +33,7 @@ def main() -> int:
     operation_kind = sys.argv[1]
     temporary_root = Path(sys.argv[2])
     artifact_root = Path(sys.argv[3]) if len(sys.argv) == 4 else None
-    if operation_kind == "FRESH_ANALYSIS":
+    if operation_kind in {"FRESH_ANALYSIS", "FRESH_REPRODUCTION"}:
         request_path = temporary_root / "analysis-run-request.json"
         if not request_path.is_file():
             # Preserve the legacy durable-boundary behavior for untyped callers.
@@ -45,6 +60,37 @@ def main() -> int:
                 propensity_stage=stage_result,
                 engine_result=engine_result,
             )
+        except FreshAnalysisFinalizationError as error:
+            if operation_kind == "FRESH_REPRODUCTION" and error.code in {
+                "RUN_REPRODUCIBILITY_VIOLATION",
+                "RUN_REPRODUCTION_TARGET_UNAVAILABLE",
+            }:
+                _write_typed_reproduction_failure(temporary_root, error.code)
+                return 79
+            result = {
+                "schema_version": "analysis-run-execution-result.v1",
+                "scientific_request_digest": request.get("scientific_request_digest"),
+                "status": "failed",
+                "reason_code": error.code,
+                "failure_code": error.code,
+                "estimator_executed": False,
+                "primary_result": None,
+                "safe_detail": {
+                    "schema_version": "analysis-run-safe-detail.v1",
+                    "execution_state": "failed",
+                    "last_completed_stage": "S8_OUTCOME",
+                    "variants": [],
+                    "component_failures": [
+                        {
+                            "component": "fresh_analysis_finalization",
+                            "variant_id": None,
+                            "code": error.code,
+                        }
+                    ],
+                    "estimator_executed": False,
+                    "scope": "propensity_and_overlap_only",
+                },
+            }
         except Exception:
             result = {
                 "schema_version": "analysis-run-execution-result.v1",

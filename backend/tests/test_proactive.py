@@ -192,3 +192,53 @@ def test_proactive_schema_failure_is_sanitized_and_audited(tmp_path: Path) -> No
         assert len(audit) == 1
         assert audit[0]["occurrence_kind"] == "PROACTIVE_INGRESS"
         assert audit[0]["outcome_code"] == "PROACTIVE_SCHEMA_UNSUPPORTED"
+
+
+def test_proactive_refresh_creates_a_new_snapshot_and_refresh_run(
+    tmp_path: Path,
+) -> None:
+    with make_client(tmp_path / "core.sqlite3") as client:
+        dataset_version_id = import_hero(client)
+        created = client.post(
+            "/api/investigations/proactive/fixtures",
+            json={
+                "dataset_version_id": dataset_version_id,
+                "fixture_id": "hero-proactive-proposal-v1",
+            },
+        )
+        assert created.status_code == 201
+        predecessor = created.json()["attempt"]["investigation_request"]
+        proposal = client.app.state.audit_store.get_proactive_proposal_fixture(
+            dataset_version_id,
+            "hero-proactive-proposal-v1",
+        )
+
+        refreshed = client.post(
+            f"/api/investigations/{predecessor['investigation_request_id']}/refresh",
+            json={
+                "idempotency_key": "refresh-proactive-1",
+                "trigger_mode": "proactive",
+                "request": proposal.model_dump(mode="json"),
+                "observation_cutoff": {
+                    "value": "2026-01-11T03:35:00+00:00",
+                    "kind": "instant",
+                    "precision": "minute",
+                    "timezone_status": "known",
+                    "source_timezone": "UTC",
+                },
+                "root_seed": 17,
+            },
+        )
+
+        assert refreshed.status_code == 202
+        body = refreshed.json()
+        assert body["result"] == "CREATED"
+        assert body["attempt"]["investigation_request_id"] != predecessor[
+            "investigation_request_id"
+        ]
+        assert body["snapshot"] is not None, body
+        assert body["snapshot"]["predecessor_request_id"] == predecessor[
+            "investigation_request_id"
+        ]
+        assert body["snapshot"]["trigger_mode"] == "proactive"
+        assert body["operation"]["analysis_run"]["run_relationship"] == "refresh"
