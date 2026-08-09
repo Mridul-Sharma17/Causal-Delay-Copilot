@@ -26,6 +26,7 @@ REPRODUCTION_COMPARISON_SCHEMA_VERSION = "analysis-run-reproduction-comparison.v
 CACHE_KEY_SCHEMA_VERSION = "analysis-run-cache-key.v1"
 REFERENCE_REGISTRY_SCHEMA_VERSION = "validated-analysis-references.v1"
 READ_MODEL_SCHEMA_VERSION = "analysis-run-read-model.v1"
+REFERENCE_PROMOTION_SCHEMA_VERSION = "validated-reference-promotion.v1"
 
 DEFAULT_REFERENCE_SLOT_ID = "ordinary-demo"
 DEFAULT_REFERENCE_INTENDED_ROLE = "semi_synthetic_hero"
@@ -168,7 +169,18 @@ _ATTESTATION_REQUIRED_KEYS = frozenset(
         "validated_at",
     }
 )
-_ATTESTATION_OPTIONAL_KEYS = frozenset({"release_id", "developer_actor"})
+_ATTESTATION_OPTIONAL_KEYS = frozenset(
+    {
+        "release_id",
+        "developer_actor",
+        "availability_state",
+        "content_hash",
+        "lifecycle",
+        "revoked",
+        "run_status",
+        "run_relationship",
+    }
+)
 _VERIFICATION_REQUIRED_KEYS = frozenset(
     {"schema_version", "validation_policy_version", "status", "checks"}
 )
@@ -176,6 +188,10 @@ _VERIFICATION_REQUIRED_KEYS = frozenset(
 
 class ReferenceVerificationError(ValueError):
     """A reference failed the closed read-time verification contract."""
+
+
+class ReferencePromotionError(ReferenceVerificationError):
+    """A sealed analysis run cannot become a globally reusable reference."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -225,6 +241,40 @@ class ValidatedReference:
     verification_state: str = "reference_validated"
 
 
+@dataclass(frozen=True, slots=True)
+class AnalysisRunCacheCandidate:
+    """A UI-safe reusable run projection without artifact paths or bytes."""
+
+    analysis_run_id: str
+    bundle_manifest_hash: str
+    release_candidate_id: str
+    intended_role: str
+    engine_result_status: str
+    scientific_request_digest: str
+    dataset_version_id: str
+    cache_key: str
+    runtime_fingerprint_digest: str
+    completed_at: datetime
+    delivery_mode: str = "existing_run_reuse"
+    verification_state: str = "machine_verified"
+    reference_slot_id: str | None = None
+    validation_attestation_id: str | None = None
+    validation_attestation_ref: str | None = None
+    validated_at: datetime | None = None
+    run_relationship: str = "fresh"
+    reproduces_run_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ReferencePromotion:
+    """The safe result of promoting one verified run into the global registry."""
+
+    reference: ValidatedReference
+    validation_attestation_id: str
+    validation_attestation_ref: str
+    created: bool
+
+
 def _require_mapping(value: object, label: str) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise ReferenceVerificationError(f"{label} must be an object")
@@ -252,6 +302,29 @@ def _require_digest(value: object, label: str) -> str:
     if not isinstance(value, str) or _DIGEST.fullmatch(value) is None:
         raise ReferenceVerificationError(f"{label} is not a SHA-256 digest")
     return value
+
+
+def build_cache_key(
+    *,
+    scientific_request_digest: str,
+    runtime_fingerprint_digest: str,
+    engine_output_schema_version: str,
+) -> str:
+    """Build the complete immutable identity used for reusable-run lookup."""
+
+    _require_digest(scientific_request_digest, "scientific request digest")
+    _require_digest(runtime_fingerprint_digest, "runtime fingerprint digest")
+    _require_identifier(engine_output_schema_version, "engine output schema version")
+    return sha256(
+        {
+            "schema_version": CACHE_KEY_SCHEMA_VERSION,
+            "scientific_request_digest": scientific_request_digest,
+            "runtime_fingerprint_digest": runtime_fingerprint_digest,
+            "engine_output_schema_version": engine_output_schema_version,
+            "bundle_manifest_schema_version": BUNDLE_MANIFEST_SCHEMA_VERSION,
+            "artifact_contract_version": ARTIFACT_CONTRACT_VERSION,
+        }
+    )
 
 
 def _require_text(value: object, label: str) -> str:
@@ -493,6 +566,53 @@ def _object_path(artifact_root: Path, descriptor: Mapping[str, Any]) -> Path:
     return _under(artifact_root, path)
 
 
+def _attestation_path(
+    artifact_root: Path,
+    validation_attestation_id: str,
+    validation_attestation_ref: str | None = None,
+) -> Path:
+    if validation_attestation_ref is not None and _DIGEST.fullmatch(
+        validation_attestation_ref
+    ) is not None:
+        digest = validation_attestation_ref[7:]
+        return _under(
+            artifact_root,
+            artifact_root / "attestations" / "sha256" / digest[:2] / digest[2:],
+        )
+    _require_identifier(validation_attestation_id, "validation attestation id")
+    return _under(
+        artifact_root,
+        artifact_root / "attestations" / f"{validation_attestation_id}.json",
+    )
+
+
+def _run_is_quarantined(artifact_root: Path, analysis_run_id: str) -> bool:
+    quarantine_root = artifact_root / "quarantine"
+    if not _regular_directory(quarantine_root):
+        return False
+    direct = quarantine_root / analysis_run_id
+    if direct.exists():
+        return True
+    try:
+        manifests = quarantine_root.rglob("quarantine-manifest.json")
+        for manifest_path in manifests:
+            if not _regular_file(manifest_path):
+                continue
+            try:
+                payload = _read_canonical_file(manifest_path, "quarantine manifest")
+            except ReferenceVerificationError:
+                continue
+            if isinstance(payload, Mapping) and payload.get("analysis_run_id") == analysis_run_id:
+                return True
+            if isinstance(payload, Mapping) and payload.get("operation_id") == (
+                "operation-" + analysis_run_id.removeprefix("analysis-run-")
+            ):
+                return True
+    except OSError:
+        return True
+    return False
+
+
 def _read_canonical_file(path: Path, label: str) -> object:
     if not _regular_file(path):
         raise ReferenceVerificationError(f"{label} is unavailable")
@@ -724,15 +844,12 @@ def _verify_bundle(
     engine_output_schema_version = _require_text(
         result.get("schema_version"), "engine result schema"
     )
-    cache_key_payload = {
-        "schema_version": CACHE_KEY_SCHEMA_VERSION,
-        "scientific_request_digest": manifest["scientific_request_digest"],
-        "runtime_fingerprint_digest": manifest["runtime_fingerprint_digest"],
-        "engine_output_schema_version": engine_output_schema_version,
-        "bundle_manifest_schema_version": BUNDLE_MANIFEST_SCHEMA_VERSION,
-        "artifact_contract_version": ARTIFACT_CONTRACT_VERSION,
-    }
-    if sha256(cache_key_payload) != manifest["cache_key"]:
+    expected_cache_key = build_cache_key(
+        scientific_request_digest=str(manifest["scientific_request_digest"]),
+        runtime_fingerprint_digest=str(manifest["runtime_fingerprint_digest"]),
+        engine_output_schema_version=engine_output_schema_version,
+    )
+    if expected_cache_key != manifest["cache_key"]:
         raise ReferenceVerificationError("cache key does not match bundle identity")
 
     report = _require_mapping(payloads["verification_report"], "verification report")
@@ -822,6 +939,8 @@ def _verify_bundle(
 def _registry_entries(
     artifact_root: Path,
     release_candidate_id: str,
+    *,
+    include_inactive: bool = False,
 ) -> list[Mapping[str, Any]]:
     registry_path = _under(
         artifact_root,
@@ -860,13 +979,21 @@ def _registry_entries(
         _require_digest(entry["bundle_manifest_hash"], "validated reference bundle hash")
         _require_identifier(entry["validation_attestation_id"], "validation attestation id")
         if "validation_attestation_ref" in entry:
-            _require_identifier(entry["validation_attestation_ref"], "validation attestation reference")
-            if entry["validation_attestation_ref"] != entry["validation_attestation_id"]:
+            attestation_ref = entry["validation_attestation_ref"]
+            if _DIGEST.fullmatch(str(attestation_ref)) is None:
+                _require_identifier(attestation_ref, "validation attestation reference")
+            if (
+                _DIGEST.fullmatch(str(attestation_ref)) is None
+                and attestation_ref != entry["validation_attestation_id"]
+            ):
                 raise ReferenceVerificationError("validated reference attestation binding does not match")
         if entry["read_model_schema_version"] != READ_MODEL_SCHEMA_VERSION:
             raise ReferenceVerificationError("validated reference read model is unsupported")
         _require_identifier(entry["intended_role"], "validated reference intended role")
-        if entry.get("status", "active") != "active" or bool(entry.get("revoked", False)):
+        if (
+            not include_inactive
+            and (entry.get("status", "active") != "active" or bool(entry.get("revoked", False)))
+        ):
             continue
         normalized.append(entry)
     if len({entry["reference_slot_id"] for entry in normalized}) != len(normalized):
@@ -875,7 +1002,7 @@ def _registry_entries(
 
 
 class ValidatedReferenceStore:
-    """Read-only verifier and deterministic selector for release references."""
+    """Verifier, promoter, and deterministic selector for reusable runs."""
 
     def __init__(
         self,
@@ -897,26 +1024,57 @@ class ValidatedReferenceStore:
     def registry_present(self) -> bool:
         return _regular_file(self.registry_path)
 
-    def _verify_entry(self, entry: Mapping[str, Any]) -> ValidatedReference:
-        manifest, payloads = _verify_bundle(
+    @property
+    def expected_build_id(self) -> str:
+        build_id = self._runtime_fingerprint.get("build_manifest_id")
+        if isinstance(build_id, str) and build_id:
+            return build_id
+        application_build_id = self._runtime_fingerprint.get("application_build_id")
+        if isinstance(application_build_id, str) and application_build_id:
+            return application_build_id
+        return ""
+
+    def _verify_run(
+        self,
+        analysis_run_id: str,
+    ) -> tuple[Mapping[str, Any], dict[str, object | list[object] | None]]:
+        if self._runtime_fingerprint.get("release_candidate_id") != self._release_candidate_id:
+            raise ReferenceVerificationError("runtime release does not match current release")
+        if _run_is_quarantined(self._artifact_root, analysis_run_id):
+            raise ReferenceVerificationError("analysis run is quarantined")
+        return _verify_bundle(
             self._artifact_root,
-            str(entry["analysis_run_id"]),
-            str(self._runtime_fingerprint.get("build_manifest_id", "")),
+            analysis_run_id,
+            self.expected_build_id,
             self._runtime_fingerprint,
         )
+
+    def _verify_entry(self, entry: Mapping[str, Any]) -> ValidatedReference:
+        manifest, payloads = self._verify_run(str(entry["analysis_run_id"]))
         if manifest["bundle_manifest_hash"] != entry["bundle_manifest_hash"]:
             raise ReferenceVerificationError("validated reference bundle binding does not match")
         if payloads.get("intended_role") != entry["intended_role"]:
             raise ReferenceVerificationError("validated reference role does not match")
 
-        attestation_path = _under(
+        attestation_ref = entry.get("validation_attestation_ref")
+        if attestation_ref is not None and _DIGEST.fullmatch(str(attestation_ref)) is None:
+            _require_identifier(attestation_ref, "validation attestation reference")
+        attestation_path = _attestation_path(
             self._artifact_root,
-            self._artifact_root / "attestations" / f"{entry['validation_attestation_id']}.json",
+            str(entry["validation_attestation_id"]),
+            str(attestation_ref) if attestation_ref is not None else None,
         )
         attestation = _require_mapping(
             _read_canonical_file(attestation_path, "validation attestation"),
             "validation attestation",
         )
+        if attestation_ref is not None:
+            try:
+                attestation_bytes = attestation_path.read_bytes()
+            except OSError as error:
+                raise ReferenceVerificationError("validation attestation is unavailable") from error
+            if sha256(attestation_bytes) != attestation_ref:
+                raise ReferenceVerificationError("validation attestation content hash does not match")
         _require_exact_keys(
             attestation,
             _ATTESTATION_REQUIRED_KEYS,
@@ -944,6 +1102,19 @@ class ValidatedReferenceStore:
             attestation["validation_policy_version"], "validation policy version"
         )
         _require_passed_checks(attestation["checks"], "validation attestation checks")
+        if attestation.get("content_hash") is not None:
+            _require_digest(attestation["content_hash"], "validation attestation content hash")
+            if attestation["content_hash"] != attestation_ref:
+                raise ReferenceVerificationError("validation attestation content hash does not match")
+        for key, expected in (
+            ("run_status", "SUCCEEDED"),
+            ("lifecycle", "sealed"),
+            ("availability_state", "available"),
+        ):
+            if key in attestation and attestation[key] != expected:
+                raise ReferenceVerificationError("validation attestation run state is unusable")
+        if bool(attestation.get("revoked", False)):
+            raise ReferenceVerificationError("validation attestation is revoked")
         report = _require_mapping(payloads["verification_report"], "verification report")
         if report["validation_policy_version"] != attestation["validation_policy_version"]:
             raise ReferenceVerificationError("validation policy does not match")
@@ -1012,6 +1183,414 @@ class ValidatedReferenceStore:
                 key=lambda item: (item.completed_at, item.analysis_run_id),
             )
 
+    def list_verified_runs(self) -> list[AnalysisRunCacheCandidate]:
+        """Return sealed current-release runs eligible for deterministic reuse."""
+
+        with self._lock:
+            runs_root = self._artifact_root / "runs"
+            if not _regular_directory(runs_root):
+                return []
+            try:
+                run_directories = sorted(runs_root.iterdir(), key=lambda path: path.name)
+            except OSError:
+                return []
+            verified: list[AnalysisRunCacheCandidate] = []
+            for run_directory in run_directories:
+                if not _regular_directory(run_directory) or _RUN_ID.fullmatch(run_directory.name) is None:
+                    continue
+                try:
+                    manifest, payloads = self._verify_run(run_directory.name)
+                    verified.append(
+                        AnalysisRunCacheCandidate(
+                            analysis_run_id=run_directory.name,
+                            bundle_manifest_hash=str(manifest["bundle_manifest_hash"]),
+                            release_candidate_id=self._release_candidate_id,
+                            intended_role=str(payloads["intended_role"]),
+                            engine_result_status=str(manifest["engine_result_status"]),
+                            scientific_request_digest=str(
+                                manifest["scientific_request_digest"]
+                            ),
+                            dataset_version_id=str(payloads["dataset_version_id"]),
+                            cache_key=str(manifest["cache_key"]),
+                            runtime_fingerprint_digest=str(
+                                manifest["runtime_fingerprint_digest"]
+                            ),
+                            completed_at=_require_utc_timestamp(
+                                manifest["completed_at"], "bundle completion time"
+                            ),
+                            run_relationship=(
+                                "reproduction"
+                                if isinstance(manifest.get("reproduces_run_id"), str)
+                                else "fresh"
+                            ),
+                            reproduces_run_id=(
+                                manifest.get("reproduces_run_id")
+                                if isinstance(manifest.get("reproduces_run_id"), str)
+                                else None
+                            ),
+                        )
+                    )
+                except (OSError, TypeError, ValueError):
+                    continue
+            return sorted(
+                verified,
+                key=lambda item: (item.completed_at, item.analysis_run_id),
+            )
+
+    @staticmethod
+    def _matches_candidate(
+        candidate: AnalysisRunCacheCandidate | ValidatedReference,
+        reference_slot_id: str | None,
+        intended_role: str | None,
+        scientific_request_digest: str | None,
+        cache_key: str | None,
+    ) -> bool:
+        if (
+            reference_slot_id is not None
+            and candidate.reference_slot_id is not None
+            and candidate.reference_slot_id != reference_slot_id
+        ):
+            return False
+        if intended_role is not None and candidate.intended_role != intended_role:
+            return False
+        if (
+            scientific_request_digest is not None
+            and candidate.scientific_request_digest != scientific_request_digest
+        ):
+            return False
+        if cache_key is not None and candidate.cache_key != cache_key:
+            return False
+        return True
+
+    def select_cache_candidate(
+        self,
+        reference_slot_id: str | None = None,
+        *,
+        intended_role: str | None = None,
+        scientific_request_digest: str | None = None,
+        cache_key: str | None = None,
+    ) -> AnalysisRunCacheCandidate | ValidatedReference | None:
+        """Select a reference first, then the earliest verified current-release run."""
+
+        if scientific_request_digest is not None:
+            _require_digest(scientific_request_digest, "scientific request digest")
+        if cache_key is not None:
+            _require_digest(cache_key, "cache key")
+
+        references = [
+            item
+            for item in self.list_verified_references()
+            if self._matches_candidate(
+                item,
+                reference_slot_id,
+                intended_role,
+                scientific_request_digest,
+                cache_key,
+            )
+        ]
+        if references:
+            return references[0]
+
+        runs = [
+            item
+            for item in self.list_verified_runs()
+            if self._matches_candidate(
+                item,
+                reference_slot_id,
+                intended_role,
+                scientific_request_digest,
+                cache_key,
+            )
+        ]
+        return runs[0] if runs else None
+
+    def read_cache_model(
+        self,
+        reference_slot_id: str | None = None,
+        *,
+        intended_role: str | None = None,
+        scientific_request_digest: str | None = None,
+        cache_key: str | None = None,
+    ) -> AnalysisRunCacheCandidate | ValidatedReference | None:
+        """Return only the identity-safe cache projection used by delivery code."""
+
+        return self.select_cache_candidate(
+            reference_slot_id,
+            intended_role=intended_role,
+            scientific_request_digest=scientific_request_digest,
+            cache_key=cache_key,
+        )
+
+    def promote_reference(
+        self,
+        analysis_run_id: str,
+        reference_slot_id: str,
+        *,
+        now: datetime | None = None,
+        intended_role: str | None = None,
+    ) -> ReferencePromotion:
+        """Promote one fully verified, reproducible run without mutating its bundle."""
+
+        with self._lock:
+            try:
+                manifest, payloads = self._verify_run(analysis_run_id)
+            except ReferenceVerificationError as error:
+                raise ReferencePromotionError(str(error)) from error
+
+            report = _require_mapping(payloads["verification_report"], "verification report")
+            checks = report.get("checks")
+            if not isinstance(checks, list):
+                raise ReferencePromotionError("reference verification gates are incomplete")
+            check_ids = {
+                str(check.get("check_id"))
+                for check in checks
+                if isinstance(check, Mapping)
+            }
+            if not {"provenance", "provenance_integrity"} & check_ids:
+                raise ReferencePromotionError("reference provenance gate is incomplete")
+            if not (
+                {"reproduction", "reproducibility", "reproduction_integrity"} & check_ids
+                or isinstance(manifest.get("reproduces_run_id"), str)
+            ):
+                raise ReferencePromotionError("reference reproduction gate is incomplete")
+
+            observed_role = str(payloads["intended_role"])
+            if intended_role is not None and intended_role != observed_role:
+                raise ReferencePromotionError("reference intended role does not match")
+            if manifest.get("investigation_request_id") is None:
+                raise ReferencePromotionError("reference provenance identity is unavailable")
+            try:
+                investigation_request_id = _require_identifier(
+                    manifest["investigation_request_id"],
+                    "investigation request identity",
+                )
+            except ReferenceVerificationError as error:
+                raise ReferencePromotionError(str(error)) from error
+
+            completed_at = _require_utc_timestamp(
+                manifest["completed_at"], "bundle completion time"
+            )
+            validation_time = now or datetime.now(timezone.utc)
+            if validation_time.tzinfo is None:
+                validation_time = validation_time.replace(tzinfo=timezone.utc)
+            else:
+                validation_time = validation_time.astimezone(timezone.utc)
+            if validation_time < completed_at:
+                raise ReferencePromotionError("reference run is stale at validation time")
+
+            registry_path = self.registry_path
+            existing_entries: list[Mapping[str, Any]] = []
+            existing_registry: Mapping[str, Any] | None = None
+            if registry_path.exists():
+                try:
+                    existing_registry = _require_mapping(
+                        _read_canonical_file(registry_path, "validated reference registry"),
+                        "validated reference registry",
+                    )
+                    existing_entries = _registry_entries(
+                        self._artifact_root,
+                        self._release_candidate_id,
+                        include_inactive=True,
+                    )
+                except ReferenceVerificationError as error:
+                    raise ReferencePromotionError(str(error)) from error
+
+            request_digest = str(manifest["scientific_request_digest"])
+            runtime_digest = str(manifest["runtime_fingerprint_digest"])
+            bundle_hash = str(manifest["bundle_manifest_hash"])
+            for entry in existing_entries:
+                same_run = entry.get("analysis_run_id") == analysis_run_id
+                if not same_run:
+                    continue
+                if entry.get("status", "active") != "active" or bool(
+                    entry.get("revoked", False)
+                ):
+                    raise ReferencePromotionError("reference source run is revoked")
+                if (
+                    entry.get("reference_slot_id") == reference_slot_id
+                    and entry.get("bundle_manifest_hash") == bundle_hash
+                ):
+                    try:
+                        reference = self._verify_entry(entry)
+                    except ReferenceVerificationError as error:
+                        raise ReferencePromotionError(str(error)) from error
+                    return ReferencePromotion(
+                        reference=reference,
+                        validation_attestation_id=reference.validation_attestation_id,
+                        validation_attestation_ref=reference.validation_attestation_ref,
+                        created=False,
+                    )
+                raise ReferencePromotionError("reference source run is already promoted")
+            if existing_registry is not None:
+                raise ReferencePromotionError("validated reference registry is immutable")
+
+            gate_checks = [
+                {
+                    "check_id": "release_identity",
+                    "status": "passed",
+                    "evidence_digest": sha256(
+                        {
+                            "release_candidate_id": self._release_candidate_id,
+                            "build_manifest_id": self.expected_build_id,
+                        }
+                    ),
+                },
+                {
+                    "check_id": "scientific_request_identity",
+                    "status": "passed",
+                    "evidence_digest": sha256(
+                        {
+                            "scientific_request_digest": request_digest,
+                            "dataset_version_id": payloads["dataset_version_id"],
+                            "intended_role": observed_role,
+                        }
+                    ),
+                },
+                {
+                    "check_id": "runtime_fingerprint",
+                    "status": "passed",
+                    "evidence_digest": sha256(
+                        {
+                            "runtime_fingerprint_digest": runtime_digest,
+                            "runtime_fingerprint": self._runtime_fingerprint,
+                        }
+                    ),
+                },
+                {
+                    "check_id": "verification_report",
+                    "status": "passed",
+                    "evidence_digest": sha256(report),
+                },
+                {
+                    "check_id": "reproduction",
+                    "status": "passed",
+                    "evidence_digest": sha256(
+                        {
+                            "reproduces_run_id": manifest.get("reproduces_run_id"),
+                            "verification_check_ids": sorted(check_ids),
+                        }
+                    ),
+                },
+                {
+                    "check_id": "provenance",
+                    "status": "passed",
+                    "evidence_digest": sha256(
+                        {
+                            "investigation_request_id": investigation_request_id,
+                            "dataset_version_id": payloads["dataset_version_id"],
+                            "bundle_manifest_hash": bundle_hash,
+                        }
+                    ),
+                },
+            ]
+            validation_policy_version = report.get("validation_policy_version")
+            try:
+                policy_version = _require_identifier(
+                    validation_policy_version,
+                    "validation policy version",
+                )
+            except ReferenceVerificationError as error:
+                raise ReferencePromotionError(str(error)) from error
+            attestation_basis = {
+                "schema_version": REFERENCE_PROMOTION_SCHEMA_VERSION,
+                "analysis_run_id": analysis_run_id,
+                "bundle_manifest_hash": bundle_hash,
+                "scientific_request_digest": request_digest,
+                "runtime_fingerprint_digest": runtime_digest,
+                "release_candidate_id": self._release_candidate_id,
+                "reference_slot_id": reference_slot_id,
+                "validation_policy_version": policy_version,
+                "validated_at": validation_time.isoformat(),
+                "checks": gate_checks,
+            }
+            validation_attestation_id = "attestation-" + sha256(attestation_basis)[7:]
+            attestation = {
+                "attestation_schema_version": VALIDATION_ATTESTATION_SCHEMA_VERSION,
+                "validation_attestation_id": validation_attestation_id,
+                "analysis_run_id": analysis_run_id,
+                "bundle_manifest_hash": bundle_hash,
+                "scientific_request_digest": request_digest,
+                "runtime_fingerprint_digest": runtime_digest,
+                "release_candidate_id": self._release_candidate_id,
+                "release_id": self._release_candidate_id,
+                "reference_slot_id": reference_slot_id,
+                "validation_policy_version": policy_version,
+                "status": "passed",
+                "checks": gate_checks,
+                "validated_at": validation_time.isoformat(),
+                "run_status": "SUCCEEDED",
+                "lifecycle": "sealed",
+                "availability_state": "available",
+                "run_relationship": (
+                    "reproduction"
+                    if isinstance(manifest.get("reproduces_run_id"), str)
+                    else "fresh"
+                ),
+            }
+            attestation_bytes = _canonical_bytes(attestation)
+            attestation_ref = sha256(attestation_bytes)
+            attestation_path = _attestation_path(
+                self._artifact_root,
+                validation_attestation_id,
+                attestation_ref,
+            )
+            if attestation_path.exists():
+                try:
+                    if attestation_path.read_bytes() != attestation_bytes:
+                        raise ReferencePromotionError(
+                            "validation attestation content collision"
+                        )
+                except OSError as error:
+                    raise ReferencePromotionError(
+                        "validation attestation is unavailable"
+                    ) from error
+            else:
+                _write_atomic(attestation_path, attestation_bytes)
+
+            entry: dict[str, Any] = {
+                "reference_slot_id": reference_slot_id,
+                "analysis_run_id": analysis_run_id,
+                "bundle_manifest_hash": bundle_hash,
+                "validation_attestation_id": validation_attestation_id,
+                "validation_attestation_ref": attestation_ref,
+                "read_model_schema_version": READ_MODEL_SCHEMA_VERSION,
+                "intended_role": observed_role,
+                "status": "active",
+                "revoked": False,
+            }
+            try:
+                reference = self._verify_entry(entry)
+            except ReferenceVerificationError as error:
+                raise ReferencePromotionError(str(error)) from error
+
+            new_entries = list(existing_entries)
+            new_entries.append(entry)
+            new_entries.sort(
+                key=lambda item: (
+                    str(item["reference_slot_id"]),
+                    str(item["analysis_run_id"]),
+                    str(item["bundle_manifest_hash"]),
+                    str(item["validation_attestation_ref"]),
+                )
+            )
+            registry = {
+                "registry_schema_version": REFERENCE_REGISTRY_SCHEMA_VERSION,
+                "release_candidate_id": self._release_candidate_id,
+                "release_id": self._release_candidate_id,
+                "entries": new_entries,
+            }
+            _write_atomic(registry_path, _canonical_bytes(registry))
+            try:
+                verified_reference = self._verify_entry(entry)
+            except ReferenceVerificationError as error:
+                raise ReferencePromotionError(str(error)) from error
+            return ReferencePromotion(
+                reference=verified_reference,
+                validation_attestation_id=validation_attestation_id,
+                validation_attestation_ref=attestation_ref,
+                created=True,
+            )
+
     def select_reference(
         self,
         reference_slot_id: str | None = None,
@@ -1065,6 +1644,31 @@ class ValidatedReferenceStore:
 
     def is_verified(self, reference_slot_id: str) -> bool:
         return self.select_reference(reference_slot_id) is not None
+
+
+def promote_validated_reference(
+    artifact_root: Path,
+    *,
+    analysis_run_id: str,
+    reference_slot_id: str,
+    release_candidate_id: str,
+    runtime_fingerprint: Mapping[str, Any],
+    now: datetime | None = None,
+    intended_role: str | None = None,
+) -> ReferencePromotion:
+    """Promote a run using the same verifier used for every later read."""
+
+    store = ValidatedReferenceStore(
+        artifact_root,
+        release_candidate_id=release_candidate_id,
+        runtime_fingerprint=runtime_fingerprint,
+    )
+    return store.promote_reference(
+        analysis_run_id,
+        reference_slot_id,
+        now=now,
+        intended_role=intended_role,
+    )
 
 
 def _write_atomic(path: Path, content: bytes) -> None:

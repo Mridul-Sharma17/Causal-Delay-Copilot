@@ -5270,7 +5270,7 @@ def finalize_fresh_analysis(
     from .references import (
         ARTIFACT_CONTRACT_VERSION,
         BUNDLE_MANIFEST_SCHEMA_VERSION,
-        CACHE_KEY_SCHEMA_VERSION,
+        build_cache_key,
         publish_analysis_bundle,
         verify_published_analysis_bundle,
     )
@@ -5395,15 +5395,10 @@ def finalize_fresh_analysis(
     runtime_digest = str(admission["runtime_fingerprint_digest"])
     request_digest = str(admission["scientific_request_digest"])
     engine_schema = str(engine_result.get("schema_version"))
-    cache_key = content_sha256(
-        {
-            "schema_version": CACHE_KEY_SCHEMA_VERSION,
-            "scientific_request_digest": request_digest,
-            "runtime_fingerprint_digest": runtime_digest,
-            "engine_output_schema_version": engine_schema,
-            "bundle_manifest_schema_version": BUNDLE_MANIFEST_SCHEMA_VERSION,
-            "artifact_contract_version": ARTIFACT_CONTRACT_VERSION,
-        }
+    cache_key = build_cache_key(
+        scientific_request_digest=request_digest,
+        runtime_fingerprint_digest=runtime_digest,
+        engine_output_schema_version=engine_schema,
     )
     build_id = runtime_value.get("application_build_id")
     if not isinstance(build_id, str) or not build_id:

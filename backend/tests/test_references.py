@@ -20,7 +20,10 @@ from backend.app.references import (
     VERIFICATION_REPORT_SCHEMA_VERSION,
     VALIDATION_ATTESTATION_SCHEMA_VERSION,
     ArtifactMember,
+    ReferencePromotion,
+    ReferencePromotionError,
     ValidatedReferenceStore,
+    promote_validated_reference,
     publish_analysis_bundle,
 )
 from backend.app.settings import DeliveryProfile, Settings
@@ -171,6 +174,38 @@ def _members(
                 scientific_content_digest=sha256(payload),
             )
         )
+    return tuple(members)
+
+
+def _members_with_verification_gates(
+    release_id: str,
+    build_id: str,
+    *gate_ids: str,
+) -> tuple[ArtifactMember, ...]:
+    members = list(_members(release_id, build_id))
+    verification_index = next(
+        index
+        for index, member in enumerate(members)
+        if member.logical_role == "verification_report"
+    )
+    members[verification_index] = replace(
+        members[verification_index],
+        content=_json_bytes(
+            {
+                "schema_version": VERIFICATION_REPORT_SCHEMA_VERSION,
+                "validation_policy_version": "release-validation.v1",
+                "status": "passed",
+                "checks": [
+                    {
+                        "check_id": gate_id,
+                        "status": "passed",
+                        "evidence_digest": "sha256:" + chr(97 + index) * 64,
+                    }
+                    for index, gate_id in enumerate(gate_ids)
+                ],
+            }
+        ),
+    )
     return tuple(members)
 
 
@@ -631,3 +666,285 @@ def test_reference_delivery_endpoint_falls_back_to_the_earliest_verified_referen
 
     assert response.status_code == 200
     assert response.json()["reference_slot_id"] == "ordinary-demo-fallback"
+
+
+def test_promotion_writes_an_immutable_content_addressed_attestation_and_is_idempotent(
+    tmp_path: Path,
+) -> None:
+    artifact_root = tmp_path / "artifacts"
+    run_id = "analysis-run-00000000-0000-4000-8000-000000000013"
+    manifest = _manifest(RELEASE_ID, BUILD_ID)
+    manifest["investigation_request_id"] = "investigation-00000000000000000000000000000001"
+    publish_analysis_bundle(
+        artifact_root,
+        analysis_run_id=run_id,
+        manifest=manifest,
+        members=_members_with_verification_gates(
+            RELEASE_ID,
+            BUILD_ID,
+            "provenance",
+            "reproduction",
+        ),
+    )
+    runtime = _runtime(RELEASE_ID, BUILD_ID)
+
+    promotion = promote_validated_reference(
+        artifact_root,
+        analysis_run_id=run_id,
+        reference_slot_id=DEFAULT_REFERENCE_SLOT_ID,
+        release_candidate_id=RELEASE_ID,
+        runtime_fingerprint=runtime,
+    )
+
+    assert isinstance(promotion, ReferencePromotion)
+    assert promotion.created is True
+    assert promotion.reference.reference_slot_id == DEFAULT_REFERENCE_SLOT_ID
+    assert promotion.reference.verification_state == "reference_validated"
+    assert promotion.validation_attestation_ref.startswith("sha256:")
+    attestation_digest = promotion.validation_attestation_ref.removeprefix("sha256:")
+    attestation_path = (
+        artifact_root
+        / "attestations"
+        / "sha256"
+        / attestation_digest[:2]
+        / attestation_digest[2:]
+    )
+    assert attestation_path.is_file()
+    registry = json.loads(
+        (
+            artifact_root
+            / "releases"
+            / RELEASE_ID
+            / "validated-references.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert registry["entries"][0]["validation_attestation_ref"] == (
+        promotion.validation_attestation_ref
+    )
+
+    replay = promote_validated_reference(
+        artifact_root,
+        analysis_run_id=run_id,
+        reference_slot_id=DEFAULT_REFERENCE_SLOT_ID,
+        release_candidate_id=RELEASE_ID,
+        runtime_fingerprint=runtime,
+    )
+
+    assert replay.created is False
+    assert replay.validation_attestation_ref == promotion.validation_attestation_ref
+    assert replay.reference == promotion.reference
+
+    attestation_path.write_bytes(b"tampered")
+    assert ValidatedReferenceStore(
+        artifact_root,
+        release_candidate_id=RELEASE_ID,
+        runtime_fingerprint=runtime,
+    ).select_reference() is None
+
+
+def test_cache_selection_prefers_a_reference_then_uses_the_earliest_verified_run(
+    tmp_path: Path,
+) -> None:
+    artifact_root = tmp_path / "artifacts"
+    early_hash = _install_reference(
+        artifact_root,
+        run_id="analysis-run-00000000-0000-4000-8000-000000000014",
+        slot_id="local-early",
+        validated_at="2026-08-01T00:00:00+00:00",
+    )
+    late_hash = _install_reference(
+        artifact_root,
+        run_id="analysis-run-00000000-0000-4000-8000-000000000015",
+        slot_id="ordinary-demo",
+        validated_at="2026-08-02T00:00:00+00:00",
+    )
+    runtime = _runtime(RELEASE_ID, BUILD_ID)
+    request_digest = sha256(_request())
+    cache_key = _cache_key(request_digest, sha256(runtime))
+    store = ValidatedReferenceStore(
+        artifact_root,
+        release_candidate_id=RELEASE_ID,
+        runtime_fingerprint=runtime,
+    )
+
+    local_candidate = store.select_cache_candidate(
+        scientific_request_digest=request_digest,
+        cache_key=cache_key,
+    )
+
+    assert local_candidate is not None
+    assert local_candidate.analysis_run_id.endswith("0014")
+    assert local_candidate.verification_state == "machine_verified"
+    assert local_candidate.reference_slot_id is None
+    assert local_candidate.validation_attestation_ref is None
+
+    _write_registry(
+        artifact_root,
+        [
+            {
+                "reference_slot_id": "ordinary-demo",
+                "analysis_run_id": "analysis-run-00000000-0000-4000-8000-000000000015",
+                "bundle_manifest_hash": late_hash,
+                "validation_attestation_id": "attestation-ordinary-demo",
+                "read_model_schema_version": READ_MODEL_SCHEMA_VERSION,
+                "intended_role": "semi_synthetic_hero",
+            }
+        ],
+    )
+
+    reference_candidate = store.select_cache_candidate(
+        scientific_request_digest=request_digest,
+        cache_key=cache_key,
+    )
+
+    assert reference_candidate is not None
+    assert reference_candidate.analysis_run_id.endswith("0015")
+    assert reference_candidate.bundle_manifest_hash == late_hash
+    assert reference_candidate.verification_state == "reference_validated"
+    assert reference_candidate.reference_slot_id == "ordinary-demo"
+    assert reference_candidate.validation_attestation_ref == "attestation-ordinary-demo"
+    assert early_hash != late_hash
+
+
+def test_promotion_never_edits_an_existing_release_registry(
+    tmp_path: Path,
+) -> None:
+    artifact_root = tmp_path / "artifacts"
+    runtime = _runtime(RELEASE_ID, BUILD_ID)
+    for suffix in ("18", "19"):
+        publish_analysis_bundle(
+            artifact_root,
+            analysis_run_id=f"analysis-run-00000000-0000-4000-8000-0000000000{suffix}",
+            manifest={
+                **_manifest(RELEASE_ID, BUILD_ID),
+                "investigation_request_id": f"investigation-000000000000000000000000000000{suffix}",
+            },
+            members=_members_with_verification_gates(
+                RELEASE_ID,
+                BUILD_ID,
+                "provenance",
+                "reproduction",
+            ),
+        )
+
+    first = promote_validated_reference(
+        artifact_root,
+        analysis_run_id="analysis-run-00000000-0000-4000-8000-000000000018",
+        reference_slot_id=DEFAULT_REFERENCE_SLOT_ID,
+        release_candidate_id=RELEASE_ID,
+        runtime_fingerprint=runtime,
+    )
+    attestation_files_before = sorted(
+        (artifact_root / "attestations" / "sha256").rglob("*")
+    )
+
+    with pytest.raises(ReferencePromotionError, match="immutable"):
+        promote_validated_reference(
+            artifact_root,
+            analysis_run_id="analysis-run-00000000-0000-4000-8000-000000000019",
+            reference_slot_id="ordinary-demo-next",
+            release_candidate_id=RELEASE_ID,
+            runtime_fingerprint=runtime,
+        )
+
+    registry = json.loads(
+        (
+            artifact_root
+            / "releases"
+            / RELEASE_ID
+            / "validated-references.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert len(registry["entries"]) == 1
+    assert registry["entries"][0]["validation_attestation_ref"] == (
+        first.validation_attestation_ref
+    )
+    assert sorted((artifact_root / "attestations" / "sha256").rglob("*")) == (
+        attestation_files_before
+    )
+
+
+def test_promotion_fails_closed_without_provenance_and_reproduction_gates(
+    tmp_path: Path,
+) -> None:
+    artifact_root = tmp_path / "artifacts"
+    run_id = "analysis-run-00000000-0000-4000-8000-000000000016"
+    publish_analysis_bundle(
+        artifact_root,
+        analysis_run_id=run_id,
+        manifest=_manifest(RELEASE_ID, BUILD_ID),
+        members=_members(RELEASE_ID, BUILD_ID),
+    )
+
+    with pytest.raises(ReferencePromotionError, match="provenance"):
+        promote_validated_reference(
+            artifact_root,
+            analysis_run_id=run_id,
+            reference_slot_id=DEFAULT_REFERENCE_SLOT_ID,
+            release_candidate_id=RELEASE_ID,
+            runtime_fingerprint=_runtime(RELEASE_ID, BUILD_ID),
+        )
+
+
+def test_promotion_rejects_a_quarantined_source_run_and_a_revoked_reference(
+    tmp_path: Path,
+) -> None:
+    artifact_root = tmp_path / "artifacts"
+    run_id = "analysis-run-00000000-0000-4000-8000-000000000017"
+    publish_analysis_bundle(
+        artifact_root,
+        analysis_run_id=run_id,
+        manifest={
+            **_manifest(RELEASE_ID, BUILD_ID),
+            "investigation_request_id": "investigation-00000000000000000000000000000017",
+        },
+        members=_members_with_verification_gates(
+            RELEASE_ID,
+            BUILD_ID,
+            "provenance",
+            "reproduction",
+        ),
+    )
+    (artifact_root / "quarantine" / run_id).mkdir(parents=True)
+
+    with pytest.raises(ReferencePromotionError, match="quarantined"):
+        promote_validated_reference(
+            artifact_root,
+            analysis_run_id=run_id,
+            reference_slot_id=DEFAULT_REFERENCE_SLOT_ID,
+            release_candidate_id=RELEASE_ID,
+            runtime_fingerprint=_runtime(RELEASE_ID, BUILD_ID),
+        )
+
+    (artifact_root / "quarantine" / run_id).rmdir()
+    _write_registry(
+        artifact_root,
+        [
+            {
+                "reference_slot_id": DEFAULT_REFERENCE_SLOT_ID,
+                "analysis_run_id": run_id,
+                "bundle_manifest_hash": json.loads(
+                    (
+                        artifact_root
+                        / "runs"
+                        / run_id
+                        / "manifest.json"
+                    ).read_text(encoding="utf-8")
+                )["bundle_manifest_hash"],
+                "validation_attestation_id": "attestation-revoked",
+                "read_model_schema_version": READ_MODEL_SCHEMA_VERSION,
+                "intended_role": "semi_synthetic_hero",
+                "status": "revoked",
+                "revoked": True,
+            }
+        ],
+    )
+
+    with pytest.raises(ReferencePromotionError, match="revoked"):
+        promote_validated_reference(
+            artifact_root,
+            analysis_run_id=run_id,
+            reference_slot_id=DEFAULT_REFERENCE_SLOT_ID,
+            release_candidate_id=RELEASE_ID,
+            runtime_fingerprint=_runtime(RELEASE_ID, BUILD_ID),
+        )
