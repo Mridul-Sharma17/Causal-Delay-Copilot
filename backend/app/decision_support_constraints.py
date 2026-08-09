@@ -6,6 +6,12 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Mapping
 
 from .canonical import sha256 as _sha256
+from .decision_support_value import (
+    ValueContext,
+    canonical_value_inputs,
+    prepare_value_inputs,
+    project_option_value,
+)
 from .fixture_boundaries import is_synthetic_fixture_identity
 
 
@@ -2871,6 +2877,7 @@ def _option_result(
     composite_reviews: Mapping[tuple[str, str], dict[str, Any]],
     rubrics_by_reference: Mapping[str, dict[str, Any]],
     release_preview: Mapping[str, Any] | None,
+    value_context: ValueContext,
 ) -> dict[str, Any]:
     option_code = str(option["option_code"])
     mechanism_tag = (
@@ -3070,6 +3077,41 @@ def _option_result(
     failing_results = [
         item for item in rule_results if item["status"] in {"UNSATISFIED", "UNKNOWN"}
     ]
+    value_projection = project_option_value(
+        option=option,
+        link=link,
+        trigger_mode=trigger_mode,
+        subject_identity=subject_identity,
+        snapshot=snapshot,
+        constraints_as_of=constraints_as_of,
+        required_constraints_pass=not failing_results,
+        value_context=value_context,
+    )
+    projection_fields = deepcopy(value_projection.fields)
+    tag_updates = projection_fields.pop("evidence_tags", {})
+    base.update(projection_fields)
+    base["evidence_tags"].update(tag_updates)
+    if option_code == "ACCEPT_AND_MONITOR":
+        base["evidence_tags"]["ASSUMPTION_BASED_BENEFIT"] = "NO_BENEFIT_CLAIM"
+    elif value_context.present:
+        base["evidence_tags"]["ASSUMPTION_BASED_BENEFIT"] = (
+            "EXPOSURE_TRANSLATION_ASSUMPTION"
+            if value_projection.fields.get("benefit_projection") is not None
+            and option.get("response_class")
+            in {"EXPOSURE_REDUCTION", "MILESTONE_ACCELERATION"}
+            else "OPERATIONAL_ASSUMPTION_ONLY"
+            if value_projection.fields.get("benefit_projection") is not None
+            else "UNAVAILABLE"
+        )
+    base["suppression_reasons"].extend(value_projection.suppression_reasons)
+    base["suppression_reasons"] = sorted(
+        base["suppression_reasons"],
+        key=lambda item: (
+            int(item["priority"]),
+            int(item.get("constraint_rule_priority", -1)),
+            str(item.get("rule_code", item["code"])),
+        ),
+    )
     if failing_results:
         base["evaluation_state"] = "SUPPRESSED"
         base["evidence_tags"]["RULE_BASED_ELIGIBILITY"] = (
@@ -3077,7 +3119,7 @@ def _option_result(
             if any(item["status"] == "UNKNOWN" for item in failing_results)
             else "UNSATISFIED"
         )
-        base["suppression_reasons"] = [
+        constraint_suppression_reasons = [
             _suppression_reason(
                 code=(
                     "REQUIRED_CONSTRAINT_UNSATISFIED"
@@ -3091,6 +3133,10 @@ def _option_result(
             )
             for item in failing_results
         ]
+        base["suppression_reasons"] = [
+            *constraint_suppression_reasons,
+            *value_projection.suppression_reasons,
+        ]
         base["suppression_reasons"].sort(
             key=lambda item: (
                 int(item["priority"]),
@@ -3098,6 +3144,10 @@ def _option_result(
                 str(item["rule_code"]),
             )
         )
+        return base
+    if value_projection.suppression_reasons:
+        base["evaluation_state"] = "SUPPRESSED"
+        base["evidence_tags"]["RULE_BASED_ELIGIBILITY"] = "SATISFIED"
         return base
     base["evaluation_state"] = "ACTIVE"
     base["evidence_tags"]["RULE_BASED_ELIGIBILITY"] = "SATISFIED"
@@ -3142,7 +3192,7 @@ def evaluate_active_synthetic_conformance(
     driver_state: Mapping[str, Any],
     synthetic_conformance: Mapping[str, Any],
 ) -> dict[str, Any]:
-    del subject_applicability, subject_verdict, population_verdict
+    del subject_applicability, population_verdict
     fixture_case = synthetic_conformance.get("fixture_case")
     governed_records = synthetic_conformance.get("governed_records")
     if not isinstance(fixture_case, Mapping) or not isinstance(
@@ -3335,6 +3385,26 @@ def evaluate_active_synthetic_conformance(
                 "composite_reviews",
             ],
         )
+    value_preparation = prepare_value_inputs(
+        fixture_case=fixture_case,
+        subject_verdict=subject_verdict,
+    )
+    if value_preparation.error is not None:
+        return _active_failure(
+            result=result,
+            error=value_preparation.error,
+            consumed_inputs=[
+                "permission_envelope",
+                "subject_driver_state",
+                "intervention_library",
+                "driver_action_links",
+                "constraint_rules",
+                "case_constraint_snapshot",
+                "decision_support_value_inputs",
+            ],
+        )
+    value_context = value_preparation.context
+    canonical_value_input_payload = canonical_value_inputs(value_context)
     registry_inspection = _build_registry_inspection(
         collections=collections,
         library=library,
@@ -3359,6 +3429,7 @@ def evaluate_active_synthetic_conformance(
                 composite_reviews=composite_reviews,
                 rubrics_by_reference=rubrics_by_reference,
                 release_preview=preview,
+                value_context=value_context,
             )
         )
     suppression_reasons: list[dict[str, Any]] = []
@@ -3384,6 +3455,7 @@ def evaluate_active_synthetic_conformance(
         "library_content_hash": library.get("content_hash"),
         "snapshot_content_hash": snapshot.get("content_hash"),
         "trigger_mode": trigger_mode,
+        "decision_support_value_inputs": canonical_value_input_payload,
     }
     from .decision_support import _stable_id
 
@@ -3395,7 +3467,9 @@ def evaluate_active_synthetic_conformance(
             "reason": (
                 "Every required constraint for every governed option was evaluated under "
                 "the closed synthetic conformance registry. Benefit, value, comparison, "
-                "recommendation, drafting, and authorization stages are outside this evaluation."
+                "and assumption-based projection values were evaluated when their exact "
+                "inputs passed. Comparison, recommendation, drafting, and authorization "
+                "stages are outside this evaluation."
             ),
             "next_step": "Inspect each option's typed rule outcomes, suppression reasons, and provenance.",
             "decision_support_evaluation_id": _stable_id("dse", evaluation_identity),
@@ -3411,9 +3485,11 @@ def evaluate_active_synthetic_conformance(
                 {
                     "registry_inspection": registry_inspection,
                     "case_constraint_snapshot": snapshot,
+                    "decision_support_value_inputs": canonical_value_input_payload,
                     "options": options,
                 }
             ),
+            "decision_support_value_inputs": canonical_value_input_payload,
             "options": options,
             "evidence_tags": {
                 "DRIVER_EVIDENCE": "SUPPORTED_UNDER_ASSUMPTIONS",
@@ -3441,6 +3517,7 @@ def evaluate_active_synthetic_conformance(
                 "constraint_rules",
                 "case_constraint_snapshot",
                 "release_timing_preview",
+                "decision_support_value_inputs",
             ],
         }
     )

@@ -129,7 +129,7 @@ def test_active_fixture_evaluates_every_closed_option_and_retains_provenance() -
     assert monitor["constraint_results"][-1]["status"] == "SATISFIED"
     assert result["action_recommendation"] is None
     assert "net_central" not in json.dumps(result)
-    assert "benefit_projection" not in json.dumps(result)
+    assert "net_assumption_value" not in json.dumps(result)
 
 
 def test_active_fixture_publishes_advisories_and_explicit_comparison_applicability() -> None:

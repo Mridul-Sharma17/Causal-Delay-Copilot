@@ -22,6 +22,7 @@ import {
   type AuditOccurrenceResponse,
   type DecisionBriefSnapshot,
   type DecisionSupportBoundary,
+  type DecisionSupportOption,
   type DecisionSupportRegistryInspection,
   type DiagnosticResult,
   type DiagnosticSummary,
@@ -325,6 +326,151 @@ function diagnosticStatusLabel(status: DiagnosticResult["status"]): string {
     case "NOT_RUN":
       return "NOT_RUN — upstream short circuit";
   }
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+const projectionRanges = [
+  ["Recovered supplier-milestone days", "recovered_supplier_milestone_days"],
+  ["Protected project-delay days", "project_delay_days_protected"],
+  ["Gross avoided delay value", "gross_avoided_delay_value"],
+  ["Gross consequence value", "gross_consequence_value"],
+  ["Net assumption value", "net_assumption_value"],
+] as const;
+
+function ProjectionRange({
+  label,
+  value,
+}: {
+  label: string;
+  value: unknown;
+}) {
+  const range = asRecord(value);
+  if (range === null) {
+    return null;
+  }
+  return (
+    <div>
+      <dt>{label}</dt>
+      <dd className="projection-range">
+        {(["lower", "central", "upper"] as const).map((bound) => (
+          <span key={bound}>
+            <strong>{bound}</strong> <code>{formatValue(range[bound])}</code>
+          </span>
+        ))}
+      </dd>
+    </div>
+  );
+}
+
+export function DecisionSupportProjectionDetails({
+  option,
+}: {
+  option: DecisionSupportOption;
+}) {
+  const projection = asRecord(option.benefit_projection);
+  const assumptions = asRecord(option.assumptions);
+  const costs = asRecord(option.costs);
+  const caveats = Array.isArray(option.caveats)
+    ? option.caveats.filter((item): item is string => typeof item === "string")
+    : [];
+  const unavailableReasons = Array.isArray(option.unavailable_reasons)
+    ? option.unavailable_reasons.filter((item): item is Record<string, unknown> => asRecord(item) !== null)
+    : [];
+  const hasDetails =
+    projection !== null ||
+    option.value_status !== undefined ||
+    assumptions !== null ||
+    costs !== null ||
+    caveats.length > 0 ||
+    unavailableReasons.length > 0;
+
+  if (!hasDetails) {
+    return null;
+  }
+
+  return (
+    <div className="option-projection">
+      <strong>Assumption-based projections</strong>
+      <dl className="projection-facts">
+        <div>
+          <dt>Value status</dt>
+          <dd><code>{formatValue(option.value_status)}</code></dd>
+        </div>
+        {projection !== null && (
+          <>
+            <div>
+              <dt>Disclosure</dt>
+              <dd><code>{formatValue(projection.disclosure)}</code></dd>
+            </div>
+            {projectionRanges.map(([label, key]) => (
+              <ProjectionRange key={key} label={label} value={projection[key]} />
+            ))}
+            <div>
+              <dt>Schedule protection</dt>
+              <dd><code>{formatValue(projection.schedule_protection)}</code></dd>
+            </div>
+            <div>
+              <dt>Currency</dt>
+              <dd><code>{formatValue(projection.currency)}</code></dd>
+            </div>
+          </>
+        )}
+      </dl>
+
+      {(assumptions !== null || costs !== null) && (
+        <details className="projection-inputs">
+          <summary>Inspect assumptions and costs</summary>
+          {assumptions !== null && (
+            <div>
+              <strong>Assumptions</strong>
+              <code>{formatValue(assumptions)}</code>
+            </div>
+          )}
+          {costs !== null && (
+            <div>
+              <strong>Costs</strong>
+              <code>{formatValue(costs)}</code>
+            </div>
+          )}
+        </details>
+      )}
+
+      <div className="projection-tags">
+        <strong>Evidence tags</strong>
+        <code>{formatValue(option.evidence_tags)}</code>
+      </div>
+
+      {caveats.length > 0 && (
+        <div className="projection-caveats">
+          <strong>Caveats</strong>
+          <ul>
+            {caveats.map((caveat) => <li key={caveat}>{caveat}</li>)}
+          </ul>
+        </div>
+      )}
+
+      <div className="projection-unavailable">
+        <strong>Unavailable reasons</strong>
+        {unavailableReasons.length === 0 ? (
+          <span>None recorded.</span>
+        ) : (
+          <ul>
+            {unavailableReasons.map((reason, index) => (
+              <li key={`${String(reason.code ?? "reason")}-${index}`}>
+                <code>{String(reason.code ?? "UNAVAILABLE")}</code>
+                <span>{String(reason.reason ?? "No explanation recorded.")}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </div>
+  );
 }
 
 function diagnosticSummaryLabel(summary: DiagnosticSummary): string {
@@ -695,6 +841,7 @@ function DecisionSupportActionsStage({
                       .join(" · ")}
                   </code>
                 </div>
+                <DecisionSupportProjectionDetails option={option} />
               </li>
             ))}
           </ul>

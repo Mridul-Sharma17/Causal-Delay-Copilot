@@ -1,7 +1,8 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
-import App from "./App";
+import App, { DecisionSupportProjectionDetails } from "./App";
+import type { DecisionSupportOption } from "./contracts";
 
 const healthResponse = {
   service: "causal-delay-copilot",
@@ -262,6 +263,56 @@ const decisionBriefSnapshotResponse = {
   presentation: {
     schema_version: "reference-journey-presentation.v1",
   },
+};
+
+const projectionOption: DecisionSupportOption = {
+  option_code: "PROTECTED_PRODUCTION_SLOT",
+  option_version: "1",
+  label: "Protected production slot",
+  evaluation_state: "ACTIVE",
+  evidence_tags: {
+    DRIVER_EVIDENCE: "SUPPORTED_UNDER_ASSUMPTIONS",
+    MECHANISTIC_LINK: "REVIEWED_PLAUSIBLE",
+    RULE_BASED_ELIGIBILITY: "SATISFIED",
+    ASSUMPTION_BASED_BENEFIT: "EXPOSURE_TRANSLATION_ASSUMPTION",
+  },
+  action_effect_evidence: "INTERVENTION_EFFECT_NOT_ESTIMATED",
+  suppression_reasons: [],
+  value_status: "ROBUSTLY_POSITIVE",
+  benefit_projection: {
+    disclosure: "ASSUMPTION_BASED_PROJECTION_RANGE",
+    recovered_supplier_milestone_days: {
+      lower: { numerator: "12", denominator: "5" },
+      central: { numerator: "4", denominator: "1" },
+      upper: { numerator: "28", denominator: "5" },
+    },
+    project_delay_days_protected: {
+      lower: { numerator: "12", denominator: "5" },
+      central: { numerator: "4", denominator: "1" },
+      upper: { numerator: "28", denominator: "5" },
+    },
+    net_assumption_value: {
+      lower: { numerator: "90000", denominator: "1" },
+      central: { numerator: "250000", denominator: "1" },
+      upper: { numerator: "410000", denominator: "1" },
+    },
+    schedule_protection: {
+      basis: "PROJECT_DELAY_DAYS",
+      duration_basis: "CALENDAR_DAY",
+      central: { numerator: "4", denominator: "1" },
+    },
+    currency: "INR",
+  },
+  assumptions: {
+    recoverable_fraction: { selected: { selected_value: { numerator: "2", denominator: "5" } } },
+  },
+  costs: {
+    direct_action_cost: { amount: { numerator: "150000", denominator: "1" }, currency: "INR" },
+  },
+  caveats: ["INTERVENTION_EFFECT_NOT_ESTIMATED"],
+  unavailable_reasons: [
+    { code: "EXAMPLE_UNAVAILABLE", reason: "A governed input is unavailable." },
+  ],
 };
 
 const replayResponse = {
@@ -729,6 +780,22 @@ const proactiveAttemptResponse = {
     audit: { occurrence_id: "occurrence-proactive-1", event_seq: 4 },
   },
 };
+
+describe("Decision Support projection disclosure", () => {
+  afterEach(cleanup);
+
+  test("shows exact ranges, assumptions, caveats, tags, and unavailable reasons", () => {
+    render(<DecisionSupportProjectionDetails option={projectionOption} />);
+
+    expect(screen.getByText("Assumption-based projections")).toBeInTheDocument();
+    expect(screen.getByText("ROBUSTLY_POSITIVE")).toBeInTheDocument();
+    expect(screen.getByText("ASSUMPTION_BASED_PROJECTION_RANGE")).toBeInTheDocument();
+    expect(screen.getByText("Recovered supplier-milestone days")).toBeInTheDocument();
+    expect(screen.getByText(/EXPOSURE_TRANSLATION_ASSUMPTION/)).toBeInTheDocument();
+    expect(screen.getByText("INTERVENTION_EFFECT_NOT_ESTIMATED")).toBeInTheDocument();
+    expect(screen.getByText("EXAMPLE_UNAVAILABLE")).toBeInTheDocument();
+  });
+});
 
 describe("Core health journey", () => {
   afterEach(cleanup);
