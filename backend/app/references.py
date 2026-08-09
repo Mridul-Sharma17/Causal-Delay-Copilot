@@ -24,6 +24,7 @@ from .artifacts import (
     quarantine_staging_material,
 )
 from .diagnostics import DiagnosticIntegrityError
+from .fixture_boundaries import is_synthetic_fixture_identity
 from .validity import publish_validity_results
 
 
@@ -946,6 +947,10 @@ def _verify_bundle(
             raise ReferenceVerificationError("reproduction member hashes are inconsistent")
         if comparison.get("comparison_classes") != checked_comparison["comparison_classes"]:
             raise ReferenceVerificationError("reproduction comparison identity is inconsistent")
+    if is_synthetic_fixture_identity(manifest) or is_synthetic_fixture_identity(payloads):
+        raise ReferenceVerificationError(
+            "synthetic conformance fixtures cannot enter analysis evidence paths"
+        )
     return manifest, payloads
 
 
@@ -1071,6 +1076,10 @@ class ValidatedReferenceStore:
 
     def _verify_entry(self, entry: Mapping[str, Any]) -> ValidatedReference:
         manifest, payloads = self._verify_run(str(entry["analysis_run_id"]))
+        if is_synthetic_fixture_identity(payloads) or is_synthetic_fixture_identity(entry):
+            raise ReferenceVerificationError(
+                "synthetic conformance fixtures cannot enter the reference registry"
+            )
         if manifest["bundle_manifest_hash"] != entry["bundle_manifest_hash"]:
             raise ReferenceVerificationError("validated reference bundle binding does not match")
         if payloads.get("intended_role") != entry["intended_role"]:
@@ -1194,6 +1203,8 @@ class ValidatedReferenceStore:
                 return []
             verified: list[ValidatedReference] = []
             for entry in entries:
+                if is_synthetic_fixture_identity(entry):
+                    continue
                 try:
                     verified.append(self._verify_entry(entry))
                 except ReferenceVerificationError:
@@ -1227,6 +1238,10 @@ class ValidatedReferenceStore:
                     continue
                 try:
                     manifest, payloads = self._verify_run(run_directory.name)
+                    if is_synthetic_fixture_identity(manifest) or is_synthetic_fixture_identity(
+                        payloads
+                    ):
+                        continue
                     verified.append(
                         AnalysisRunCacheCandidate(
                             analysis_run_id=run_directory.name,
@@ -1257,7 +1272,7 @@ class ValidatedReferenceStore:
                             ),
                         )
                     )
-                except (OSError, TypeError, ValueError):
+                except (OSError, TypeError, ValueError, ReferenceVerificationError):
                     continue
             return sorted(
                 verified,
@@ -1773,6 +1788,8 @@ def publish_analysis_bundle(
         raise ValueError("publisher accepts only the manifest core")
     manifest_core = dict(manifest)
     manifest_core["analysis_run_id"] = analysis_run_id
+    if is_synthetic_fixture_identity(manifest_core):
+        raise ValueError("synthetic conformance fixtures cannot be published as analysis evidence")
     missing = _MANIFEST_REQUIRED_KEYS - {"artifact_descriptors", "bundle_manifest_hash"} - set(manifest_core)
     if missing:
         raise ValueError("manifest core is incomplete")
@@ -1792,6 +1809,8 @@ def publish_analysis_bundle(
             _verify_role_payload(descriptor, payload)
         except ReferenceVerificationError as error:
             raise ValueError(str(error)) from error
+        if is_synthetic_fixture_identity(descriptor) or is_synthetic_fixture_identity(payload):
+            raise ValueError("synthetic conformance fixtures cannot be published as analysis evidence")
         if member.scientific_content_digest is not None:
             observed_digest = sha256(payload) if payload is not None else None
             if observed_digest != member.scientific_content_digest:

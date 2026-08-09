@@ -30,9 +30,11 @@ from backend.app.references import (
     ArtifactMember,
     ReferencePromotion,
     ReferencePromotionError,
+    ReferenceVerificationError,
     ValidatedReferenceStore,
     promote_validated_reference,
     publish_analysis_bundle,
+    read_verified_analysis_bundle,
 )
 from backend.app.settings import DeliveryProfile, Settings
 
@@ -335,6 +337,120 @@ def test_reference_store_selects_the_earliest_verified_current_release_reference
     assert selected.delivery_mode == "existing_run_reuse"
     assert selected.verification_state == "reference_validated"
     assert store.read_model().reference_slot_id == "ordinary-demo-old"
+
+
+def test_reference_store_rejects_a_synthetic_conformance_reference(
+    tmp_path: Path,
+) -> None:
+    artifact_root = tmp_path / "artifacts"
+    bundle_hash = _install_reference(
+        artifact_root,
+        run_id="analysis-run-00000000-0000-4000-8000-000000000003",
+        slot_id="ordinary-demo-smuggled-synthetic",
+        validated_at="2026-08-01T00:00:00+00:00",
+        dataset_version_id="dataset-version-ordinary-demo",
+    )
+    _write_registry(
+        artifact_root,
+        [
+            {
+                "reference_slot_id": "synthetic:core-decision-support-v1:reference-slot",
+                "analysis_run_id": "analysis-run-00000000-0000-4000-8000-000000000003",
+                "bundle_manifest_hash": bundle_hash,
+                "validation_attestation_id": "attestation-ordinary-demo-smuggled-synthetic",
+                "read_model_schema_version": READ_MODEL_SCHEMA_VERSION,
+                "intended_role": "semi_synthetic_hero",
+            }
+        ],
+    )
+
+    store = ValidatedReferenceStore(
+        artifact_root,
+        release_candidate_id=RELEASE_ID,
+        runtime_fingerprint={
+            "schema_version": "runtime-fingerprint.v1",
+            "profile": "LOCAL_FALLBACK",
+            "release_candidate_id": RELEASE_ID,
+            "build_manifest_id": BUILD_ID,
+        },
+    )
+
+    assert store.list_verified_references() == []
+    assert store.select_reference() is None
+    assert not (artifact_root / "quarantine" / "analysis-run-00000000-0000-4000-8000-000000000003").exists()
+
+
+def test_bundle_publisher_rejects_synthetic_analysis_identity(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="synthetic conformance fixtures"):
+        publish_analysis_bundle(
+            tmp_path / "artifacts",
+            analysis_run_id="analysis-run-00000000-0000-4000-8000-000000000004",
+            manifest={
+                "dataset_version_id": (
+                    "synthetic:core-decision-support-v1:dataset-approved-reactive"
+                )
+            },
+            members=[],
+        )
+
+
+def test_verified_bundle_rejects_a_synthetic_manifest_identity(tmp_path: Path) -> None:
+    artifact_root = tmp_path / "artifacts"
+    run_id = "analysis-run-00000000-0000-4000-8000-000000000005"
+    publish_analysis_bundle(
+        artifact_root,
+        analysis_run_id=run_id,
+        manifest=_manifest(RELEASE_ID, BUILD_ID),
+        members=_members(RELEASE_ID, BUILD_ID),
+    )
+    manifest_path = artifact_root / "runs" / run_id / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["investigation_request_id"] = (
+        "synthetic:core-decision-support-v1:investigation-request"
+    )
+    manifest["bundle_manifest_hash"] = sha256(
+        {key: value for key, value in manifest.items() if key != "bundle_manifest_hash"}
+    )
+    _write_json(manifest_path, manifest)
+
+    with pytest.raises(ReferenceVerificationError, match="synthetic conformance fixtures"):
+        read_verified_analysis_bundle(
+            artifact_root,
+            analysis_run_id=run_id,
+            expected_build_id=BUILD_ID,
+            expected_runtime=_runtime(RELEASE_ID, BUILD_ID),
+        )
+
+
+def test_cache_candidate_rejects_a_synthetic_verified_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact_root = tmp_path / "artifacts"
+    (artifact_root / "runs" / "analysis-run-00000000-0000-4000-8000-000000000006").mkdir(
+        parents=True
+    )
+    store = ValidatedReferenceStore(
+        artifact_root,
+        release_candidate_id=RELEASE_ID,
+        runtime_fingerprint=_runtime(RELEASE_ID, BUILD_ID),
+    )
+    monkeypatch.setattr(
+        store,
+        "_verify_run",
+        lambda _analysis_run_id: (
+            {},
+            {
+                "dataset_version_id": (
+                    "synthetic:core-decision-support-v1:dataset-approved-reactive"
+                ),
+                "intended_role": "synthetic_conformance",
+            },
+        ),
+    )
+
+    assert store.list_verified_runs() == []
+    assert store.select_cache_candidate() is None
 
 
 def test_reference_store_selects_only_an_exact_request_and_cache_key(

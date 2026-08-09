@@ -4,6 +4,7 @@ from copy import deepcopy
 from typing import Any, Mapping
 
 from .canonical import sha256 as _sha256
+from .fixture_boundaries import is_synthetic_fixture_identity
 
 
 DECISION_SUPPORT_BOUNDARY_SCHEMA_VERSION = "decision-support-boundary.v1"
@@ -805,12 +806,33 @@ def evaluate_decision_support(
         release_candidate_id=release_candidate_id,
         runtime_fingerprint_digest=runtime_fingerprint_digest,
     )
-    permission = _permission(
-        subject_applicability=subject_applicability,
-        subject_verdict=subject_verdict,
-        population_verdict=population_verdict,
-        intended_role=intended_role,
-    )
+    identity_envelope = {
+        "investigation_request": investigation_request,
+        "subject_applicability": subject_applicability,
+        "subject_verdict": subject_verdict,
+        "population_verdict": population_verdict,
+        "intended_role": intended_role,
+    }
+    if is_synthetic_fixture_identity(identity_envelope):
+        permission = {
+            "decision_support_evaluation_permitted": False,
+            "denial_reason_code": "SYNTHETIC_FIXTURE_NOT_SHIPPED",
+            "reason": (
+                "Synthetic approval-bearing fixtures are reserved for the test "
+                "harness and are not shipped evidence."
+            ),
+            "next_step": (
+                "Use the synthetic conformance harness; do not route this fixture "
+                "through the shipped demo path."
+            ),
+        }
+    else:
+        permission = _permission(
+            subject_applicability=subject_applicability,
+            subject_verdict=subject_verdict,
+            population_verdict=population_verdict,
+            intended_role=intended_role,
+        )
     result = _base_result(
         permission=permission,
         registry_inspection=registry_inspection,
