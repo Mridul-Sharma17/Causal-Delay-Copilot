@@ -663,12 +663,18 @@ function decisionSupportStateLabel(state: DecisionSupportBoundary["state"]): str
       return "Approval-dependent paths suppressed";
     case "constraints_evaluated":
       return "Constraint evaluation complete";
+    case "comparison_evaluated":
+      return "Comparison complete — recommendation state explicit";
+    case "tradeoff_requires_choice":
+      return "Two-candidate trade-off — manager choice required";
+    case "recommendation_available":
+      return "Recommendation available — manager review required";
     case "unavailable":
       return "Decision Support unavailable";
   }
 }
 
-function DecisionSupportActionsStage({
+export function DecisionSupportActionsStage({
   boundary,
   registryInspection,
 }: {
@@ -750,6 +756,36 @@ function DecisionSupportActionsStage({
     },
   ];
 
+  const actionRecommendation = boundary.action_recommendation;
+  const recommendationSelectionBasis =
+    actionRecommendation !== null && typeof actionRecommendation.selection_basis === "string"
+      ? actionRecommendation.selection_basis
+      : null;
+  const recommendationAuthorization =
+    actionRecommendation !== null &&
+    typeof actionRecommendation.authorization === "object" &&
+    actionRecommendation.authorization !== null
+      ? (actionRecommendation.authorization as Record<string, unknown>)
+      : null;
+  const recommendationRunnerUp =
+    actionRecommendation !== null &&
+    typeof actionRecommendation.runner_up === "object" &&
+    actionRecommendation.runner_up !== null
+      ? (actionRecommendation.runner_up as Record<string, unknown>)
+      : null;
+  const tradeoff = boundary.tradeoff;
+  const tradeoffPivot =
+    tradeoff !== null && typeof tradeoff.pivot === "string" ? tradeoff.pivot : null;
+  const tradeoffCandidates =
+    tradeoff !== null && Array.isArray(tradeoff.candidates)
+      ? tradeoff.candidates.filter(
+          (candidate): candidate is Record<string, unknown> =>
+            typeof candidate === "object" && candidate !== null,
+        )
+      : [];
+  const isMonitoringFallback =
+    recommendationSelectionBasis === "MONITORING_FALLBACK_NO_POSITIVE_ACTIVE_OPTION";
+
   return (
     <section className="actions-stage" aria-labelledby="actions-stage-heading">
       <div className="record-heading">
@@ -781,7 +817,15 @@ function DecisionSupportActionsStage({
         </div>
         <div>
           <dt>Recommendation</dt>
-          <dd>None — approval is not fabricated.</dd>
+          <dd>
+            {actionRecommendation !== null
+              ? isMonitoringFallback
+                ? "Accept and Monitor fallback — manager review required"
+                : `Available — ${formatValue(actionRecommendation.selected_option_code)}`
+              : tradeoff !== null
+                ? "Two candidates — manager choice required; no recommendation published"
+                : "None — no recommendation is published."}
+          </dd>
         </div>
         <div>
           <dt>Governed data release binding</dt>
@@ -790,6 +834,53 @@ function DecisionSupportActionsStage({
           </dd>
         </div>
       </dl>
+
+      {actionRecommendation !== null && (
+        <div className="action-publication" role="status">
+          <strong>{isMonitoringFallback ? "Accept and Monitor fallback" : "Recommendation available"}</strong>
+          <span>
+            Selected option: <code>{formatValue(actionRecommendation.selected_option_code)}</code>
+          </span>
+          <span>
+            Selection basis: <code>{formatValue(recommendationSelectionBasis)}</code>
+          </span>
+          <span>
+            Manager authorization: <code>{formatValue(recommendationAuthorization?.state ?? "NOT_RECORDED")}</code>
+          </span>
+          {recommendationRunnerUp !== null && (
+            <span>
+              Runner-up: <code>{formatValue(recommendationRunnerUp.option_code)}</code> — {formatValue(recommendationRunnerUp.ordering_reason)}
+            </span>
+          )}
+          <span>This publication does not authorize or execute an action.</span>
+        </div>
+      )}
+
+      {tradeoff !== null && (
+        <div className="action-tradeoff" role="status">
+          <strong>Two-candidate trade-off</strong>
+          {tradeoffPivot === "INCOMPARABLE_EVIDENCE_GAP" && (
+            <span>Incomparable evidence gap</span>
+          )}
+          <span>
+            Pivot: <code>{formatValue(tradeoffPivot)}</code>
+          </span>
+          <p>No candidate is recommended; manager choice is required.</p>
+          <span>This publication does not imply approval or authorization.</span>
+          {tradeoffCandidates.length > 0 && (
+            <ol>
+              {tradeoffCandidates.map((candidate) => (
+                <li key={String(candidate.candidate_label ?? candidate.option_code)}>
+                  <code>{formatValue(candidate.option_code)}</code>
+                  <span>
+                    Basis: {formatValue(candidate.candidate_basis ?? candidate.basis)}
+                  </span>
+                </li>
+              ))}
+            </ol>
+          )}
+        </div>
+      )}
 
       <div className="action-evidence">
         <strong>Evidence tags</strong>

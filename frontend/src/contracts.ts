@@ -80,12 +80,20 @@ export type DecisionSupportRegistryInspection = Record<string, unknown> & {
 
 export type DecisionSupportBoundary = Record<string, unknown> & {
   schema_version: "decision-support-boundary.v1";
-  outcome: "FAILED" | "NOT_PERMITTED" | "NO_ELIGIBLE_OPTION";
+  outcome:
+    | "FAILED"
+    | "NOT_PERMITTED"
+    | "NO_ELIGIBLE_OPTION"
+    | "TRADEOFF_REQUIRES_MANAGER_CHOICE"
+    | "RECOMMENDATION_AVAILABLE";
   state:
     | "not_permitted"
     | "inactive_driver"
     | "approval_dependent_suppressed"
     | "constraints_evaluated"
+    | "comparison_evaluated"
+    | "tradeoff_requires_choice"
+    | "recommendation_available"
     | "unavailable";
   primary_reason_code: string | null;
   reason: string | null;
@@ -102,7 +110,7 @@ export type DecisionSupportBoundary = Record<string, unknown> & {
   evidence_tags: DecisionSupportEvidenceTags;
   suppression_reasons: DecisionSupportSuppressionReason[];
   action_effect_evidence: string;
-  action_recommendation: null;
+  action_recommendation: Record<string, unknown> | null;
   tradeoff: Record<string, unknown> | null;
   monitoring: Record<string, unknown>;
   drafting: Record<string, unknown>;
@@ -1205,11 +1213,16 @@ function parseDecisionSupportBoundary(value: unknown): DecisionSupportBoundary {
     value.schema_version !== "decision-support-boundary.v1" ||
     (value.outcome !== "FAILED" &&
       value.outcome !== "NOT_PERMITTED" &&
-      value.outcome !== "NO_ELIGIBLE_OPTION") ||
+      value.outcome !== "NO_ELIGIBLE_OPTION" &&
+      value.outcome !== "TRADEOFF_REQUIRES_MANAGER_CHOICE" &&
+      value.outcome !== "RECOMMENDATION_AVAILABLE") ||
     (value.state !== "not_permitted" &&
       value.state !== "inactive_driver" &&
       value.state !== "approval_dependent_suppressed" &&
       value.state !== "constraints_evaluated" &&
+      value.state !== "comparison_evaluated" &&
+      value.state !== "tradeoff_requires_choice" &&
+      value.state !== "recommendation_available" &&
       value.state !== "unavailable") ||
     (value.primary_reason_code !== null && typeof value.primary_reason_code !== "string") ||
     (value.reason !== null && typeof value.reason !== "string") ||
@@ -1225,7 +1238,7 @@ function parseDecisionSupportBoundary(value: unknown): DecisionSupportBoundary {
       typeof value.decision_support_evaluation_id !== "string") ||
     !Array.isArray(value.options) ||
     typeof value.action_effect_evidence !== "string" ||
-    value.action_recommendation !== null ||
+    (value.action_recommendation !== null && !isRecord(value.action_recommendation)) ||
     (value.tradeoff !== null && !isRecord(value.tradeoff)) ||
     !isRecord(value.monitoring) ||
     !isRecord(value.drafting) ||
@@ -1286,7 +1299,8 @@ function parseDecisionSupportBoundary(value: unknown): DecisionSupportBoundary {
     evidence_tags: parseDecisionSupportTags(value.evidence_tags),
     suppression_reasons: parseDecisionSupportReasons(value.suppression_reasons),
     action_effect_evidence: value.action_effect_evidence,
-    action_recommendation: null,
+    action_recommendation:
+      value.action_recommendation === null ? null : value.action_recommendation,
     tradeoff: value.tradeoff === null ? null : value.tradeoff,
     monitoring: value.monitoring,
     drafting: value.drafting,

@@ -502,6 +502,51 @@ def test_value_input_edit_creates_a_distinct_immutable_evaluation_identity() -> 
     ]
 
 
+def test_one_robust_option_publishes_a_provenance_bound_recommendation() -> None:
+    records, fixture, _ = _projection_fixture()
+
+    result = evaluate_synthetic_decision_support_fixture(
+        fixture_case=fixture,
+        governed_records=records,
+    )
+
+    assert result["outcome"] == "RECOMMENDATION_AVAILABLE"
+    assert result["tradeoff"] is None
+    recommendation = result["action_recommendation"]
+    assert recommendation["selection_basis"] == "SOLE_ELIGIBLE_OPTION"
+    assert recommendation["selected_option_code"] == "PROTECTED_PRODUCTION_SLOT"
+    assert recommendation["runner_up"] is None
+    assert recommendation["content_hash"].startswith("sha256:")
+    recommendation_content = dict(recommendation)
+    recommendation_content.pop("content_hash")
+    assert sha256(recommendation_content) == recommendation["content_hash"]
+
+    protected = next(
+        option
+        for option in result["options"]
+        if option["option_code"] == "PROTECTED_PRODUCTION_SLOT"
+    )
+    assert protected["comparison_dimensions"]["SCHEDULE_PROTECTION"] == {
+        "applicability": "APPLICABLE",
+        "basis": "PROJECT_DELAY_DAYS",
+        "direction": "HIGHER_IS_MORE_FAVORABLE",
+        "duration_basis": "CALENDAR_DAY",
+        "source": "VALUE_PROJECTION",
+        "unit": "project_delay_days",
+        "value": {"numerator": "4", "denominator": "1"},
+    }
+    assert protected["comparison_dimensions"]["DIRECT_ACTION_COST"] == {
+        "applicability": "APPLICABLE",
+        "currency": "INR",
+        "direction": "LOWER_IS_MORE_FAVORABLE",
+        "source": "VALUE_PROJECTION",
+        "unit": "INR",
+        "value": {"numerator": "150000", "denominator": "1"},
+    }
+    assert "approval" not in recommendation
+    assert "authorization" not in recommendation
+
+
 def test_canonical_cost_inputs_object_is_consumed_without_reordering_records() -> None:
     records, fixture, _ = _projection_fixture()
     inputs = fixture["operational_inputs"]["decision_support_value_inputs"]

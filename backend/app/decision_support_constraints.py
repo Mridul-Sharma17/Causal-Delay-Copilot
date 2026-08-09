@@ -12,6 +12,10 @@ from .decision_support_value import (
     prepare_value_inputs,
     project_option_value,
 )
+from .decision_support_comparison import (
+    compare_and_publish,
+    comparison_dimensions_for_option,
+)
 from .fixture_boundaries import is_synthetic_fixture_identity
 
 
@@ -3091,6 +3095,15 @@ def _option_result(
     tag_updates = projection_fields.pop("evidence_tags", {})
     base.update(projection_fields)
     base["evidence_tags"].update(tag_updates)
+    base["comparison_dimensions"] = comparison_dimensions_for_option(base)
+    base["comparison_state"] = (
+        "INCOMPARABLE_EVIDENCE"
+        if any(
+            dimension.get("applicability") == "INCOMPARABLE"
+            for dimension in base["comparison_dimensions"].values()
+        )
+        else "COMPARABLE"
+    )
     if option_code == "ACCEPT_AND_MONITOR":
         base["evidence_tags"]["ASSUMPTION_BASED_BENEFIT"] = "NO_BENEFIT_CLAIM"
     elif value_context.present:
@@ -3459,6 +3472,39 @@ def evaluate_active_synthetic_conformance(
     }
     from .decision_support import _stable_id
 
+    evaluation_id = _stable_id("dse", evaluation_identity)
+    evaluation_series_id = _stable_id(
+        "dses",
+        {
+            "fixture_id": fixture_case.get("fixture_id"),
+            "subject_identity": subject_identity,
+        },
+    )
+    input_digest = _sha256(
+        {
+            "registry_inspection": registry_inspection,
+            "case_constraint_snapshot": snapshot,
+            "decision_support_value_inputs": canonical_value_input_payload,
+            "options": options,
+        }
+    )
+    comparison_result = compare_and_publish(
+        options=options,
+        evaluation_occurrence_id=evaluation_id,
+        evaluation_series_id=evaluation_series_id,
+        input_digest=input_digest,
+        provenance={
+            "case_constraint_snapshot": _synthetic_record_ref(snapshot),
+            "intervention_library": _synthetic_record_ref(library),
+            "driver_action_links": [
+                _synthetic_record_ref(link)
+                for link in links.values()
+                if link is not None
+            ],
+            "decision_support_value_inputs": canonical_value_input_payload,
+        },
+    )
+
     result.update(
         {
             "outcome": "NO_ELIGIBLE_OPTION",
@@ -3472,23 +3518,10 @@ def evaluate_active_synthetic_conformance(
                 "stages are outside this evaluation."
             ),
             "next_step": "Inspect each option's typed rule outcomes, suppression reasons, and provenance.",
-            "decision_support_evaluation_id": _stable_id("dse", evaluation_identity),
-            "decision_support_evaluation_series_id": _stable_id(
-                "dses",
-                {
-                    "fixture_id": fixture_case.get("fixture_id"),
-                    "subject_identity": subject_identity,
-                },
-            ),
+            "decision_support_evaluation_id": evaluation_id,
+            "decision_support_evaluation_series_id": evaluation_series_id,
             "decision_support_driver_state_digest": _sha256(dict(driver_state)),
-            "decision_support_input_digest": _sha256(
-                {
-                    "registry_inspection": registry_inspection,
-                    "case_constraint_snapshot": snapshot,
-                    "decision_support_value_inputs": canonical_value_input_payload,
-                    "options": options,
-                }
-            ),
+            "decision_support_input_digest": input_digest,
             "decision_support_value_inputs": canonical_value_input_payload,
             "options": options,
             "evidence_tags": {
@@ -3521,6 +3554,7 @@ def evaluate_active_synthetic_conformance(
             ],
         }
     )
+    result.update(comparison_result)
     return result
 
 

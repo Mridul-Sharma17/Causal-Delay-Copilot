@@ -1,8 +1,11 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
-import App, { DecisionSupportProjectionDetails } from "./App";
-import type { DecisionSupportOption } from "./contracts";
+import App, {
+  DecisionSupportActionsStage,
+  DecisionSupportProjectionDetails,
+} from "./App";
+import type { DecisionSupportBoundary, DecisionSupportOption } from "./contracts";
 
 const healthResponse = {
   service: "causal-delay-copilot",
@@ -794,6 +797,63 @@ describe("Decision Support projection disclosure", () => {
     expect(screen.getByText(/EXPOSURE_TRANSLATION_ASSUMPTION/)).toBeInTheDocument();
     expect(screen.getByText("INTERVENTION_EFFECT_NOT_ESTIMATED")).toBeInTheDocument();
     expect(screen.getByText("EXAMPLE_UNAVAILABLE")).toBeInTheDocument();
+  });
+});
+
+describe("Decision Support publication states", () => {
+  afterEach(cleanup);
+
+  test("distinguishes a recommendation from an unresolved manager trade-off", () => {
+    const baseBoundary = decisionBriefSnapshotResponse.decision_support as unknown as DecisionSupportBoundary;
+    const recommendationBoundary = {
+      ...baseBoundary,
+      outcome: "RECOMMENDATION_AVAILABLE",
+      state: "recommendation_available",
+      action_recommendation: {
+        selected_option_code: "PROTECTED_PRODUCTION_SLOT",
+        selection_basis: "SOLE_ELIGIBLE_OPTION",
+        runner_up: null,
+      },
+      tradeoff: null,
+    } as DecisionSupportBoundary;
+
+    render(
+      <DecisionSupportActionsStage
+        boundary={recommendationBoundary}
+        registryInspection={null}
+      />,
+    );
+
+    expect(screen.getByText("Recommendation available")).toBeInTheDocument();
+    expect(screen.getByText("NOT_RECORDED")).toBeInTheDocument();
+    expect(screen.getByText("PROTECTED_PRODUCTION_SLOT")).toBeInTheDocument();
+
+    cleanup();
+
+    const tradeoffBoundary = {
+      ...baseBoundary,
+      outcome: "TRADEOFF_REQUIRES_MANAGER_CHOICE",
+      state: "tradeoff_requires_choice",
+      action_recommendation: null,
+      tradeoff: {
+        pivot: "DIRECT_ACTION_COST",
+        candidates: [
+          { option_code: "PROTECTED_PRODUCTION_SLOT", ordering_evidence: "A" },
+          { option_code: "EXPEDITED_SUPPLIER_ESCALATION", ordering_evidence: "B" },
+        ],
+      },
+    } as DecisionSupportBoundary;
+
+    render(
+      <DecisionSupportActionsStage
+        boundary={tradeoffBoundary}
+        registryInspection={null}
+      />,
+    );
+
+    expect(screen.getByText("Two-candidate trade-off")).toBeInTheDocument();
+    expect(screen.getByText(/No candidate is recommended/)).toBeInTheDocument();
+    expect(screen.getByText("DIRECT_ACTION_COST")).toBeInTheDocument();
   });
 });
 
