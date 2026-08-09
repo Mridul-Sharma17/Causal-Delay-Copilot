@@ -653,8 +653,144 @@ def test_primary_atte_and_context_ate_share_clustered_nuisance_and_are_determini
         "high_load_exposure"
     ]["ml_m"][0][1]
     assert first["shared_nuisance"]["doubleml_refit_nuisance"] is False
-    assert first["safe_detail"]["scope"] == "primary_atte_and_context_ate"
+    assert first["safe_detail"]["scope"] == "primary_atte_context_and_sensitivities"
     assert "line-supported-0000" not in str(first["safe_detail"])
+
+
+def _released_supported_variants_request() -> dict[str, object]:
+    request = _released_supported_primary_request()
+    primary_variant = request["variant_inputs"][0]
+    assert isinstance(primary_variant, dict)
+    primary_rows = primary_variant["rows"]
+    assert isinstance(primary_rows, list)
+    for variant in request["variant_inputs"][1:]:
+        assert isinstance(variant, dict)
+        variant.update(
+            {
+                "upstream_status": "released",
+                "rows": deepcopy(primary_rows),
+                "cohort_stage_summaries": deepcopy(
+                    primary_variant["cohort_stage_summaries"]
+                ),
+            }
+        )
+        variant.pop("scientific_code", None)
+        variant.pop("gate_stage", None)
+        variant["selector_refs"] = sorted(variant["selector_refs"])
+        variant["s8_identity_hash"] = scientific_sha256(
+            [row["order_line_id"] for row in primary_rows]
+        )
+        variant["s8_content_hash"] = scientific_sha256(
+            {
+                key: value
+                for key, value in variant.items()
+                if key not in {"s8_identity_hash", "s8_content_hash"}
+            }
+        )
+    return request
+
+
+def test_registered_sensitivities_use_variant_specific_cohorts_seeds_and_provenance() -> None:
+    request = _released_supported_variants_request()
+    propensity_stage = materialize_propensity_and_s9(request)
+
+    for variant_id in ("primary", "stricter_threshold", "short_history", "long_history"):
+        assert propensity_stage["variants"][variant_id]["s9"]["state"] == "supported"
+
+    result = estimate_primary_atte_and_context(request, propensity_stage)
+
+    assert result["status"] == "estimated"
+    assert result["primary_atte"]["estimand_id"] == "primary_atte_slippage"
+    assert result["context_ate"]["estimand_id"] == "context_ate_slippage"
+    sensitivities = result["sensitivity_results"]
+    estimands = {
+        "stricter_threshold": "sensitivity_stricter_atte_slippage",
+        "short_history": "sensitivity_short_history_atte_slippage",
+        "long_history": "sensitivity_long_history_atte_slippage",
+    }
+    assert list(sensitivities) == list(estimands.values())
+    for variant_id, estimand_id in estimands.items():
+        sensitivity = sensitivities[estimand_id]
+        source_variant = next(
+            variant
+            for variant in request["variant_inputs"]
+            if variant["variant_id"] == variant_id
+        )
+        stage_variant = propensity_stage["variants"][variant_id]
+        assert sensitivity["status"] == "estimated"
+        assert sensitivity["state"] == "estimated"
+        assert sensitivity["estimand_id"] == estimand_id
+        assert sensitivity["role"] == "sensitivity"
+        assert sensitivity["score"] == "ATTE"
+        assert sensitivity["estimator_class"] == "DoubleMLIRM"
+        assert sensitivity["cohort_identity_hash"] == stage_variant["s9"]["identity_hash"]
+        provenance = sensitivity["provenance"]
+        assert provenance["variant_id"] == variant_id
+        assert provenance["threshold_rule_ref"] == source_variant["threshold_rule_ref"]
+        assert provenance["selector_refs"] == source_variant["selector_refs"]
+        assert provenance["s8_identity_hash"] == source_variant["s8_identity_hash"]
+        assert provenance["s8_content_hash"] == source_variant["s8_content_hash"]
+        assert provenance["root_seed"] == request["root_seed"]
+        assert provenance["seed_policy"] == {
+            "id": "sha256-coordinate-seeds",
+            "version": "v1",
+        }
+        assert len(provenance["seed_registry"]) == 82
+        assert all(item["variant_id"] == variant_id for item in provenance["seed_registry"])
+    assert (
+        propensity_stage["variants"]["primary"]["fold_assignments"]
+        != propensity_stage["variants"]["stricter_threshold"]["fold_assignments"]
+    )
+
+
+def test_unavailable_sensitivities_remain_explicit_without_replacing_primary() -> None:
+    request = _released_supported_primary_request()
+    result = estimate_primary_atte_and_context(request)
+
+    assert result["status"] == "estimated"
+    assert result["primary_atte"]["estimand_id"] == "primary_atte_slippage"
+    for variant_id in ("stricter_threshold", "short_history", "long_history"):
+        sensitivity = result["sensitivity_results"][
+            {
+                "stricter_threshold": "sensitivity_stricter_atte_slippage",
+                "short_history": "sensitivity_short_history_atte_slippage",
+                "long_history": "sensitivity_long_history_atte_slippage",
+            }[variant_id]
+        ]
+        assert sensitivity["status"] == "unsupported"
+        assert sensitivity["state"] == "unsupported"
+        assert sensitivity["reason_code"] == "COHORT_SUPPORT_INSUFFICIENT"
+        assert sensitivity["effect"] is None
+
+
+def test_failed_sensitivity_is_explicit_without_replacing_primary() -> None:
+    request = _released_supported_variants_request()
+    propensity_stage = materialize_propensity_and_s9(request)
+    tampered_stage = deepcopy(propensity_stage)
+    short_history = tampered_stage["variants"]["short_history"]
+    short_history["propensity_predictions"][0]["row_id"] = "unknown-row"
+
+    result = estimate_primary_atte_and_context(request, tampered_stage)
+
+    assert result["status"] == "failed"
+    assert result["scientific_outcome"] == "failed"
+    assert result["reason_code"] == "ENGINE_NUISANCE_PREDICTION_INVALID"
+    assert result["estimator_executed"] is True
+    assert "primary_atte" not in result
+    assert "context_ate" not in result
+    failed = result["sensitivity_results"]["sensitivity_short_history_atte_slippage"]
+    assert failed["status"] == "failed"
+    assert failed["state"] == "failed"
+    assert failed["reason_code"] == "ENGINE_NUISANCE_PREDICTION_INVALID"
+    assert failed["effect"] is None
+    assert failed["component_failures"] == [
+        {
+            "component": "sensitivity_atte",
+            "variant_id": "short_history",
+            "code": "ENGINE_NUISANCE_PREDICTION_INVALID",
+        }
+    ]
+    assert result["safe_detail"]["execution_state"] == "failed"
 
 
 def test_primary_estimator_abstains_without_consumable_effect_when_primary_s9_is_unsupported() -> None:

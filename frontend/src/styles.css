@@ -104,6 +104,30 @@ h2 {
   border-top: 4px solid #0f62fe;
 }
 
+.operation-detail {
+  margin-top: 24px;
+  padding: 24px;
+  background: #ffffff;
+  border-top: 4px solid #525252;
+}
+
+.sensitivity-detail {
+  border-top-color: #8a3ffc;
+}
+
+.operation-detail .status-list {
+  display: grid;
+  gap: 16px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.operation-detail .status-list > li {
+  padding: 16px;
+  background: #f4f4f4;
+}
+
 .panel-heading {
   display: flex;
   align-items: flex-start;

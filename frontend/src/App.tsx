@@ -672,6 +672,29 @@ function FreshRunDetailPanel({
     effect === null
       ? "Unavailable"
       : `${String(effect.ci_lower ?? "Unavailable")} to ${String(effect.ci_upper ?? "Unavailable")}`;
+  const sensitivityEntries =
+    primaryResult !== null &&
+    primaryResult !== undefined &&
+    typeof primaryResult.sensitivity_results === "object" &&
+    primaryResult.sensitivity_results !== null &&
+    !Array.isArray(primaryResult.sensitivity_results)
+      ? Object.entries(primaryResult.sensitivity_results).filter(
+          (entry): entry is [string, Record<string, unknown>] =>
+            typeof entry[1] === "object" && entry[1] !== null && !Array.isArray(entry[1]),
+        )
+      : [];
+  const sensitivityLabel = (variantId: string): string => {
+    switch (variantId) {
+      case "stricter_threshold":
+        return "Stricter threshold";
+      case "short_history":
+        return "Short history";
+      case "long_history":
+        return "Long history";
+      default:
+        return variantId;
+    }
+  };
   return (
     <>
       {detail !== null && detail !== undefined && (
@@ -735,6 +758,86 @@ function FreshRunDetailPanel({
               <dd>Provisional only · verdict and action unavailable</dd>
             </div>
           </dl>
+        </section>
+      )}
+      {sensitivityEntries.length > 0 && (
+        <section
+          className="operation-detail sensitivity-detail"
+          aria-label="Subordinate sensitivity evidence"
+        >
+          <p className="eyebrow">Subordinate sensitivity evidence</p>
+          <p className="supporting-copy">
+            These pre-registered variants are subordinate evidence. They preserve exact cohort
+            provenance and do not upgrade the primary estimand, Evidence Verdict, or action
+            permission.
+          </p>
+          <ul className="status-list">
+            {sensitivityEntries.map(([estimandId, sensitivity]) => {
+              const variantId =
+                typeof sensitivity.variant_id === "string"
+                  ? sensitivity.variant_id
+                  : estimandId;
+              const provenance =
+                typeof sensitivity.provenance === "object" &&
+                sensitivity.provenance !== null &&
+                !Array.isArray(sensitivity.provenance)
+                  ? (sensitivity.provenance as Record<string, unknown>)
+                  : {};
+              const status = String(
+                sensitivity.status ?? sensitivity.state ?? "unavailable",
+              );
+              const effect =
+                typeof sensitivity.effect === "object" &&
+                sensitivity.effect !== null &&
+                !Array.isArray(sensitivity.effect)
+                  ? (sensitivity.effect as Record<string, unknown>)
+                  : sensitivity;
+              const hasEstimate = typeof effect.estimate === "number";
+              return (
+                <li key={estimandId}>
+                  <strong>{sensitivityLabel(variantId)}</strong> · <code>{status}</code>
+                  <dl className="risk-facts">
+                    <div>
+                      <dt>Result</dt>
+                      <dd>
+                        {hasEstimate
+                          ? `${String(effect.estimate ?? "Unavailable")} days · 95% interval ${effectInterval(effect)}`
+                          : String(sensitivity.reason_code ?? "No estimate published")}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Threshold rule</dt>
+                      <dd><code>{formatValue(provenance.threshold_rule_ref)}</code></dd>
+                    </div>
+                    <div>
+                      <dt>History/window selectors</dt>
+                      <dd><code>{formatValue(provenance.selector_refs)}</code></dd>
+                    </div>
+                    <div>
+                      <dt>S8/S9 identity</dt>
+                      <dd>
+                        <code>
+                          {formatValue(provenance.s8_identity_hash)} · {formatValue(provenance.s9_identity_hash)}
+                        </code>
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Seed provenance</dt>
+                      <dd>
+                        <code>
+                          root {formatValue(provenance.root_seed)} · {formatValue(provenance.seed_registry_digest)}
+                        </code>
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Evidence references</dt>
+                      <dd><code>{formatValue(provenance.evidence_refs)}</code></dd>
+                    </div>
+                  </dl>
+                </li>
+              );
+            })}
+          </ul>
         </section>
       )}
     </>

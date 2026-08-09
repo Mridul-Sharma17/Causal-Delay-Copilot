@@ -837,6 +837,41 @@ describe("Core health journey", () => {
                     ci_upper: 2.1,
                     duration_basis: "CALENDAR_DAY",
                   },
+                  sensitivity_results: {
+                    sensitivity_stricter_atte_slippage: {
+                      variant_id: "stricter_threshold",
+                      status: "estimated",
+                      state: "estimated",
+                      estimand_id: "sensitivity_stricter_atte_slippage",
+                      score: "ATTE",
+                      estimate: 1.4,
+                      ci_lower: 0.2,
+                      ci_upper: 2.7,
+                      duration_basis: "CALENDAR_DAY",
+                      provenance: {
+                        threshold_rule_ref: "nearest-rank-percentile-0.75.v1",
+                        selector_refs: ["history-lookback.v1", "estimator-window.v1"],
+                        s8_identity_hash: "sha256:strict-s8",
+                        s9_identity_hash: "sha256:strict-s9",
+                        seed_registry_digest: "sha256:strict-seeds",
+                        root_seed: 0,
+                        evidence_refs: ["lineage:strict-variant"],
+                      },
+                    },
+                    sensitivity_short_history_atte_slippage: {
+                      variant_id: "short_history",
+                      status: "unsupported",
+                      state: "unsupported",
+                      reason_code: "COHORT_SUPPORT_INSUFFICIENT",
+                      effect: null,
+                      provenance: {
+                        threshold_rule_ref: "nearest-rank-percentile-0.67.v1",
+                        selector_refs: ["history-lookback-5.v1"],
+                        seed_registry_digest: "sha256:short-seeds",
+                        root_seed: 0,
+                      },
+                    },
+                  },
                   permission: {
                     evidence_verdict: false,
                     action_permission: false,
@@ -916,6 +951,11 @@ describe("Core health journey", () => {
     expect(await screen.findByText("Provisional fresh-run result")).toBeInTheDocument();
     expect(screen.getByText("Primary ATTE")).toBeInTheDocument();
     expect(screen.getByText("Provisional only · verdict and action unavailable")).toBeInTheDocument();
+    expect(await screen.findByText("Subordinate sensitivity evidence")).toBeInTheDocument();
+    expect(screen.getByText("Stricter threshold")).toBeInTheDocument();
+    expect(screen.getByText("nearest-rank-percentile-0.75.v1")).toBeInTheDocument();
+    expect(screen.getByText(/sha256:strict-seeds/)).toBeInTheDocument();
+    expect(screen.getByText("COHORT_SUPPORT_INSUFFICIENT")).toBeInTheDocument();
     expect(screen.getByText("PROACTIVE · PREVIEW-ONLY")).toBeInTheDocument();
     expect(
       screen.getByText(/No canonical Order Line, commitment event, actual milestone/),

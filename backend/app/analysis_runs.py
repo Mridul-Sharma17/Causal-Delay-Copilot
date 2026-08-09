@@ -33,6 +33,12 @@ SEED_POLICY_VERSION = "v1"
 ARTIFACT_CONTRACT_VERSION = "analysis-run-artifacts.v1"
 PROPENSITY_RESULT_SCHEMA_VERSION = "analysis-run-propensity-result.v1"
 VARIANT_ORDER = ("primary", "stricter_threshold", "short_history", "long_history")
+SENSITIVITY_VARIANTS = ("stricter_threshold", "short_history", "long_history")
+SENSITIVITY_ESTIMAND_IDS = {
+    "stricter_threshold": "sensitivity_stricter_atte_slippage",
+    "short_history": "sensitivity_short_history_atte_slippage",
+    "long_history": "sensitivity_long_history_atte_slippage",
+}
 ALLOWED_ROLES = frozenset(
     {"semi_synthetic_hero", "out_of_domain_validation", "rejection_vignette"}
 )
@@ -1970,28 +1976,29 @@ def _outcome_regressor(seed: int) -> Any:
     return HistGradientBoostingRegressor(**parameters)
 
 
-def _primary_rows_and_layout(
+def _variant_rows_and_layout(
     request: Mapping[str, Any],
     propensity_stage: Mapping[str, Any],
+    variant_id: str,
 ) -> tuple[list[Mapping[str, Any]], Any, list[str]]:
     variants = propensity_stage.get("variants")
     if not isinstance(variants, Mapping):
         raise EstimatorStageError("ENGINE_REPRODUCIBILITY_VIOLATION")
-    primary_stage = variants.get("primary")
-    if not isinstance(primary_stage, Mapping):
+    variant_stage = variants.get(variant_id)
+    if not isinstance(variant_stage, Mapping):
         raise EstimatorStageError("ENGINE_REPRODUCIBILITY_VIOLATION")
     source_variant = next(
         (
             variant
             for variant in request.get("variant_inputs", [])
-            if isinstance(variant, Mapping) and variant.get("variant_id") == "primary"
+            if isinstance(variant, Mapping) and variant.get("variant_id") == variant_id
         ),
         None,
     )
     if not isinstance(source_variant, Mapping):
         raise EstimatorStageError("ENGINE_INPUT_SCHEMA_UNSUPPORTED")
     source_rows = source_variant.get("rows")
-    s9 = primary_stage.get("s9")
+    s9 = variant_stage.get("s9")
     if not isinstance(source_rows, list) or not isinstance(s9, Mapping):
         raise EstimatorStageError("ENGINE_REPRODUCIBILITY_VIOLATION")
     retained_ids = s9.get("retained_ids")
@@ -2026,7 +2033,7 @@ def _primary_rows_and_layout(
         matrix = layout.transform(rows)
     except PropensityStageError as error:
         raise EstimatorStageError(error.code) from None
-    feature_schema = primary_stage.get("feature_schema")
+    feature_schema = variant_stage.get("feature_schema")
     feature_digest = scientific_sha256(list(layout.feature_names))
     if not isinstance(feature_schema, Mapping) or feature_schema.get(
         "feature_schema_digest"
@@ -2045,18 +2052,18 @@ def _primary_rows_and_layout(
     return rows, layout, retained_ids
 
 
-def _primary_s9_splits(
-    primary_stage: Mapping[str, Any],
+def _variant_s9_splits(
+    variant_stage: Mapping[str, Any],
     rows: Sequence[Mapping[str, Any]],
     retained_ids: Sequence[str],
 ) -> tuple[list[list[tuple[Any, Any]]], list[list[tuple[list[Any], list[Any]]]], list[dict[str, Any]]]:
     import numpy as np
 
-    assignments = primary_stage.get("fold_assignments")
+    assignments = variant_stage.get("fold_assignments")
     if not isinstance(assignments, list):
         raise EstimatorStageError("ENGINE_SPLIT_INTEGRITY_VIOLATION")
     row_index = {row_id: index for index, row_id in enumerate(retained_ids)}
-    s9_record = primary_stage.get("s9")
+    s9_record = variant_stage.get("s9")
     trimmed_ids = s9_record.get("trimmed_ids") if isinstance(s9_record, Mapping) else None
     if not isinstance(trimmed_ids, list) or not all(
         isinstance(row_id, str) for row_id in trimmed_ids
@@ -2157,12 +2164,13 @@ def _primary_s9_splits(
     return all_smpls, all_smpls_cluster, retained_fold_records
 
 
-def _fit_primary_outcome_nuisances(
+def _fit_variant_outcome_nuisances(
     request: Mapping[str, Any],
+    variant_id: str,
     rows: Sequence[Mapping[str, Any]],
     layout: Any,
     retained_ids: Sequence[str],
-    primary_stage: Mapping[str, Any],
+    variant_stage: Mapping[str, Any],
 ) -> dict[str, Any]:
     import numpy as np
     from threadpoolctl import threadpool_limits
@@ -2185,18 +2193,18 @@ def _fit_primary_outcome_nuisances(
     if len(set(exposure.tolist())) != 2:
         raise EstimatorStageError("ENGINE_SPLIT_INFEASIBLE")
     try:
-        all_smpls, all_smpls_cluster, fold_records = _primary_s9_splits(
-            primary_stage,
+        all_smpls, all_smpls_cluster, fold_records = _variant_s9_splits(
+            variant_stage,
             rows,
             retained_ids,
         )
     except EstimatorStageError:
         raise
 
-    propensity_predictions = primary_stage.get("propensity_predictions")
+    propensity_predictions = variant_stage.get("propensity_predictions")
     if not isinstance(propensity_predictions, list):
         raise EstimatorStageError("ENGINE_NUISANCE_PREDICTION_INVALID")
-    trimmed_ids = primary_stage.get("s9", {}).get("trimmed_ids")
+    trimmed_ids = variant_stage.get("s9", {}).get("trimmed_ids")
     if not isinstance(trimmed_ids, list) or not all(
         isinstance(row_id, str) for row_id in trimmed_ids
     ):
@@ -2286,7 +2294,7 @@ def _fit_primary_outcome_nuisances(
                     unexposed_model = _outcome_regressor(
                         _stage_seed(
                             request,
-                            variant_id="primary",
+                            variant_id=variant_id,
                             repeat_index=repeat_index,
                             outer_fold_index=fold_index,
                             component="outcome_learner_unexposed",
@@ -2295,7 +2303,7 @@ def _fit_primary_outcome_nuisances(
                     exposed_model = _outcome_regressor(
                         _stage_seed(
                             request,
-                            variant_id="primary",
+                            variant_id=variant_id,
                             repeat_index=repeat_index,
                             outer_fold_index=fold_index,
                             component="outcome_learner_exposed",
@@ -2320,7 +2328,7 @@ def _fit_primary_outcome_nuisances(
         "outcome": outcome,
         "exposure": exposure,
         "groups": groups,
-        "cohort_identity_hash": primary_stage["s9"].get("identity_hash"),
+        "cohort_identity_hash": variant_stage["s9"].get("identity_hash"),
         "retained_ids": list(retained_ids),
         "feature_names": list(layout.feature_names),
         "feature_schema_digest": scientific_sha256(list(layout.feature_names)),
@@ -2333,8 +2341,9 @@ def _fit_primary_outcome_nuisances(
     }
 
 
-def _fit_primary_irm(
+def _fit_variant_irm(
     request: Mapping[str, Any],
+    variant_id: str,
     nuisances: Mapping[str, Any],
     *,
     score: str,
@@ -2363,7 +2372,7 @@ def _fit_primary_irm(
             _outcome_regressor(
                 _stage_seed(
                     request,
-                    variant_id="primary",
+                    variant_id=variant_id,
                     repeat_index=0,
                     outer_fold_index=0,
                     component="outcome_learner_unexposed",
@@ -2372,7 +2381,7 @@ def _fit_primary_irm(
             _propensity_classifier(
                 _stage_seed(
                     request,
-                    variant_id="primary",
+                    variant_id=variant_id,
                     repeat_index=0,
                     outer_fold_index=0,
                     component="propensity_learner",
@@ -2442,6 +2451,7 @@ def _effect_result(
     model: Any,
     nuisances: Mapping[str, Any],
     *,
+    variant_id: str = "primary",
     estimand_id: str,
     role: str,
     score: str,
@@ -2532,7 +2542,7 @@ def _effect_result(
         "repeat_results": repeat_results,
         "cohort_identity_hash": nuisances["cohort_identity_hash"],
         "nuisance_refs": [g0_ref, g1_ref, propensity_ref],
-        "fold_ref": f"folds:primary-s9:{scientific_sha256(nuisances['fold_records'])}",
+        "fold_ref": f"folds:{variant_id}-s9:{scientific_sha256(nuisances['fold_records'])}",
         "inference": {
             "method": "DoubleML.native",
             "covariance": "supplier_clustered",
@@ -2543,6 +2553,111 @@ def _effect_result(
     if not isinstance(result["cohort_identity_hash"], str):
         raise EstimatorStageError("ENGINE_RESULT_INVALID")
     return result
+
+
+def _variant_seed_registry(
+    request: Mapping[str, Any],
+    variant_id: str,
+) -> list[dict[str, Any]]:
+    return [
+        {
+            key: deepcopy(entry[key])
+            for key in (
+                "variant_id",
+                "component",
+                "repeat_index",
+                "outer_fold_index",
+                "inner_fold_index",
+                "seed",
+            )
+        }
+        for entry in derived_seed_registry(request)
+        if entry.get("variant_id") == variant_id
+    ]
+
+
+def _variant_provenance(
+    request: Mapping[str, Any],
+    source_variant: Mapping[str, Any],
+    materialized_variant: Mapping[str, Any],
+    *,
+    fold_ref: str | None = None,
+) -> dict[str, Any]:
+    s9 = materialized_variant.get("s9")
+    s9_mapping = s9 if isinstance(s9, Mapping) else {}
+    seed_registry = _variant_seed_registry(
+        request,
+        str(source_variant.get("variant_id")),
+    )
+    feature_schema = materialized_variant.get("feature_schema")
+    return {
+        "variant_id": source_variant.get("variant_id"),
+        "threshold_rule_ref": deepcopy(source_variant.get("threshold_rule_ref")),
+        "selector_refs": deepcopy(source_variant.get("selector_refs", [])),
+        "cohort_stage_summaries": deepcopy(
+            source_variant.get("cohort_stage_summaries", {})
+        ),
+        "upstream_status": source_variant.get("upstream_status"),
+        "scientific_code": source_variant.get("scientific_code"),
+        "gate_stage": source_variant.get("gate_stage"),
+        "s8_identity_hash": source_variant.get("s8_identity_hash"),
+        "s8_content_hash": source_variant.get("s8_content_hash"),
+        "s9_identity_hash": s9_mapping.get("identity_hash"),
+        "evidence_refs": deepcopy(source_variant.get("evidence_refs", [])),
+        "root_seed": request["root_seed"],
+        "seed_policy": {"id": SEED_POLICY_ID, "version": SEED_POLICY_VERSION},
+        "seed_registry": seed_registry,
+        "seed_registry_digest": scientific_sha256(seed_registry),
+        "feature_schema_digest": (
+            feature_schema.get("feature_schema_digest")
+            if isinstance(feature_schema, Mapping)
+            else None
+        ),
+        "fold_ref": fold_ref,
+    }
+
+
+def _sensitivity_state_result(
+    request: Mapping[str, Any],
+    source_variant: Mapping[str, Any],
+    materialized_variant: Mapping[str, Any],
+    *,
+    state: str,
+    reason_code: str | None,
+    component_failures: Sequence[Mapping[str, Any]] = (),
+    last_completed_stage: str,
+    effect: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    variant_id = str(source_variant["variant_id"])
+    provenance = _variant_provenance(
+        request,
+        source_variant,
+        materialized_variant,
+        fold_ref=effect.get("fold_ref") if isinstance(effect, Mapping) else None,
+    )
+    if state == "estimated" and isinstance(effect, Mapping):
+        result = deepcopy(dict(effect))
+        result.update(
+            {
+                "variant_id": variant_id,
+                "status": "estimated",
+                "state": "estimated",
+                "provenance": provenance,
+            }
+        )
+        return result
+    return {
+        "variant_id": variant_id,
+        "status": state,
+        "state": state,
+        "reason_code": reason_code,
+        "estimand_id": SENSITIVITY_ESTIMAND_IDS[variant_id],
+        "role": "sensitivity",
+        "effect": None,
+        "component_failures": deepcopy(list(component_failures)),
+        "last_completed_stage": last_completed_stage,
+        "provenance": provenance,
+    }
 
 
 def _estimator_safe_detail(
@@ -2565,7 +2680,7 @@ def _estimator_safe_detail(
             "last_completed_stage": last_completed_stage,
             "component_failures": deepcopy(list(failures)),
             "estimator_executed": estimator_executed,
-            "scope": "primary_atte_and_context_ate",
+            "scope": "primary_atte_context_and_sensitivities",
         }
     )
     return safe_detail
@@ -2595,7 +2710,7 @@ def _primary_engine_common(
         "root_seed": request["root_seed"],
         "evidence_refs": deepcopy(request["evidence_refs"]),
         "variants": deepcopy(propensity_stage.get("variants", {})),
-        "scope": "primary_atte_and_context_ate",
+        "scope": "primary_atte_context_and_sensitivities",
     }
 
 
@@ -2622,6 +2737,50 @@ def _public_primary_result(engine_result: Mapping[str, Any]) -> dict[str, Any] |
         "row_count",
         "inference",
     )
+    public_sensitivities: dict[str, dict[str, Any]] = {}
+    raw_sensitivities = engine_result.get("sensitivity_results")
+    if isinstance(raw_sensitivities, Mapping):
+        for variant_id in SENSITIVITY_VARIANTS:
+            estimand_id = SENSITIVITY_ESTIMAND_IDS[variant_id]
+            raw = raw_sensitivities.get(estimand_id)
+            if not isinstance(raw, Mapping):
+                continue
+            visible = {
+                key: deepcopy(raw[key])
+                for key in (
+                    "variant_id",
+                    "status",
+                    "state",
+                    "reason_code",
+                    "estimand_id",
+                    "role",
+                    "label",
+                    "score",
+                    "estimate",
+                    "standard_error",
+                    "ci_level",
+                    "ci_lower",
+                    "ci_upper",
+                    "unit",
+                    "duration_basis",
+                    "display_transform",
+                    "cluster_key",
+                    "cluster_count",
+                    "exposed_count",
+                    "unexposed_count",
+                    "row_count",
+                    "cohort_identity_hash",
+                    "nuisance_refs",
+                    "fold_ref",
+                    "inference",
+                    "component_failures",
+                    "last_completed_stage",
+                    "effect",
+                    "provenance",
+                )
+                if key in raw
+            }
+            public_sensitivities[estimand_id] = visible
     return {
         "schema_version": "fresh-primary-result.v1",
         "state": "provisional",
@@ -2635,6 +2794,7 @@ def _public_primary_result(engine_result: Mapping[str, Any]) -> dict[str, Any] |
             for key in safe_effect_fields
             if key in engine_result["context_ate"]
         },
+        "sensitivity_results": public_sensitivities,
         "permission": {
             "evidence_verdict": False,
             "action_permission": False,
@@ -2647,12 +2807,13 @@ def estimate_primary_atte_and_context(
     value: Mapping[str, Any] | ValidatedSuiteRequest,
     propensity_stage: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Estimate the primary ATTE and overlap-trimmed contextual ATE.
+    """Estimate the primary suite and its registered binary sensitivities.
 
-    The public seam consumes one already materialized primary S9. It fits the
-    two outcome nuisances once, reuses those predictions and the authoritative
-    mean propensity in both external-prediction DoubleML fits, and never emits
-    verdict or action permission.
+    The primary ATTE remains authoritative when the suite completes. Each
+    sensitivity uses its own materialized variant, folds, seeds, nuisances,
+    and clustered DoubleML fit; scientific unavailability remains a typed
+    subordinate state, while a required runtime failure fails closed without
+    publishing a partial primary estimate.
     """
 
     validated = (
@@ -2672,13 +2833,28 @@ def estimate_primary_atte_and_context(
     stage_failures = stage.get("component_failures")
     if not isinstance(stage_failures, list):
         stage_failures = []
-    primary_stage = (
-        stage.get("variants", {}).get("primary")
-        if isinstance(stage.get("variants"), Mapping)
-        else None
+    stage_variants = stage.get("variants")
+    if not isinstance(stage_variants, Mapping):
+        raise EstimatorStageError("ENGINE_REPRODUCIBILITY_VIOLATION")
+    source_variants = {
+        str(variant["variant_id"]): variant
+        for variant in request["variant_inputs"]
+        if isinstance(variant, Mapping) and isinstance(variant.get("variant_id"), str)
+    }
+    primary_stage = stage_variants.get("primary")
+    if not isinstance(primary_stage, Mapping):
+        raise EstimatorStageError("ENGINE_REPRODUCIBILITY_VIOLATION")
+    primary_source = source_variants.get("primary")
+    if not isinstance(primary_source, Mapping):
+        raise EstimatorStageError("ENGINE_INPUT_SCHEMA_UNSUPPORTED")
+    primary_s9 = primary_stage.get("s9")
+    primary_is_supported = (
+        primary_stage.get("state") == "materialized"
+        and isinstance(primary_s9, Mapping)
+        and primary_s9.get("state") == "supported"
     )
-    if stage.get("status") == "failed":
-        code = stage.get("reason_code") or "ENGINE_INTERNAL_ERROR"
+    if primary_stage.get("state") == "failed":
+        code = primary_stage.get("reason_code") or "ENGINE_INTERNAL_ERROR"
         result.update(
             {
                 "status": "failed",
@@ -2696,12 +2872,7 @@ def estimate_primary_atte_and_context(
         )
         result["result_identity_digest"] = scientific_sha256(result)
         return result
-    if not isinstance(primary_stage, Mapping):
-        raise EstimatorStageError("ENGINE_REPRODUCIBILITY_VIOLATION")
-    primary_s9 = primary_stage.get("s9")
-    if primary_stage.get("state") != "materialized" or not isinstance(
-        primary_s9, Mapping
-    ) or primary_s9.get("state") != "supported":
+    if not primary_is_supported:
         code = (
             primary_stage.get("reason_code")
             or stage.get("reason_code")
@@ -2727,28 +2898,31 @@ def estimate_primary_atte_and_context(
 
     estimator_executed = True
     try:
-        rows, layout, retained_ids = _primary_rows_and_layout(request, stage)
-        nuisances = _fit_primary_outcome_nuisances(
+        rows, layout, retained_ids = _variant_rows_and_layout(request, stage, "primary")
+        nuisances = _fit_variant_outcome_nuisances(
             request,
+            "primary",
             rows,
             layout,
             retained_ids,
             primary_stage,
         )
-        primary_model = _fit_primary_irm(request, nuisances, score="ATTE")
+        primary_model = _fit_variant_irm(request, "primary", nuisances, score="ATTE")
         primary_effect = _effect_result(
             request,
             primary_model,
             nuisances,
+            variant_id="primary",
             estimand_id="primary_atte_slippage",
             role="primary",
             score="ATTE",
         )
-        context_model = _fit_primary_irm(request, nuisances, score="ATE")
+        context_model = _fit_variant_irm(request, "primary", nuisances, score="ATE")
         context_effect = _effect_result(
             request,
             context_model,
             nuisances,
+            variant_id="primary",
             estimand_id="context_ate_slippage",
             role="context",
             score="ATE",
@@ -2808,6 +2982,172 @@ def estimate_primary_atte_and_context(
             "ml_m": nuisances["ml_m"].tolist(),
         }
     )
+    sensitivity_results: dict[str, dict[str, Any]] = {}
+    sensitivity_failures: list[dict[str, Any]] = []
+    for variant_id in SENSITIVITY_VARIANTS:
+        source_variant = source_variants.get(variant_id)
+        materialized_variant = stage_variants.get(variant_id)
+        if not isinstance(source_variant, Mapping) or not isinstance(
+            materialized_variant, Mapping
+        ):
+            raise EstimatorStageError("ENGINE_REPRODUCIBILITY_VIOLATION")
+        if source_variant.get("upstream_status") == "scientifically_unavailable":
+            sensitivity_results[SENSITIVITY_ESTIMAND_IDS[variant_id]] = _sensitivity_state_result(
+                request,
+                source_variant,
+                materialized_variant,
+                state="unsupported",
+                reason_code=source_variant.get("scientific_code"),
+                last_completed_stage=str(
+                    source_variant.get("gate_stage") or "S8_OUTCOME"
+                ),
+            )
+            continue
+        if materialized_variant.get("state") == "failed":
+            failures = materialized_variant.get("component_failures")
+            if not isinstance(failures, list) or not failures:
+                failures = [
+                    {
+                        "component": "propensity_ensemble",
+                        "variant_id": variant_id,
+                        "code": materialized_variant.get(
+                            "reason_code", "ENGINE_INTERNAL_ERROR"
+                        ),
+                    }
+                ]
+            failure_code = materialized_variant.get("reason_code") or "ENGINE_INTERNAL_ERROR"
+            sensitivity_results[SENSITIVITY_ESTIMAND_IDS[variant_id]] = _sensitivity_state_result(
+                request,
+                source_variant,
+                materialized_variant,
+                state="failed",
+                reason_code=failure_code,
+                component_failures=failures,
+                last_completed_stage=str(
+                    stage.get("safe_detail", {}).get(
+                        "last_completed_stage", "S8_OUTCOME"
+                    )
+                    if isinstance(stage.get("safe_detail"), Mapping)
+                    else "S8_OUTCOME"
+                ),
+            )
+            sensitivity_failures.extend(deepcopy(failures))
+            continue
+        sensitivity_s9 = materialized_variant.get("s9")
+        if materialized_variant.get("state") != "materialized" or not isinstance(
+            sensitivity_s9, Mapping
+        ) or sensitivity_s9.get("state") != "supported":
+            sensitivity_results[SENSITIVITY_ESTIMAND_IDS[variant_id]] = _sensitivity_state_result(
+                request,
+                source_variant,
+                materialized_variant,
+                state="unsupported",
+                reason_code=(
+                    materialized_variant.get("reason_code")
+                    or "OVERLAP_COHORT_INSUFFICIENT"
+                ),
+                last_completed_stage="S9_OVERLAP",
+            )
+            continue
+        try:
+            sensitivity_rows, sensitivity_layout, sensitivity_ids = (
+                _variant_rows_and_layout(request, stage, variant_id)
+            )
+            sensitivity_nuisances = _fit_variant_outcome_nuisances(
+                request,
+                variant_id,
+                sensitivity_rows,
+                sensitivity_layout,
+                sensitivity_ids,
+                materialized_variant,
+            )
+            sensitivity_model = _fit_variant_irm(
+                request,
+                variant_id,
+                sensitivity_nuisances,
+                score="ATTE",
+            )
+            sensitivity_effect = _effect_result(
+                request,
+                sensitivity_model,
+                sensitivity_nuisances,
+                variant_id=variant_id,
+                estimand_id=SENSITIVITY_ESTIMAND_IDS[variant_id],
+                role="sensitivity",
+                score="ATTE",
+            )
+        except EstimatorStageError as error:
+            failure = {
+                "component": "sensitivity_atte",
+                "variant_id": variant_id,
+                "code": error.code,
+            }
+            sensitivity_results[SENSITIVITY_ESTIMAND_IDS[variant_id]] = _sensitivity_state_result(
+                request,
+                source_variant,
+                materialized_variant,
+                state="failed",
+                reason_code=error.code,
+                component_failures=[failure],
+                last_completed_stage="S9_OVERLAP",
+            )
+            sensitivity_failures.append(failure)
+            continue
+        except Exception:
+            failure = {
+                "component": "sensitivity_atte",
+                "variant_id": variant_id,
+                "code": "ENGINE_INTERNAL_ERROR",
+            }
+            sensitivity_results[SENSITIVITY_ESTIMAND_IDS[variant_id]] = _sensitivity_state_result(
+                request,
+                source_variant,
+                materialized_variant,
+                state="failed",
+                reason_code="ENGINE_INTERNAL_ERROR",
+                component_failures=[failure],
+                last_completed_stage="S9_OVERLAP",
+            )
+            sensitivity_failures.append(failure)
+            continue
+        sensitivity_results[SENSITIVITY_ESTIMAND_IDS[variant_id]] = _sensitivity_state_result(
+            request,
+            source_variant,
+            materialized_variant,
+            state="estimated",
+            reason_code=None,
+            last_completed_stage="SENSITIVITY_ESTIMATION",
+            effect=sensitivity_effect,
+        )
+
+    if sensitivity_failures:
+        failed_sensitivities = {
+            estimand_id: sensitivity_results[estimand_id]
+            for variant_id in SENSITIVITY_VARIANTS
+            for estimand_id in (SENSITIVITY_ESTIMAND_IDS[variant_id],)
+            if estimand_id in sensitivity_results
+            and sensitivity_results[estimand_id].get("state") == "failed"
+        }
+        result.update(
+            {
+                "status": "failed",
+                "scientific_outcome": "failed",
+                "reason_code": sensitivity_failures[0]["code"],
+                "estimator_executed": estimator_executed,
+                "sensitivity_results": failed_sensitivities,
+                "sensitivity_failures": sensitivity_failures,
+                "safe_detail": _estimator_safe_detail(
+                    stage,
+                    execution_state="failed",
+                    last_completed_stage="S9_OVERLAP",
+                    estimator_executed=estimator_executed,
+                    failures=sensitivity_failures,
+                ),
+            }
+        )
+        result["result_identity_digest"] = scientific_sha256(result)
+        return result
+
     result.update(
         {
             "status": "estimated",
@@ -2816,6 +3156,8 @@ def estimate_primary_atte_and_context(
             "estimator_executed": True,
             "primary_atte": primary_effect,
             "context_ate": context_effect,
+            "sensitivity_results": sensitivity_results,
+            "sensitivity_failures": sensitivity_failures,
             "shared_nuisance": {
                 "schema_version": "doubleml-shared-nuisance.v1",
                 "feature_schema_digest": nuisances["feature_schema_digest"],
@@ -2847,7 +3189,7 @@ def estimate_primary_atte_and_context(
                 execution_state="complete",
                 last_completed_stage="PRIMARY_ESTIMATION",
                 estimator_executed=True,
-                failures=[],
+                failures=sensitivity_failures,
             ),
         }
     )
@@ -3015,7 +3357,7 @@ def analysis_run_status(
             execution_result.get("estimator_executed") is True
         )
         estimator_descriptor["estimator_stage"] = (
-            "PRIMARY_ATTE_AND_CONTEXT_ATE"
+            "PRIMARY_ATTE_CONTEXT_AND_SENSITIVITIES"
             if execution_result.get("estimator_executed") is True
             else estimator_descriptor.get("estimator_stage")
         )
