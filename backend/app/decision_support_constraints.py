@@ -245,6 +245,38 @@ _EXPECTED_ATTESTATIONS = (
     "PHASE_TOTAL_AND_SEQUENCE_VALID",
     "COMPONENT_OBLIGATIONS_NON_CONFLICTING",
 )
+_ADVISORY_DIMENSIONS = (
+    "CONTRACTUAL_RELATIONSHIP_RISK",
+    "OPERATIONAL_DISRUPTION",
+    "REVERSIBILITY",
+)
+_ADVISORY_OUTPUTS = {
+    "CONTRACTUAL_RELATIONSHIP_RISK": ("LOW", "MEDIUM", "HIGH"),
+    "OPERATIONAL_DISRUPTION": ("LOW", "MEDIUM", "HIGH"),
+    "REVERSIBILITY": (
+        "EASILY_REVERSIBLE",
+        "PARTIALLY_REVERSIBLE",
+        "DIFFICULT_TO_REVERSE",
+    ),
+}
+_ADVISORY_DIRECTIONS = {
+    "CONTRACTUAL_RELATIONSHIP_RISK": "LOWER_IS_MORE_FAVORABLE",
+    "OPERATIONAL_DISRUPTION": "LOWER_IS_MORE_FAVORABLE",
+    "REVERSIBILITY": "MORE_REVERSIBLE_IS_MORE_FAVORABLE",
+}
+_ADVISORY_REASON_PRIORITIES = {
+    "RUBRIC_UNAVAILABLE": 100,
+    "RUBRIC_NOT_APPROVED": 110,
+    "RUBRIC_NOT_APPLICABLE": 120,
+    "RUBRIC_INPUT_MISSING": 200,
+    "RUBRIC_INPUT_INVALID": 210,
+    "RUBRIC_INPUT_CONFLICT": 220,
+    "RUBRIC_RULE_NO_MATCH": 300,
+    "RUBRIC_RULE_AMBIGUOUS": 310,
+    "RUBRIC_COMPONENT_RESULT_UNKNOWN": 320,
+}
+_ADVISORY_VALUE_TYPES = {"BOOLEAN", "INTEGER", "DECIMAL", "STRING"}
+_ADVISORY_OPERATORS = {"EQ", "GTE", "LTE"}
 
 
 def _error(code: str, reason: str) -> dict[str, str]:
@@ -535,6 +567,54 @@ def _validate_library(
                     f"The closed option definition for {option_code} is not exact.",
                 ),
             )
+        expected_advisory_declarations = (
+            [
+                {
+                    "dimension": dimension,
+                    "trigger_mode": trigger_mode,
+                    "rubric_reference": (
+                        f"{_FIXTURE_NAMESPACE}advisory-rubrics:"
+                        f"{option_code.lower()}:{trigger_mode.lower()}:"
+                        f"{dimension.lower()}:v1"
+                    ),
+                }
+                for trigger_mode in contract["allowed_trigger_modes"]
+                for dimension in _ADVISORY_DIMENSIONS
+            ]
+            if contract["shape"] == "ATOMIC"
+            else []
+        )
+        expected_advisory_derivation = (
+            None
+            if contract["shape"] == "ATOMIC"
+            else {"kind": "LEAST_FAVORABLE_COMPONENT_RESULTS.v1"}
+        )
+        declarations = option.get("advisory_rubric_declarations")
+        declarations_match = (
+            declarations == []
+            if contract["shape"] != "ATOMIC"
+            else isinstance(declarations, list)
+            and len(declarations) == len(expected_advisory_declarations)
+            and all(
+                isinstance(actual, Mapping)
+                and actual.get("dimension") == expected["dimension"]
+                and actual.get("trigger_mode") == expected["trigger_mode"]
+                and actual.get("rubric_reference")
+                in {expected["rubric_reference"], "UNAVAILABLE_PENDING_REVIEW"}
+                for actual, expected in zip(
+                    declarations, expected_advisory_declarations
+                )
+            )
+        )
+        if not declarations_match or option.get("advisory_derivation") != expected_advisory_derivation:
+            return (
+                None,
+                None,
+                _error(
+                    "DECISION_SUPPORT_REFERENCE_INTEGRITY_MISMATCH",
+                    f"The advisory declarations for {option_code} are not exact.",
+                ),
+            )
         expected_refs = [
             {
                 "rule_code": rule_code,
@@ -679,6 +759,305 @@ def _validate_supporting_registry_records(
                 "A synthetic Advisory Rubric uses an unsupported closed identity.",
             )
     return None
+
+
+def _valid_evidence_refs(value: object) -> bool:
+    return bool(
+        isinstance(value, list)
+        and value
+        and all(
+            isinstance(reference, Mapping)
+            and isinstance(reference.get("reference"), str)
+            and bool(reference.get("reference"))
+            and isinstance(reference.get("content_hash"), str)
+            and bool(reference.get("content_hash"))
+            for reference in value
+        )
+    )
+
+
+def _validate_advisory_rubric_records(
+    collections: Mapping[str, list[dict[str, Any]]],
+    option_index: Mapping[str, dict[str, Any]],
+) -> tuple[dict[str, dict[str, Any]], dict[str, str] | None]:
+    rubrics_by_reference: dict[str, dict[str, Any]] = {}
+    rubric_keys: set[tuple[str, str, str, str]] = set()
+    for rubric in collections["advisory_rubrics"]:
+        record_id = rubric.get("record_id")
+        option_code = rubric.get("option_code")
+        trigger_mode = rubric.get("trigger_mode")
+        dimension = rubric.get("dimension")
+        key = (str(option_code), str(rubric.get("option_version")), str(trigger_mode), str(dimension))
+        expected_reference = (
+            f"{_FIXTURE_NAMESPACE}advisory-rubrics:"
+            f"{str(option_code).lower()}:{str(trigger_mode).lower()}:"
+            f"{str(dimension).lower()}:v1"
+        )
+        if (
+            not isinstance(record_id, str)
+            or rubric.get("rubric_id") != record_id
+            or record_id != expected_reference
+            or rubric.get("rubric_version") != "1"
+            or rubric.get("schema_identifier") != "advisory-rubric"
+            or rubric.get("schema_version") != "1"
+            or rubric.get("registry_identifier") != "decision-support-advisory-rubrics"
+            or rubric.get("registry_version", "1") != "1"
+            or not _allowed_string(option_code, set(option_index))
+            or rubric.get("option_version") != "1"
+            or not isinstance(trigger_mode, str)
+            or trigger_mode not in _OPTION_CONTRACT[str(option_code)]["allowed_trigger_modes"]
+            or not _allowed_string(dimension, _ADVISORY_DIMENSIONS)
+            or key in rubric_keys
+        ):
+            return {}, _error(
+                "DECISION_SUPPORT_REFERENCE_INTEGRITY_MISMATCH",
+                "A synthetic Advisory Rubric uses a duplicate or unsupported identity.",
+            )
+        applicability = rubric.get("applicability")
+        if applicability != {
+            "option_code": option_code,
+            "option_version": "1",
+            "trigger_mode": trigger_mode,
+        }:
+            return {}, _error(
+                "DECISION_SUPPORT_REFERENCE_INTEGRITY_MISMATCH",
+                "A synthetic Advisory Rubric applicability declaration is not exact.",
+            )
+        if not _allowed_string(rubric.get("lifecycle_status"), {"ACTIVE", "RETIRED"}):
+            return {}, _error(
+                "DECISION_SUPPORT_INPUT_SCHEMA_INVALID",
+                "A synthetic Advisory Rubric uses an unsupported lifecycle status.",
+            )
+        if not _allowed_string(rubric.get("state"), _SUPPORTED_LINK_STATES) or not _allowed_string(
+            rubric.get("review_status"), _SUPPORTED_LINK_STATES
+        ):
+            return {}, _error(
+                "DECISION_SUPPORT_INPUT_SCHEMA_INVALID",
+                "A synthetic Advisory Rubric uses an unsupported approval status.",
+            )
+        for field in ("published_at", "review_available_at"):
+            if _parse_time(rubric.get(field)) is None:
+                return {}, _error(
+                    "DECISION_SUPPORT_INPUT_SCHEMA_INVALID",
+                    f"A synthetic Advisory Rubric has an invalid {field}.",
+                )
+        for field in ("review_date", "reviewed_at"):
+            if _parse_time(rubric.get(field)) is None:
+                return {}, _error(
+                    "DECISION_SUPPORT_INPUT_SCHEMA_INVALID",
+                    f"A synthetic Advisory Rubric has an invalid {field}.",
+                )
+        published_at = _parse_time(rubric.get("published_at"))
+        review_date = _parse_time(rubric.get("review_date"))
+        review_available_at = _parse_time(rubric.get("review_available_at"))
+        if (
+            published_at is not None
+            and review_date is not None
+            and review_date > published_at
+        ) or (
+            published_at is not None
+            and review_available_at is not None
+            and review_available_at > published_at
+        ):
+            return {}, _error(
+                "DECISION_SUPPORT_REFERENCE_INTEGRITY_MISMATCH",
+                "A synthetic Advisory Rubric review is published before its review evidence is available.",
+            )
+        if not isinstance(rubric.get("review_reference"), str) or not rubric.get(
+            "review_reference"
+        ) or not isinstance(rubric.get("review_reason_code"), str) or not rubric.get(
+            "review_reason_code"
+        ):
+            return {}, _error(
+                "DECISION_SUPPORT_INPUT_SCHEMA_INVALID",
+                "A synthetic Advisory Rubric has incomplete review provenance.",
+            )
+        if (
+            rubric.get("approval_scope") != "SYNTHETIC_CONFORMANCE_ONLY"
+            or rubric.get("contract_status") != "SYNTHETIC_CONFORMANCE_ONLY"
+            or rubric.get("reviewer_role") != "SYNTHETIC_CONFORMANCE_REVIEW"
+        ):
+            return {}, _error(
+                "DECISION_SUPPORT_REFERENCE_INTEGRITY_MISMATCH",
+                "A synthetic Advisory Rubric has an ungoverned approval scope.",
+            )
+        provenance = rubric.get("provenance")
+        if (
+            not isinstance(provenance, Mapping)
+            or provenance.get("source_kind") != "synthetic_conformance"
+            or provenance.get("source_namespace") != "synthetic://core-decision-support/v1"
+            or provenance.get("production_authority") != "PROHIBITED"
+            or provenance.get("external_evaluation_eligibility") != "PROHIBITED"
+        ):
+            return {}, _error(
+                "DECISION_SUPPORT_REFERENCE_INTEGRITY_MISMATCH",
+                "A synthetic Advisory Rubric has incomplete provenance binding.",
+            )
+        if not _valid_evidence_refs(rubric.get("source_refs")):
+            return {}, _error(
+                "DECISION_SUPPORT_INPUT_SCHEMA_INVALID",
+                "A synthetic Advisory Rubric has no ordered evidence references.",
+            )
+        result_contract = rubric.get("result_contract")
+        if (
+            not isinstance(result_contract, Mapping)
+            or result_contract.get("unknown_code") != "UNKNOWN"
+            or result_contract.get("allowed_values")
+            != list(_ADVISORY_OUTPUTS[str(dimension)])
+            or result_contract.get("direction")
+            != (
+                "lower_is_more_favorable"
+                if dimension != "REVERSIBILITY"
+                else "more_reversible_is_more_favorable"
+            )
+        ):
+            return {}, _error(
+                "DECISION_SUPPORT_REFERENCE_INTEGRITY_MISMATCH",
+                "A synthetic Advisory Rubric result contract is not exact.",
+            )
+        declarations = rubric.get("typed_input_declarations")
+        if not isinstance(declarations, list) or not declarations:
+            return {}, _error(
+                "DECISION_SUPPORT_INPUT_SCHEMA_INVALID",
+                "A synthetic Advisory Rubric has no typed input declarations.",
+            )
+        declared_fact_codes: list[str] = []
+        declarations_by_fact: dict[str, Mapping[str, Any]] = {}
+        for declaration in declarations:
+            if not isinstance(declaration, Mapping):
+                return {}, _error(
+                    "DECISION_SUPPORT_INPUT_SCHEMA_INVALID",
+                    "A synthetic Advisory Rubric contains a malformed input declaration.",
+                )
+            fact_code = declaration.get("fact_code")
+            if (
+                not _allowed_string(fact_code, _KNOWN_FACT_CODES)
+                or fact_code in declared_fact_codes
+                or not _allowed_string(declaration.get("value_type"), _ADVISORY_VALUE_TYPES)
+                or not isinstance(declaration.get("unit"), str)
+                or not isinstance(declaration.get("required"), bool)
+            ):
+                return {}, _error(
+                    "DECISION_SUPPORT_INPUT_SCHEMA_INVALID",
+                    "A synthetic Advisory Rubric typed input declaration is invalid.",
+                )
+            declared_fact_codes.append(str(fact_code))
+            declarations_by_fact[str(fact_code)] = declaration
+        rules = rubric.get("rules")
+        precedence = rubric.get("rule_precedence")
+        if (
+            not isinstance(rules, list)
+            or not rules
+            or not isinstance(precedence, Mapping)
+            or precedence.get("order") != "ascending_priority"
+            or precedence.get("complete_for_declared_input") is not True
+        ):
+            return {}, _error(
+                "DECISION_SUPPORT_INPUT_SCHEMA_INVALID",
+                "A synthetic Advisory Rubric rule registry is incomplete.",
+            )
+        priorities: set[int] = set()
+        ordered_priorities: list[int] = []
+        predicate_fact_codes: set[str] = set()
+        for rule in rules:
+            predicate = rule.get("predicate") if isinstance(rule, Mapping) else None
+            priority = rule.get("priority") if isinstance(rule, Mapping) else None
+            output = rule.get("output") if isinstance(rule, Mapping) else None
+            predicate_fact_code = (
+                predicate.get("fact_code") if isinstance(predicate, Mapping) else None
+            )
+            predicate_declaration = declarations_by_fact.get(str(predicate_fact_code))
+            predicate_operator = (
+                predicate.get("operator") if isinstance(predicate, Mapping) else None
+            )
+            predicate_value = (
+                predicate.get("value") if isinstance(predicate, Mapping) else None
+            )
+            predicate_value_valid = (
+                isinstance(predicate_declaration, Mapping)
+                and "value" in predicate
+                and (
+                    (
+                        predicate_operator == "EQ"
+                        and _advisory_value_is_valid(
+                            predicate_value,
+                            str(predicate_declaration["value_type"]),
+                        )
+                    )
+                    or (
+                        predicate_operator in {"GTE", "LTE"}
+                        and predicate_declaration["value_type"]
+                        in {"INTEGER", "DECIMAL"}
+                        and _decimal(predicate_value) is not None
+                    )
+                )
+            )
+            if (
+                not isinstance(rule, Mapping)
+                or not isinstance(rule.get("rule_id"), str)
+                or not isinstance(priority, int)
+                or isinstance(priority, bool)
+                or priority in priorities
+                or not isinstance(predicate, Mapping)
+                or predicate_fact_code not in declared_fact_codes
+                or not _allowed_string(predicate_operator, _ADVISORY_OPERATORS)
+                or not predicate_value_valid
+                or output not in _ADVISORY_OUTPUTS[str(dimension)]
+                or (
+                    predicate.get("output") is not None
+                    and predicate.get("output") != output
+                )
+            ):
+                return {}, _error(
+                    "DECISION_SUPPORT_INPUT_SCHEMA_INVALID",
+                    "A synthetic Advisory Rubric contains an invalid rule.",
+                )
+            priorities.add(priority)
+            ordered_priorities.append(priority)
+            predicate_fact_codes.add(str(predicate["fact_code"]))
+        if (
+            ordered_priorities != sorted(ordered_priorities)
+            or predicate_fact_codes != set(declared_fact_codes)
+        ):
+            return {}, _error(
+                "DECISION_SUPPORT_INPUT_SCHEMA_INVALID",
+                "A synthetic Advisory Rubric does not completely and deterministically cover its typed inputs.",
+            )
+        rubric_key = (str(option_code), "1", str(trigger_mode), str(dimension))
+        rubric_copy = deepcopy(rubric)
+        rubrics_by_reference[record_id] = rubric_copy
+        rubric_keys.add(rubric_key)
+
+    for option_code, option in option_index.items():
+        if option.get("shape") != "ATOMIC":
+            continue
+        declarations = option.get("advisory_rubric_declarations")
+        if not isinstance(declarations, list):
+            return {}, _error(
+                "DECISION_SUPPORT_INPUT_SCHEMA_INVALID",
+                f"The advisory declarations for {option_code} are malformed.",
+            )
+        for declaration in declarations:
+            reference = declaration.get("rubric_reference") if isinstance(declaration, Mapping) else None
+            if reference == "UNAVAILABLE_PENDING_REVIEW":
+                continue
+            if not isinstance(reference, str) or reference not in rubrics_by_reference:
+                return {}, _error(
+                    "DECISION_SUPPORT_REFERENCE_INTEGRITY_MISMATCH",
+                    f"The advisory rubric declaration for {option_code} does not resolve exactly.",
+                )
+            rubric = rubrics_by_reference[reference]
+            if (
+                rubric.get("option_code") != option_code
+                or rubric.get("option_version") != option.get("option_version")
+                or rubric.get("trigger_mode") != declaration.get("trigger_mode")
+                or rubric.get("dimension") != declaration.get("dimension")
+            ):
+                return {}, _error(
+                    "DECISION_SUPPORT_REFERENCE_INTEGRITY_MISMATCH",
+                    f"The advisory rubric declaration for {option_code} is bound to the wrong rubric.",
+                )
+    return rubrics_by_reference, None
 
 
 def _validate_snapshot(
@@ -1004,12 +1383,17 @@ def _validate_preview(preview: Mapping[str, Any] | None) -> dict[str, str] | Non
 
 def _validate_composite_records(
     collections: Mapping[str, list[dict[str, Any]]],
+    links: Mapping[tuple[str, str], dict[str, Any]],
 ) -> tuple[dict[tuple[str, str], dict[str, Any]], dict[str, str] | None]:
     reviews: dict[tuple[str, str], dict[str, Any]] = {}
     for record in collections["composite_reviews"]:
         option_code = record.get("option_code")
         trigger_mode = record.get("trigger_mode")
         key = (str(option_code), str(trigger_mode))
+        expected_record_id = (
+            f"{_FIXTURE_NAMESPACE}composite-reviews:"
+            f"protected-slot-with-phased-delivery:{str(trigger_mode).lower()}:v1"
+        )
         if option_code != "PROTECTED_SLOT_WITH_PHASED_DELIVERY" or not _allowed_string(
             trigger_mode, {"REACTIVE", "PROACTIVE"}
         ):
@@ -1023,14 +1407,154 @@ def _validate_composite_records(
                 "Multiple synthetic Composite Compatibility Review heads match one option and trigger mode.",
             )
         if (
-            record.get("composite_option_code") != option_code
+            record.get("schema_identifier") != "composite-compatibility-review"
+            or record.get("schema_version") != "1"
+            or record.get("registry_identifier")
+            != "decision-support-composite-compatibility-reviews"
+            or record.get("registry_version") != "1"
+            or not isinstance(record.get("record_id"), str)
+            or record.get("record_id") != expected_record_id
+            or record.get("review_id") != record.get("record_id")
+            or record.get("result_version") != "1"
+            or record.get("composite_option_code") != option_code
             or record.get("option_version") != "1"
             or record.get("component_codes")
             != ["PROTECTED_PRODUCTION_SLOT", "PHASED_DELIVERY"]
+            or record.get("component_option_refs")
+            != [
+                f"{_FIXTURE_NAMESPACE}options:protected_production_slot:v1",
+                f"{_FIXTURE_NAMESPACE}options:phased_delivery:v1",
+            ]
+            or record.get("composite_driver_action_link_ref")
+            != (
+                f"{_FIXTURE_NAMESPACE}driver-action-links:"
+                f"protected_slot_with_phased_delivery:{str(trigger_mode).lower()}:v1"
+            )
+            or not isinstance(links.get(key), Mapping)
+            or links[key].get("record_id")
+            != record.get("composite_driver_action_link_ref")
         ):
             return {}, _error(
                 "DECISION_SUPPORT_REFERENCE_INTEGRITY_MISMATCH",
-                "The synthetic Composite Compatibility Review component identity is not exact.",
+                "The synthetic Composite Compatibility Review identity is not exact.",
+            )
+        if (
+            record.get("criteria_schema_identifier")
+            != "composite-compatibility-criteria"
+            or record.get("criteria_schema_version") != "1"
+            or not isinstance(record.get("subject_identity"), str)
+            or not isinstance(record.get("case_constraint_snapshot_ref"), str)
+            or not record.get("case_constraint_snapshot_ref")
+            or _parse_time(record.get("constraints_as_of")) is None
+            or not isinstance(record.get("published_at"), str)
+            or _parse_time(record.get("published_at")) is None
+            or not isinstance(record.get("review_available_at"), str)
+            or _parse_time(record.get("review_available_at")) is None
+            or _parse_time(record.get("review_date")) is None
+            or _parse_time(record.get("reviewed_at")) is None
+            or record.get("reviewer_role") != "SYNTHETIC_CONFORMANCE_REVIEW"
+            or not isinstance(record.get("review_reference"), str)
+            or not record.get("review_reference")
+            or not isinstance(record.get("review_reason_code"), str)
+            or not record.get("review_reason_code")
+            or not _allowed_string(record.get("lifecycle_status"), {"ACTIVE", "RETIRED"})
+            or not _allowed_string(record.get("state"), _SUPPORTED_LINK_STATES)
+            or not _allowed_string(record.get("review_status"), _SUPPORTED_LINK_STATES)
+            or not _valid_evidence_refs(record.get("source_refs"))
+            or not isinstance(record.get("provenance"), Mapping)
+            or record["provenance"].get("source_kind") != "synthetic_conformance"
+            or record["provenance"].get("source_namespace")
+            != "synthetic://core-decision-support/v1"
+            or record["provenance"].get("production_authority") != "PROHIBITED"
+            or record["provenance"].get("external_evaluation_eligibility")
+            != "PROHIBITED"
+            or record.get("approval_scope") != "SYNTHETIC_CONFORMANCE_ONLY"
+            or record.get("contract_status") != "SYNTHETIC_CONFORMANCE_ONLY"
+        ):
+            return {}, _error(
+                "DECISION_SUPPORT_INPUT_SCHEMA_INVALID",
+                "The synthetic Composite Compatibility Review metadata is malformed.",
+            )
+        published_at = _parse_time(record.get("published_at"))
+        review_date = _parse_time(record.get("review_date"))
+        review_available_at = _parse_time(record.get("review_available_at"))
+        reviewed_at = _parse_time(record.get("reviewed_at"))
+        if (
+            published_at is not None
+            and review_date is not None
+            and review_date > published_at
+        ) or (
+            published_at is not None
+            and review_available_at is not None
+            and review_available_at > published_at
+        ) or (
+            published_at is not None
+            and reviewed_at is not None
+            and reviewed_at > published_at
+        ):
+            return {}, _error(
+                "DECISION_SUPPORT_REFERENCE_INTEGRITY_MISMATCH",
+                "A synthetic Composite Compatibility Review is published before its review evidence is available.",
+            )
+        attestations = record.get("attestations")
+        if not isinstance(attestations, list) or [
+            item.get("attestation_code")
+            if isinstance(item, Mapping)
+            else None
+            for item in attestations
+        ] != list(_EXPECTED_ATTESTATIONS):
+            return {}, _error(
+                "DECISION_SUPPORT_INPUT_SCHEMA_INVALID",
+                "The synthetic Composite Compatibility Review attestations are not the exact ordered set.",
+            )
+        for attestation in attestations:
+            if (
+                not isinstance(attestation, Mapping)
+                or not _allowed_string(
+                    attestation.get("outcome"),
+                    {"ATTESTED_COMPATIBLE", "ATTESTED_INCOMPATIBLE"},
+                )
+                or attestation.get("review_status") != "APPROVED"
+                or _parse_time(attestation.get("review_date")) is None
+                or not isinstance(attestation.get("reviewer_reference"), str)
+                or not attestation.get("reviewer_reference")
+                or attestation.get("reviewer_role")
+                != "SYNTHETIC_CONFORMANCE_REVIEW"
+                or not isinstance(attestation.get("review_reference"), str)
+                or not attestation.get("review_reference")
+                or not isinstance(attestation.get("review_reason_code"), str)
+                or not attestation.get("review_reason_code")
+                or not _valid_evidence_refs(attestation.get("evidence_refs"))
+            ):
+                return {}, _error(
+                    "DECISION_SUPPORT_INPUT_SCHEMA_INVALID",
+                    "A synthetic Composite Compatibility Review attestation is not fully evidenced and approved.",
+                )
+        expected_outcome = (
+            "INCOMPATIBLE"
+            if any(
+                attestation["outcome"] == "ATTESTED_INCOMPATIBLE"
+                for attestation in attestations
+            )
+            else "COMPATIBLE"
+        )
+        expected_status = (
+            "UNSATISFIED" if expected_outcome == "INCOMPATIBLE" else "SATISFIED"
+        )
+        if (
+            record.get("outcome") != expected_outcome
+            or record.get("compatibility_status") != expected_status
+        ):
+            return {}, _error(
+                "DECISION_SUPPORT_REFERENCE_INTEGRITY_MISMATCH",
+                "The synthetic Composite Compatibility Review outcome does not match its attestations.",
+            )
+        if record.get("supersession_ref") is not None and not isinstance(
+            record.get("supersession_ref"), str
+        ):
+            return {}, _error(
+                "DECISION_SUPPORT_INPUT_SCHEMA_INVALID",
+                "The synthetic Composite Compatibility Review supersession reference is malformed.",
             )
         reviews[key] = record
     return reviews, None
@@ -1169,6 +1693,647 @@ def _rule_facts(
     return selected
 
 
+def _advisory_reason(
+    code: str,
+    *,
+    reason: str,
+    evidence_refs: list[Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
+    return {
+        "code": code,
+        "priority": _ADVISORY_REASON_PRIORITIES[code],
+        "reason": reason,
+        "evidence_refs": _evidence_refs([], evidence_refs),
+    }
+
+
+def _ordered_reasons(reasons: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    unique: list[dict[str, Any]] = []
+    for reason in reasons:
+        if reason not in unique:
+            unique.append(reason)
+    unique.sort(key=lambda item: (int(item["priority"]), str(item["code"])))
+    return unique
+
+
+def _advisory_value_is_valid(value: object, value_type: str) -> bool:
+    if value_type == "BOOLEAN":
+        return isinstance(value, bool)
+    if value_type == "INTEGER":
+        return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+    if value_type == "DECIMAL":
+        return _decimal(value) is not None
+    if value_type == "STRING":
+        return isinstance(value, str) and bool(value)
+    return False
+
+
+def _advisory_predicate_matches(predicate: Mapping[str, Any], value: object) -> bool:
+    operator = predicate.get("operator")
+    expected = predicate.get("value")
+    if operator == "EQ":
+        return value == expected
+    if operator in {"GTE", "LTE"}:
+        try:
+            left = Decimal(str(value))
+            right = Decimal(str(expected))
+        except (InvalidOperation, ValueError):
+            return False
+        return left >= right if operator == "GTE" else left <= right
+    return False
+
+
+def _advisory_result_base(
+    *,
+    option_code: str,
+    option_version: str,
+    trigger_mode: str,
+    dimension: str,
+    subject_identity: str,
+    snapshot: Mapping[str, Any],
+    rubric: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    rubric_ref = (
+        {
+            "reference": rubric.get("rubric_id"),
+            "rubric_version": rubric.get("rubric_version"),
+            "content_hash": rubric.get("content_hash"),
+        }
+        if rubric is not None
+        else None
+    )
+    result: dict[str, Any] = {
+        "schema_identifier": "advisory-result",
+        "schema_version": "1",
+        "option_code": option_code,
+        "option_version": option_version,
+        "trigger_mode": trigger_mode,
+        "dimension": dimension,
+        "subject_identity": subject_identity,
+        "case_constraint_snapshot": _synthetic_record_ref(snapshot),
+        "constraints_as_of": snapshot.get("constraints_as_of"),
+        "rubric": rubric_ref,
+        "status": "UNKNOWN",
+        "value": "UNKNOWN",
+        "ordinal": "UNKNOWN",
+        "result": "UNKNOWN",
+        "input_values": [],
+        "typed_inputs": [],
+        "observed_facts": [],
+        "matched_rule": None,
+        "reasons": [],
+        "evidence_refs": [],
+        "provenance": {
+            "advisory_rubric": rubric_ref,
+            "case_constraint_snapshot": _synthetic_record_ref(snapshot),
+        },
+    }
+    return result
+
+
+def _evaluate_advisory_rubric(
+    *,
+    option_code: str,
+    option_version: str,
+    trigger_mode: str,
+    dimension: str,
+    declaration: Mapping[str, Any],
+    rubric: Mapping[str, Any] | None,
+    facts: list[Mapping[str, Any]],
+    snapshot: Mapping[str, Any],
+    constraints_as_of: datetime,
+    subject_identity: str,
+) -> dict[str, Any]:
+    result = _advisory_result_base(
+        option_code=option_code,
+        option_version=option_version,
+        trigger_mode=trigger_mode,
+        dimension=dimension,
+        subject_identity=subject_identity,
+        snapshot=snapshot,
+        rubric=rubric,
+    )
+    rubric_evidence = (
+        rubric.get("source_refs") if isinstance(rubric, Mapping) else []
+    )
+    result["evidence_refs"] = _evidence_refs([], rubric_evidence)
+    result["provenance"]["rubric_source_refs"] = deepcopy(list(rubric_evidence))
+    if declaration.get("rubric_reference") == "UNAVAILABLE_PENDING_REVIEW":
+        result["reasons"] = [
+            _advisory_reason(
+                "RUBRIC_UNAVAILABLE",
+                reason="The exact Advisory Rubric is unavailable pending review.",
+                evidence_refs=rubric_evidence,
+            )
+        ]
+        return result
+    if rubric is None:
+        result["reasons"] = [
+            _advisory_reason(
+                "RUBRIC_UNAVAILABLE",
+                reason="The exact Advisory Rubric is unavailable.",
+            )
+        ]
+        return result
+    if (
+        rubric.get("option_code") != option_code
+        or rubric.get("option_version") != option_version
+        or rubric.get("trigger_mode") != trigger_mode
+        or rubric.get("dimension") != dimension
+    ):
+        result["reasons"] = [
+            _advisory_reason(
+                "RUBRIC_NOT_APPLICABLE",
+                reason="The approved Advisory Rubric does not apply to this exact option and trigger mode.",
+                evidence_refs=rubric_evidence,
+            )
+        ]
+        return result
+    published_at = _parse_time(rubric.get("published_at"))
+    review_available_at = _parse_time(rubric.get("review_available_at"))
+    if (
+        rubric.get("lifecycle_status") != "ACTIVE"
+        or rubric.get("state") != "APPROVED"
+        or rubric.get("review_status") != "APPROVED"
+        or published_at is None
+        or review_available_at is None
+        or published_at > constraints_as_of
+        or review_available_at > constraints_as_of
+        or rubric.get("supersession_ref") is not None
+    ):
+        result["reasons"] = [
+            _advisory_reason(
+                "RUBRIC_NOT_APPROVED",
+                reason="The exact Advisory Rubric is not approved and available at the Case Constraint Snapshot cutoff.",
+                evidence_refs=rubric_evidence,
+            )
+        ]
+        return result
+
+    input_values: list[dict[str, Any]] = []
+    typed_inputs: list[dict[str, Any]] = []
+    observed_facts: list[Mapping[str, Any]] = []
+    reasons: list[dict[str, Any]] = []
+    resolved_by_fact: dict[str, object] = {}
+    declarations = rubric.get("typed_input_declarations", [])
+    for declaration_item in declarations:
+        fact_code = str(declaration_item["fact_code"])
+        candidates = _fact_candidates(facts, fact_code, option_code)
+        if not candidates:
+            if declaration_item.get("required") is True:
+                reasons.append(
+                    _advisory_reason(
+                        "RUBRIC_INPUT_MISSING",
+                        reason=f"Required Advisory Rubric input {fact_code} has no eligible evidence.",
+                        evidence_refs=rubric_evidence,
+                    )
+                )
+            continue
+        observed_facts.extend(candidates)
+        if len(candidates) != 1:
+            reasons.append(
+                _advisory_reason(
+                    "RUBRIC_INPUT_CONFLICT",
+                    reason=f"Advisory Rubric input {fact_code} does not establish one value.",
+                    evidence_refs=_evidence_refs(candidates),
+                )
+            )
+            continue
+        fact, eligibility = _eligible_fact(
+            candidates,
+            constraints_as_of=constraints_as_of,
+        )
+        if eligibility != "ELIGIBLE" or fact is None:
+            if declaration_item.get("required") is True:
+                reasons.append(
+                    _advisory_reason(
+                        "RUBRIC_INPUT_MISSING",
+                        reason=f"Required Advisory Rubric input {fact_code} is unavailable at the cutoff.",
+                        evidence_refs=_evidence_refs(candidates),
+                    )
+                )
+            continue
+        value = fact.get("value")
+        if not _advisory_value_is_valid(value, str(declaration_item["value_type"])):
+            reasons.append(
+                _advisory_reason(
+                    "RUBRIC_INPUT_INVALID",
+                    reason=f"Advisory Rubric input {fact_code} has the wrong typed value.",
+                    evidence_refs=_evidence_refs([fact]),
+                )
+            )
+            continue
+        declared_unit = declaration_item.get("unit")
+        fact_unit = fact.get("unit")
+        if (
+            declared_unit == "NOT_APPLICABLE"
+            and fact_unit not in {None, "NOT_APPLICABLE"}
+        ) or (
+            declared_unit != "NOT_APPLICABLE" and fact_unit != declared_unit
+        ):
+            reasons.append(
+                _advisory_reason(
+                    "RUBRIC_INPUT_INVALID",
+                    reason=f"Advisory Rubric input {fact_code} has an incompatible unit.",
+                    evidence_refs=_evidence_refs([fact]),
+                )
+            )
+            continue
+        resolved_by_fact[fact_code] = value
+        input_values.append({"fact_code": fact_code, "value": deepcopy(value)})
+        typed_inputs.append(
+            {
+                "fact_code": fact_code,
+                "value": deepcopy(value),
+                "value_type": declaration_item["value_type"],
+                "unit": declaration_item["unit"],
+                "evidence_refs": _evidence_refs([fact]),
+            }
+        )
+    result["input_values"] = input_values
+    result["typed_inputs"] = typed_inputs
+    result["observed_facts"] = deepcopy([dict(fact) for fact in observed_facts])
+    evidence_refs = _evidence_refs(observed_facts, rubric_evidence)
+    result["evidence_refs"] = evidence_refs
+    result["provenance"]["rubric_source_refs"] = deepcopy(list(rubric_evidence))
+    if reasons:
+        result["reasons"] = _ordered_reasons(reasons)
+        return result
+    matches: list[Mapping[str, Any]] = []
+    for rule in sorted(rubric["rules"], key=lambda item: int(item["priority"])):
+        predicate = rule["predicate"]
+        fact_code = str(predicate["fact_code"])
+        if fact_code in resolved_by_fact and _advisory_predicate_matches(
+            predicate, resolved_by_fact[fact_code]
+        ):
+            matches.append(rule)
+    if not matches:
+        result["reasons"] = [
+            _advisory_reason(
+                "RUBRIC_RULE_NO_MATCH",
+                reason="Complete typed Advisory Rubric inputs matched no rule.",
+                evidence_refs=evidence_refs,
+            )
+        ]
+        return result
+    if len(matches) > 1:
+        result["reasons"] = [
+            _advisory_reason(
+                "RUBRIC_RULE_AMBIGUOUS",
+                reason="Complete typed Advisory Rubric inputs matched multiple rules.",
+                evidence_refs=evidence_refs,
+            )
+        ]
+        return result
+    matched = matches[0]
+    value = matched["output"]
+    result.update(
+        {
+            "status": "KNOWN",
+            "value": value,
+            "ordinal": value,
+            "result": value,
+            "matched_rule": {
+                "rule_id": matched["rule_id"],
+                "priority": matched["priority"],
+                "output": value,
+            },
+        }
+    )
+    return result
+
+
+def _advisory_declaration(
+    option: Mapping[str, Any],
+    *,
+    trigger_mode: str,
+    dimension: str,
+) -> Mapping[str, Any] | None:
+    declarations = option.get("advisory_rubric_declarations")
+    if not isinstance(declarations, list):
+        return None
+    matches = [
+        declaration
+        for declaration in declarations
+        if isinstance(declaration, Mapping)
+        and declaration.get("trigger_mode") == trigger_mode
+        and declaration.get("dimension") == dimension
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _advisory_result_reasons(result: Mapping[str, Any]) -> list[str]:
+    reasons = result.get("reasons")
+    if not isinstance(reasons, list):
+        return []
+    return [
+        str(reason["code"])
+        for reason in reasons
+        if isinstance(reason, Mapping) and isinstance(reason.get("code"), str)
+    ]
+
+
+def _atomic_advisory_results(
+    *,
+    option: Mapping[str, Any],
+    trigger_mode: str,
+    facts: list[Mapping[str, Any]],
+    snapshot: Mapping[str, Any],
+    constraints_as_of: datetime,
+    subject_identity: str,
+    rubrics_by_reference: Mapping[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    option_code = str(option["option_code"])
+    option_version = str(option["option_version"])
+    for dimension in _ADVISORY_DIMENSIONS:
+        declaration = _advisory_declaration(
+            option,
+            trigger_mode=trigger_mode,
+            dimension=dimension,
+        )
+        if declaration is None:
+            declaration = {
+                "dimension": dimension,
+                "trigger_mode": trigger_mode,
+                "rubric_reference": "UNAVAILABLE_PENDING_REVIEW",
+            }
+        reference = declaration.get("rubric_reference")
+        rubric = (
+            rubrics_by_reference.get(reference)
+            if isinstance(reference, str)
+            else None
+        )
+        results.append(
+            _evaluate_advisory_rubric(
+                option_code=option_code,
+                option_version=option_version,
+                trigger_mode=trigger_mode,
+                dimension=dimension,
+                declaration=declaration,
+                rubric=rubric,
+                facts=facts,
+                snapshot=snapshot,
+                constraints_as_of=constraints_as_of,
+                subject_identity=subject_identity,
+            )
+        )
+    return results
+
+
+def _composite_advisory_result(
+    *,
+    dimension: str,
+    option: Mapping[str, Any],
+    trigger_mode: str,
+    component_results: list[dict[str, Any]],
+    snapshot: Mapping[str, Any],
+    subject_identity: str,
+) -> dict[str, Any]:
+    result = _advisory_result_base(
+        option_code=str(option["option_code"]),
+        option_version=str(option["option_version"]),
+        trigger_mode=trigger_mode,
+        dimension=dimension,
+        subject_identity=subject_identity,
+        snapshot=snapshot,
+        rubric=None,
+    )
+    result["derivation"] = {
+        "kind": "LEAST_FAVORABLE_COMPONENT_RESULTS.v1",
+        "version": "1",
+    }
+    result["component_results"] = deepcopy(component_results)
+    result["evidence_refs"] = _evidence_refs(
+        [],
+        [
+            reference
+            for component in component_results
+            for reference in component.get("evidence_refs", [])
+            if isinstance(reference, Mapping)
+        ],
+    )
+    result["provenance"]["component_results"] = [
+        {
+            "option_code": component.get("option_code"),
+            "dimension": component.get("dimension"),
+            "rubric": deepcopy(component.get("rubric")),
+        }
+        for component in component_results
+    ]
+    unknown_components = [
+        component
+        for component in component_results
+        if component.get("status") == "UNKNOWN"
+    ]
+    if unknown_components:
+        reasons = [
+            _advisory_reason(
+                "RUBRIC_COMPONENT_RESULT_UNKNOWN",
+                reason="A composite component Advisory Result is UNKNOWN; no component value was selected.",
+                evidence_refs=[
+                    reference
+                    for component in unknown_components
+                    for reference in component.get("evidence_refs", [])
+                    if isinstance(reference, Mapping)
+                ],
+            )
+        ]
+        for component in unknown_components:
+            for reason in component.get("reasons", []):
+                if isinstance(reason, Mapping) and isinstance(reason.get("code"), str):
+                    reasons.append(deepcopy(dict(reason)))
+        result["reasons"] = _ordered_reasons(reasons)
+        return result
+    values = [str(component["value"]) for component in component_results]
+    if dimension in {"CONTRACTUAL_RELATIONSHIP_RISK", "OPERATIONAL_DISRUPTION"}:
+        value = max(
+            values,
+            key=lambda item: _ADVISORY_OUTPUTS[dimension].index(item),
+        )
+    else:
+        value = max(
+            values,
+            key=lambda item: _ADVISORY_OUTPUTS[dimension].index(item),
+        )
+    result.update(
+        {
+            "status": "KNOWN",
+            "value": value,
+            "ordinal": value,
+            "result": value,
+        }
+    )
+    return result
+
+
+def _option_advisory_results(
+    *,
+    option: Mapping[str, Any],
+    option_index: Mapping[str, dict[str, Any]],
+    trigger_mode: str,
+    facts: list[Mapping[str, Any]],
+    snapshot: Mapping[str, Any],
+    constraints_as_of: datetime,
+    subject_identity: str,
+    rubrics_by_reference: Mapping[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if option.get("shape") != "COMPOSITE":
+        return _atomic_advisory_results(
+            option=option,
+            trigger_mode=trigger_mode,
+            facts=facts,
+            snapshot=snapshot,
+            constraints_as_of=constraints_as_of,
+            subject_identity=subject_identity,
+            rubrics_by_reference=rubrics_by_reference,
+        )
+    component_results_by_dimension: dict[str, list[dict[str, Any]]] = {
+        dimension: [] for dimension in _ADVISORY_DIMENSIONS
+    }
+    for component_code in option.get("component_codes", []):
+        component = option_index.get(str(component_code))
+        if component is None:
+            continue
+        component_results = _atomic_advisory_results(
+            option=component,
+            trigger_mode=trigger_mode,
+            facts=facts,
+            snapshot=snapshot,
+            constraints_as_of=constraints_as_of,
+            subject_identity=subject_identity,
+            rubrics_by_reference=rubrics_by_reference,
+        )
+        for component_result in component_results:
+            component_results_by_dimension[str(component_result["dimension"])].append(
+                component_result
+            )
+    return [
+        _composite_advisory_result(
+            dimension=dimension,
+            option=option,
+            trigger_mode=trigger_mode,
+            component_results=component_results_by_dimension[dimension],
+            snapshot=snapshot,
+            subject_identity=subject_identity,
+        )
+        for dimension in _ADVISORY_DIMENSIONS
+    ]
+
+
+def _time_comparison_dimension(
+    *,
+    option_code: str,
+    facts: list[Mapping[str, Any]],
+    constraints_as_of: datetime,
+) -> dict[str, Any]:
+    if option_code == "PROTECTED_SLOT_WITH_PHASED_DELIVERY":
+        return {
+            "applicability": "INCOMPARABLE",
+            "value": "UNKNOWN",
+            "direction": "LOWER_IS_MORE_FAVORABLE",
+            "source": "COMPOSITION_DECLARATION",
+            "reason_codes": ["TIME_COMPOSITION_RULE_UNAVAILABLE"],
+        }
+    candidates = _fact_candidates(facts, "TIME_TO_INITIATE_DAYS", option_code)
+    fact, eligibility = _eligible_fact(candidates, constraints_as_of=constraints_as_of)
+    reason_codes: list[str] = []
+    if not candidates or eligibility != "ELIGIBLE" or fact is None:
+        reason_codes.append("TIME_TO_INITIATE_INPUT_UNAVAILABLE")
+        value: object = "UNKNOWN"
+        applicability = "INCOMPARABLE"
+    elif _decimal(fact.get("value")) is None or not isinstance(
+        fact.get("duration_basis"), str
+    ):
+        reason_codes.append("TIME_TO_INITIATE_INPUT_INVALID")
+        value = "UNKNOWN"
+        applicability = "INCOMPARABLE"
+    else:
+        value = fact.get("value")
+        applicability = "APPLICABLE"
+    result: dict[str, Any] = {
+        "applicability": applicability,
+        "value": value,
+        "direction": "LOWER_IS_MORE_FAVORABLE",
+        "source": "CONSTRAINT_FACT",
+    }
+    if fact is not None:
+        result["duration_basis"] = fact.get("duration_basis")
+        result["evidence_refs"] = _evidence_refs([fact])
+    if reason_codes:
+        result["reason_codes"] = reason_codes
+    return result
+
+
+def _comparison_dimensions(
+    *,
+    option_code: str,
+    advisory_results: list[Mapping[str, Any]],
+    facts: list[Mapping[str, Any]],
+    constraints_as_of: datetime,
+) -> tuple[dict[str, dict[str, Any]], str]:
+    dimensions: dict[str, dict[str, Any]] = {
+        "TIME_TO_INITIATE": _time_comparison_dimension(
+            option_code=option_code,
+            facts=facts,
+            constraints_as_of=constraints_as_of,
+        )
+    }
+    for advisory in advisory_results:
+        dimension = str(advisory["dimension"])
+        if advisory.get("status") == "KNOWN":
+            dimensions[dimension] = {
+                "applicability": "APPLICABLE",
+                "value": advisory["value"],
+                "direction": _ADVISORY_DIRECTIONS[dimension],
+                "source": "ADVISORY_RESULT",
+            }
+        else:
+            dimensions[dimension] = {
+                "applicability": "INCOMPARABLE",
+                "value": "UNKNOWN",
+                "direction": _ADVISORY_DIRECTIONS[dimension],
+                "source": "ADVISORY_RESULT",
+                "reason_codes": _advisory_result_reasons(advisory),
+            }
+    state = (
+        "INCOMPARABLE_EVIDENCE"
+        if any(
+            dimension.get("applicability") == "INCOMPARABLE"
+            for dimension in dimensions.values()
+        )
+        else "COMPARABLE"
+    )
+    return dimensions, state
+
+
+def _not_evaluated_comparison_dimensions(
+    *, reason_code: str
+) -> tuple[dict[str, dict[str, Any]], str]:
+    dimensions = {
+        "TIME_TO_INITIATE": {
+            "applicability": "NOT_EVALUATED",
+            "value": "NOT_EVALUATED",
+            "direction": "LOWER_IS_MORE_FAVORABLE",
+            "source": "NOT_EVALUATED",
+            "reason_codes": [reason_code],
+        }
+    }
+    dimensions.update(
+        {
+            dimension: {
+                "applicability": "NOT_EVALUATED",
+                "value": "NOT_EVALUATED",
+                "direction": _ADVISORY_DIRECTIONS[dimension],
+                "source": "NOT_EVALUATED",
+                "reason_codes": [reason_code],
+            }
+            for dimension in _ADVISORY_DIMENSIONS
+        }
+    )
+    return dimensions, "NOT_EVALUATED"
+
+
 def _evaluate_composite_review(
     *,
     facts: list[Mapping[str, Any]],
@@ -1253,6 +2418,21 @@ def _evaluate_composite_review(
             "content_hash": review.get("content_hash"),
         }
     ]
+    published_at = _parse_time(review.get("published_at"))
+    review_available_at = _parse_time(review.get("review_available_at"))
+    if (
+        published_at is None
+        or review_available_at is None
+        or published_at > constraints_as_of
+        or review_available_at > constraints_as_of
+    ):
+        return "UNKNOWN", observed, "COMPOSITE_REVIEW_NOT_AVAILABLE_AT_CUTOFF", extra_evidence
+    if review.get("supersession_ref") is not None:
+        return "UNKNOWN", observed, "COMPOSITE_REVIEW_SUPERSEDED", extra_evidence
+    if review.get("lifecycle_status") == "RETIRED" or review.get("state") == "RETIRED" or review.get(
+        "review_status"
+    ) == "RETIRED":
+        return "UNKNOWN", observed, "COMPOSITE_REVIEW_RETIRED", extra_evidence
     if review.get("state") != "APPROVED" or review.get("review_status") != "APPROVED":
         return "UNKNOWN", observed, "COMPOSITE_REVIEW_NOT_APPROVED", extra_evidence
     if (
@@ -1679,6 +2859,7 @@ def _build_registry_inspection(
 def _option_result(
     *,
     option: Mapping[str, Any],
+    option_index: Mapping[str, dict[str, Any]],
     link: Mapping[str, Any] | None,
     trigger_mode: str,
     facts: list[Mapping[str, Any]],
@@ -1688,6 +2869,7 @@ def _option_result(
     links: Mapping[tuple[str, str], dict[str, Any]],
     monitoring_triggers: Mapping[tuple[str, str], dict[str, Any]],
     composite_reviews: Mapping[tuple[str, str], dict[str, Any]],
+    rubrics_by_reference: Mapping[str, dict[str, Any]],
     release_preview: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
     option_code = str(option["option_code"])
@@ -1715,7 +2897,12 @@ def _option_result(
         "speculative_disclosure": "ABSENT",
         "constraint_results": [],
         "suppression_reasons": [],
+        "advisory_results": [],
+        "comparison_state": "NOT_EVALUATED",
     }
+    base["comparison_dimensions"], base["comparison_state"] = (
+        _not_evaluated_comparison_dimensions(reason_code="NOT_EVALUATED")
+    )
     base["provenance"] = {
         "intervention_option": _synthetic_record_ref(option),
         "case_constraint_snapshot": _synthetic_record_ref(snapshot),
@@ -1733,6 +2920,13 @@ def _option_result(
                 _FIXTURE_NAMESPACE + "constraint-rules:v1",
             )
         )
+
+    def mark_advisories_not_evaluated(reason_code: str) -> None:
+        base["advisory_results"] = []
+        base["comparison_dimensions"], base["comparison_state"] = (
+            _not_evaluated_comparison_dimensions(reason_code=reason_code)
+        )
+
     if option.get("lifecycle_status") != "ACTIVE":
         base["evidence_tags"] = {
             slot: "NOT_EVALUATED"
@@ -1749,6 +2943,7 @@ def _option_result(
                 reason="The governed option version is retired at the evaluation cutoff.",
             )
         ]
+        mark_advisories_not_evaluated("OPTION_RETIRED")
         return base
     if trigger_mode not in option.get("allowed_trigger_modes", []):
         base["evidence_tags"]["MECHANISTIC_LINK"] = "NOT_EVALUATED"
@@ -1760,6 +2955,7 @@ def _option_result(
                 ),
             )
         ]
+        mark_advisories_not_evaluated("TRIGGER_MODE_INCOMPATIBLE")
         return base
     if link is None:
         base["evidence_tags"]["MECHANISTIC_LINK"] = "NOT_EVALUATED"
@@ -1769,6 +2965,7 @@ def _option_result(
                 reason="No exact governed Driver-Action Link is available for this option and trigger mode.",
             )
         ]
+        mark_advisories_not_evaluated("DRIVER_ACTION_LINK_MISSING")
         return base
     published_at = _parse_time(link.get("published_at"))
     constraints_time = _parse_time(snapshot.get("constraints_as_of"))
@@ -1783,6 +2980,7 @@ def _option_result(
                 reason="The exact Driver-Action Link is not available by the Case Constraint Snapshot cutoff.",
             )
         ]
+        mark_advisories_not_evaluated("DRIVER_ACTION_LINK_NOT_AVAILABLE_AT_CUTOFF")
         return base
     link_state = link.get("state")
     review_status = link.get("review_status")
@@ -1795,6 +2993,7 @@ def _option_result(
                 reason="The exact Driver-Action Link is provisional and cannot make an option eligible.",
             )
         ]
+        mark_advisories_not_evaluated("DRIVER_ACTION_LINK_PROVISIONAL")
         return base
     if link_state == "REJECTED" or review_status == "REJECTED":
         base["evidence_tags"]["MECHANISTIC_LINK"] = "REJECTED"
@@ -1804,6 +3003,7 @@ def _option_result(
                 reason="The exact Driver-Action Link is rejected and cannot make an option eligible.",
             )
         ]
+        mark_advisories_not_evaluated("DRIVER_ACTION_LINK_REJECTED")
         return base
     if (
         link_state == "RETIRED"
@@ -1816,6 +3016,7 @@ def _option_result(
                 reason="The exact Driver-Action Link has a governed successor at the evaluation cutoff.",
             )
         ]
+        mark_advisories_not_evaluated("DRIVER_ACTION_LINK_SUPERSEDED")
         return base
     if link_state != "APPROVED" or review_status != "APPROVED":
         base["suppression_reasons"] = [
@@ -1824,6 +3025,7 @@ def _option_result(
                 reason="The exact Driver-Action Link is not approved for eligibility.",
             )
         ]
+        mark_advisories_not_evaluated("DRIVER_ACTION_LINK_PROVISIONAL")
         return base
     rule_results: list[dict[str, Any]] = []
     for rule_scope, component_scope in _ordered_rule_scopes(option):
@@ -1846,6 +3048,25 @@ def _option_result(
             )
     rule_results.sort(key=lambda item: (int(item["priority"]), str(item["rule_code"])))
     base["constraint_results"] = rule_results
+    advisory_results = _option_advisory_results(
+        option=option,
+        option_index=option_index,
+        trigger_mode=trigger_mode,
+        facts=facts,
+        snapshot=snapshot,
+        constraints_as_of=constraints_as_of,
+        subject_identity=subject_identity,
+        rubrics_by_reference=rubrics_by_reference,
+    )
+    comparison_dimensions, comparison_state = _comparison_dimensions(
+        option_code=option_code,
+        advisory_results=advisory_results,
+        facts=facts,
+        constraints_as_of=constraints_as_of,
+    )
+    base["advisory_results"] = advisory_results
+    base["comparison_dimensions"] = comparison_dimensions
+    base["comparison_state"] = comparison_state
     failing_results = [
         item for item in rule_results if item["status"] in {"UNSATISFIED", "UNKNOWN"}
     ]
@@ -1994,6 +3215,22 @@ def evaluate_active_synthetic_conformance(
                 "monitoring_triggers",
             ],
         )
+    rubrics_by_reference, rubric_error = _validate_advisory_rubric_records(
+        collections,
+        option_index,
+    )
+    if rubric_error is not None:
+        return _active_failure(
+            result=result,
+            error=rubric_error,
+            consumed_inputs=[
+                "permission_envelope",
+                "subject_driver_state",
+                "intervention_library",
+                "driver_action_links",
+                "advisory_rubrics",
+            ],
+        )
     operational_inputs = fixture_case.get("operational_inputs")
     if not isinstance(operational_inputs, Mapping):
         return _active_failure(
@@ -2083,7 +3320,7 @@ def evaluate_active_synthetic_conformance(
         (str(record.get("option_code")), str(record.get("trigger_mode"))): record
         for record in collections["monitoring_triggers"]
     }
-    composite_reviews, composite_error = _validate_composite_records(collections)
+    composite_reviews, composite_error = _validate_composite_records(collections, links)
     if composite_error is not None:
         return _active_failure(
             result=result,
@@ -2110,6 +3347,7 @@ def evaluate_active_synthetic_conformance(
         options.append(
             _option_result(
                 option=option,
+                option_index=option_index,
                 link=link,
                 trigger_mode=trigger_mode,
                 facts=facts,
@@ -2119,6 +3357,7 @@ def evaluate_active_synthetic_conformance(
                 links=links,
                 monitoring_triggers=monitoring_triggers,
                 composite_reviews=composite_reviews,
+                rubrics_by_reference=rubrics_by_reference,
                 release_preview=preview,
             )
         )

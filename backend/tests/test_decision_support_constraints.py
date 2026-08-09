@@ -73,13 +73,17 @@ def test_active_fixture_evaluates_every_closed_option_and_retains_provenance() -
         for option in options
         if option["option_code"] != "RELEASE_TIMING_ADJUSTMENT"
     )
-    assert (
-        next(
-            option
-            for option in options
-            if option["option_code"] == "RELEASE_TIMING_ADJUSTMENT"
-        )["suppression_reasons"][0]["code"]
-        == "TRIGGER_MODE_INCOMPATIBLE"
+    release = next(
+        option
+        for option in options
+        if option["option_code"] == "RELEASE_TIMING_ADJUSTMENT"
+    )
+    assert release["suppression_reasons"][0]["code"] == "TRIGGER_MODE_INCOMPATIBLE"
+    assert release["advisory_results"] == []
+    assert release["comparison_state"] == "NOT_EVALUATED"
+    assert all(
+        dimension["applicability"] == "NOT_EVALUATED"
+        for dimension in release["comparison_dimensions"].values()
     )
     assert all(
         option["action_effect_evidence"] == "INTERVENTION_EFFECT_NOT_ESTIMATED"
@@ -126,6 +130,326 @@ def test_active_fixture_evaluates_every_closed_option_and_retains_provenance() -
     assert result["action_recommendation"] is None
     assert "net_central" not in json.dumps(result)
     assert "benefit_projection" not in json.dumps(result)
+
+
+def test_active_fixture_publishes_advisories_and_explicit_comparison_applicability() -> None:
+    records, fixture = _fixture("approved-reactive")
+
+    result = evaluate_synthetic_decision_support_fixture(
+        fixture_case=fixture,
+        governed_records=records,
+    )
+
+    protected = next(
+        option
+        for option in result["options"]
+        if option["option_code"] == "PROTECTED_PRODUCTION_SLOT"
+    )
+    advisories = {
+        advisory["dimension"]: advisory
+        for advisory in protected["advisory_results"]
+    }
+
+    assert advisories["CONTRACTUAL_RELATIONSHIP_RISK"]["status"] == "KNOWN"
+    assert advisories["CONTRACTUAL_RELATIONSHIP_RISK"]["value"] == "LOW"
+    assert advisories["CONTRACTUAL_RELATIONSHIP_RISK"]["matched_rule"]["priority"] == 10
+    assert advisories["CONTRACTUAL_RELATIONSHIP_RISK"]["rubric"]["rubric_version"] == "1"
+    assert advisories["CONTRACTUAL_RELATIONSHIP_RISK"]["input_values"] == [
+        {
+            "fact_code": "PROTECTED_SLOT_SUPPLIER_ACCEPTED",
+            "value": True,
+        }
+    ]
+    assert advisories["CONTRACTUAL_RELATIONSHIP_RISK"]["provenance"][
+        "case_constraint_snapshot"
+    ]["reference"].endswith(":constraints:approved-reactive:v1")
+
+    for dimension in ("OPERATIONAL_DISRUPTION", "REVERSIBILITY"):
+        advisory = advisories[dimension]
+        assert advisory["status"] == "UNKNOWN"
+        assert advisory["value"] == "UNKNOWN"
+        assert [reason["code"] for reason in advisory["reasons"]] == [
+            "RUBRIC_INPUT_MISSING"
+        ]
+
+    comparison_dimensions = protected["comparison_dimensions"]
+    assert comparison_dimensions["CONTRACTUAL_RELATIONSHIP_RISK"] == {
+        "applicability": "APPLICABLE",
+        "value": "LOW",
+        "direction": "LOWER_IS_MORE_FAVORABLE",
+        "source": "ADVISORY_RESULT",
+    }
+    assert comparison_dimensions["OPERATIONAL_DISRUPTION"]["applicability"] == (
+        "INCOMPARABLE"
+    )
+    assert comparison_dimensions["OPERATIONAL_DISRUPTION"]["value"] == "UNKNOWN"
+    assert comparison_dimensions["OPERATIONAL_DISRUPTION"]["reason_codes"] == [
+        "RUBRIC_INPUT_MISSING"
+    ]
+    assert protected["comparison_state"] == "INCOMPARABLE_EVIDENCE"
+
+
+def test_unapproved_advisory_is_unknown_without_suppressing_eligible_option() -> None:
+    records, fixture = _fixture("approved-reactive")
+    records = deepcopy(records)
+
+    rubric = next(
+        rubric
+        for rubric in records["advisory_rubrics"]
+        if rubric["option_code"] == "PROTECTED_PRODUCTION_SLOT"
+        and rubric["dimension"] == "CONTRACTUAL_RELATIONSHIP_RISK"
+        and rubric["trigger_mode"] == "REACTIVE"
+    )
+    rubric["state"] = "PROVISIONAL"
+    _rehash(rubric)
+
+    result = evaluate_synthetic_decision_support_fixture(
+        fixture_case=fixture,
+        governed_records=records,
+    )
+    protected = next(
+        option
+        for option in result["options"]
+        if option["option_code"] == "PROTECTED_PRODUCTION_SLOT"
+    )
+    advisory = next(
+        advisory
+        for advisory in protected["advisory_results"]
+        if advisory["dimension"] == "CONTRACTUAL_RELATIONSHIP_RISK"
+    )
+
+    assert protected["evaluation_state"] == "ACTIVE"
+    assert advisory["status"] == "UNKNOWN"
+    assert [reason["code"] for reason in advisory["reasons"]] == [
+        "RUBRIC_NOT_APPROVED"
+    ]
+    assert protected["comparison_dimensions"][
+        "CONTRACTUAL_RELATIONSHIP_RISK"
+    ]["applicability"] == "INCOMPARABLE"
+
+
+def test_pending_advisory_declaration_is_explicitly_unavailable() -> None:
+    records, fixture = _fixture("approved-reactive")
+    records = deepcopy(records)
+
+    library = records["intervention_libraries"][0]
+    option = next(
+        option
+        for option in library["options"]
+        if option["option_code"] == "PROTECTED_PRODUCTION_SLOT"
+    )
+    declaration = next(
+        declaration
+        for declaration in option["advisory_rubric_declarations"]
+        if declaration["dimension"] == "CONTRACTUAL_RELATIONSHIP_RISK"
+        and declaration["trigger_mode"] == "REACTIVE"
+    )
+    declaration["rubric_reference"] = "UNAVAILABLE_PENDING_REVIEW"
+    _rehash(library)
+
+    result = evaluate_synthetic_decision_support_fixture(
+        fixture_case=fixture,
+        governed_records=records,
+    )
+    protected = next(
+        option
+        for option in result["options"]
+        if option["option_code"] == "PROTECTED_PRODUCTION_SLOT"
+    )
+    advisory = next(
+        advisory
+        for advisory in protected["advisory_results"]
+        if advisory["dimension"] == "CONTRACTUAL_RELATIONSHIP_RISK"
+    )
+
+    assert protected["evaluation_state"] == "ACTIVE"
+    assert advisory["status"] == "UNKNOWN"
+    assert [reason["code"] for reason in advisory["reasons"]] == [
+        "RUBRIC_UNAVAILABLE"
+    ]
+
+
+def test_malformed_advisory_rubric_fails_before_option_evaluation() -> None:
+    records, fixture = _fixture("approved-reactive")
+    records = deepcopy(records)
+
+    rubric = next(
+        rubric
+        for rubric in records["advisory_rubrics"]
+        if rubric["option_code"] == "PROTECTED_PRODUCTION_SLOT"
+        and rubric["dimension"] == "CONTRACTUAL_RELATIONSHIP_RISK"
+        and rubric["trigger_mode"] == "REACTIVE"
+    )
+    rubric["result_contract"]["allowed_values"] = ["LOW", "UNSUPPORTED"]
+    _rehash(rubric)
+
+    result = evaluate_synthetic_decision_support_fixture(
+        fixture_case=fixture,
+        governed_records=records,
+    )
+
+    assert result["outcome"] == "FAILED"
+    assert result["primary_reason_code"] == (
+        "DECISION_SUPPORT_REFERENCE_INTEGRITY_MISMATCH"
+    )
+    assert result["options"] == []
+
+
+def test_composite_advisories_retain_component_results_and_derivation() -> None:
+    records, fixture = _fixture("approved-reactive")
+
+    result = evaluate_synthetic_decision_support_fixture(
+        fixture_case=fixture,
+        governed_records=records,
+    )
+    composite = next(
+        option
+        for option in result["options"]
+        if option["option_code"] == "PROTECTED_SLOT_WITH_PHASED_DELIVERY"
+    )
+
+    assert composite["evaluation_state"] == "ACTIVE"
+    for advisory in composite["advisory_results"]:
+        assert advisory["derivation"] == {
+            "kind": "LEAST_FAVORABLE_COMPONENT_RESULTS.v1",
+            "version": "1",
+        }
+        assert [
+            component["option_code"]
+            for component in advisory["component_results"]
+        ] == ["PROTECTED_PRODUCTION_SLOT", "PHASED_DELIVERY"]
+        assert advisory["status"] == "UNKNOWN"
+        assert "RUBRIC_COMPONENT_RESULT_UNKNOWN" in [
+            reason["code"] for reason in advisory["reasons"]
+        ]
+    assert composite["comparison_dimensions"]["TIME_TO_INITIATE"]["reason_codes"] == [
+        "TIME_COMPOSITION_RULE_UNAVAILABLE"
+    ]
+
+
+def test_composite_review_after_cutoff_suppresses_only_composite_with_explicit_reason() -> None:
+    records, fixture = _fixture("approved-reactive")
+    records = deepcopy(records)
+    fixture = deepcopy(fixture)
+
+    review = records["composite_reviews"][0]
+    review["published_at"] = "2026-08-02T00:00:00+00:00"
+    review["review_available_at"] = "2026-08-02T00:00:00+00:00"
+    _rehash(review)
+    snapshot = fixture["operational_inputs"]["case_constraint_snapshot"]
+    review_fact = next(
+        fact
+        for fact in snapshot["facts"]
+        if fact["fact_code"] == "COMPOSITE_COMPATIBILITY_REVIEW_REF"
+    )
+    review_fact["value"]["content_hash"] = review["content_hash"]
+    _rehash(snapshot)
+    _rehash(fixture)
+
+    result = evaluate_synthetic_decision_support_fixture(
+        fixture_case=fixture,
+        governed_records=records,
+    )
+    composite = next(
+        option
+        for option in result["options"]
+        if option["option_code"] == "PROTECTED_SLOT_WITH_PHASED_DELIVERY"
+    )
+    compatibility = next(
+        rule
+        for rule in composite["constraint_results"]
+        if rule["rule_code"] == "COMPOSITE_COMPONENTS_COMPATIBLE"
+    )
+
+    assert composite["evaluation_state"] == "SUPPRESSED"
+    assert compatibility["status"] == "UNKNOWN"
+    assert compatibility["explanation_code"] == "COMPOSITE_REVIEW_NOT_AVAILABLE_AT_CUTOFF"
+    assert composite["suppression_reasons"][-1]["code"] == (
+        "REQUIRED_CONSTRAINT_UNKNOWN"
+    )
+    assert next(
+        option
+        for option in result["options"]
+        if option["option_code"] == "PROTECTED_PRODUCTION_SLOT"
+    )["evaluation_state"] == "ACTIVE"
+
+
+def test_approved_incompatible_composite_review_suppresses_composite_only() -> None:
+    records, fixture = _fixture("approved-reactive")
+    records = deepcopy(records)
+    fixture = deepcopy(fixture)
+
+    review = records["composite_reviews"][0]
+    review["attestations"][2]["outcome"] = "ATTESTED_INCOMPATIBLE"
+    review["outcome"] = "INCOMPATIBLE"
+    review["compatibility_status"] = "UNSATISFIED"
+    _rehash(review)
+    snapshot = fixture["operational_inputs"]["case_constraint_snapshot"]
+    review_fact = next(
+        fact
+        for fact in snapshot["facts"]
+        if fact["fact_code"] == "COMPOSITE_COMPATIBILITY_REVIEW_REF"
+    )
+    review_fact["value"]["content_hash"] = review["content_hash"]
+    _rehash(snapshot)
+    _rehash(fixture)
+
+    result = evaluate_synthetic_decision_support_fixture(
+        fixture_case=fixture,
+        governed_records=records,
+    )
+    composite = next(
+        option
+        for option in result["options"]
+        if option["option_code"] == "PROTECTED_SLOT_WITH_PHASED_DELIVERY"
+    )
+    compatibility = next(
+        rule
+        for rule in composite["constraint_results"]
+        if rule["rule_code"] == "COMPOSITE_COMPONENTS_COMPATIBLE"
+    )
+
+    assert composite["evaluation_state"] == "SUPPRESSED"
+    assert compatibility["status"] == "UNSATISFIED"
+    assert compatibility["explanation_code"] == "COMPOSITE_REVIEW_INCOMPATIBLE"
+    assert composite["suppression_reasons"][-1]["code"] == (
+        "REQUIRED_CONSTRAINT_UNSATISFIED"
+    )
+    assert next(
+        option
+        for option in result["options"]
+        if option["option_code"] == "PROTECTED_PRODUCTION_SLOT"
+    )["evaluation_state"] == "ACTIVE"
+
+
+def test_composite_review_with_reordered_attestations_is_global_schema_failure() -> None:
+    records, fixture = _fixture("approved-reactive")
+    records = deepcopy(records)
+    fixture = deepcopy(fixture)
+
+    review = records["composite_reviews"][0]
+    review["attestations"][1]["attestation_code"] = (
+        "COMPONENT_IDENTITIES_ALIGNED"
+    )
+    _rehash(review)
+    snapshot = fixture["operational_inputs"]["case_constraint_snapshot"]
+    review_fact = next(
+        fact
+        for fact in snapshot["facts"]
+        if fact["fact_code"] == "COMPOSITE_COMPATIBILITY_REVIEW_REF"
+    )
+    review_fact["value"]["content_hash"] = review["content_hash"]
+    _rehash(snapshot)
+    _rehash(fixture)
+
+    result = evaluate_synthetic_decision_support_fixture(
+        fixture_case=fixture,
+        governed_records=records,
+    )
+
+    assert result["outcome"] == "FAILED"
+    assert result["primary_reason_code"] == "DECISION_SUPPORT_INPUT_SCHEMA_INVALID"
+    assert result["options"] == []
 
 
 def test_missing_and_false_facts_are_both_retained_in_locked_suppression_order() -> (
