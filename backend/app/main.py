@@ -24,6 +24,9 @@ from .contracts import (
     DecisionBriefResponse,
     DecisionBriefSnapshotResponse,
     DecisionSupportEvaluationSeriesResponse,
+    DecisionSupportCurrentAdviceRenderRequest,
+    DecisionSupportCurrentnessRequest,
+    DecisionSupportCurrentnessResponse,
     DecisionSupportInvalidationRequest,
     DecisionSupportInvalidationResponse,
     DemoWorkspaceResponse,
@@ -77,6 +80,11 @@ from .decision_support_heads import (
     DecisionSupportEvaluationSeriesUnavailable,
     DecisionSupportEvaluationUnavailable,
     DecisionSupportHeadRaceLost,
+)
+from .decision_support_currentness import (
+    DecisionSupportCurrentnessConflict,
+    DecisionSupportCurrentnessOperationMismatch,
+    DecisionSupportCurrentnessUnavailable,
 )
 from .ingestion import (
     DatasetVersionUnavailable,
@@ -445,6 +453,39 @@ def create_app(
             409,
             SafeErrorCode.DECISION_SUPPORT_HEAD_RACE.value,
             "READ_THE_CURRENT_DECISION_SUPPORT_HEAD_AND_RETRY",
+        )
+
+    @app.exception_handler(DecisionSupportCurrentnessConflict)
+    async def handle_decision_support_currentness_conflict(
+        _: Request,
+        __: DecisionSupportCurrentnessConflict,
+    ) -> JSONResponse:
+        return _error_response(
+            409,
+            "CURRENTNESS_OPERATION_CONFLICT",
+            "USE_THE_EXACT_BOUND_CURRENTNESS_OPERATION_OR_CREATE_A_NEW_ONE",
+        )
+
+    @app.exception_handler(DecisionSupportCurrentnessOperationMismatch)
+    async def handle_decision_support_currentness_mismatch(
+        _: Request,
+        __: DecisionSupportCurrentnessOperationMismatch,
+    ) -> JSONResponse:
+        return _error_response(
+            409,
+            "CURRENTNESS_OPERATION_MISMATCH",
+            "PRESENT_THE_OPERATION_THROUGH_ITS_EXACT_BOUND_CONSUMER",
+        )
+
+    @app.exception_handler(DecisionSupportCurrentnessUnavailable)
+    async def handle_decision_support_currentness_unavailable(
+        _: Request,
+        __: DecisionSupportCurrentnessUnavailable,
+    ) -> JSONResponse:
+        return _error_response(
+            422,
+            "CURRENTNESS_OPERATION_INVALID",
+            "CORRECT_THE_HASH_BOUND_CURRENTNESS_ENVELOPE_AND_RETRY",
         )
 
     @app.exception_handler(DecisionSupportEvaluationConflict)
@@ -1137,6 +1178,92 @@ def create_app(
         response = DecisionSupportEvaluationSeriesResponse.model_validate(series)
         return attach_workspace_cookie(
             JSONResponse(status_code=200, content=response.model_dump(mode="json")),
+            resolution,
+        )
+
+    @app.post(
+        "/api/decision-support/currentness/check",
+        response_model=DecisionSupportCurrentnessResponse,
+    )
+    async def check_decision_support_currentness(
+        request_context: Request,
+        request: DecisionSupportCurrentnessRequest,
+    ) -> JSONResponse:
+        resolution = resolve_workspace(request_context)
+        stored = core_store.check_decision_support_currentness(
+            resolution.snapshot.workspace_id,
+            operation=request.operation,
+        )
+        response = DecisionSupportCurrentnessResponse(
+            result=stored.result,
+            operation=stored.operation,
+            currentness=stored.currentness,
+            terminal_claim=stored.terminal_claim,
+            render=stored.render,
+            consuming_result=stored.consuming_result,
+            head=stored.head,
+        )
+        return attach_workspace_cookie(
+            JSONResponse(
+                status_code=200 if stored.result == "IDEMPOTENT_REPLAY" else 201,
+                content=response.model_dump(mode="json"),
+            ),
+            resolution,
+        )
+
+    @app.post(
+        "/api/decision-support/current-advice/render",
+        response_model=DecisionSupportCurrentnessResponse,
+    )
+    @app.post(
+        "/api/decision-support/evaluation-series/{evaluation_series_id}/current-advice/render",
+        response_model=DecisionSupportCurrentnessResponse,
+    )
+    async def render_current_decision_support_advice(
+        request_context: Request,
+        render_request: DecisionSupportCurrentAdviceRenderRequest,
+        evaluation_series_id: str | None = None,
+    ) -> JSONResponse:
+        if (
+            evaluation_series_id is not None
+            and evaluation_series_id != render_request.evaluation_series_id
+        ):
+            raise DecisionSupportCurrentnessUnavailable(
+                "render request series does not match its route"
+            )
+        resolution = resolve_workspace(request_context)
+        stored = core_store.render_current_advice(
+            resolution.snapshot.workspace_id,
+            render_request=render_request.model_dump(mode="json"),
+        )
+        response = DecisionSupportCurrentnessResponse(
+            result=stored.result,
+            operation=stored.operation,
+            currentness=stored.currentness,
+            terminal_claim=stored.terminal_claim,
+            render=stored.render,
+            consuming_result=stored.consuming_result,
+            head=stored.head,
+        )
+        return attach_workspace_cookie(
+            JSONResponse(
+                status_code=200 if stored.result == "IDEMPOTENT_REPLAY" else 201,
+                content=response.model_dump(mode="json"),
+            ),
+            resolution,
+        )
+
+    @app.get(
+        "/api/decision-support/currentness",
+        response_model=list[dict[str, object]],
+    )
+    async def list_decision_support_currentness(request: Request) -> JSONResponse:
+        resolution = resolve_workspace(request)
+        items = core_store.list_decision_support_currentness(
+            resolution.snapshot.workspace_id
+        )
+        return attach_workspace_cookie(
+            JSONResponse(status_code=200, content=items),
             resolution,
         )
 

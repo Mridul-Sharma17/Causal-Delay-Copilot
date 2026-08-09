@@ -17,6 +17,7 @@ from .canonical import field as _canonical_field
 from .canonical import sha256 as _sha256
 from .governance import GovernanceMixin, ensure_governance_schema
 from .decision_support_heads import DecisionSupportEvaluationMixin
+from .decision_support_currentness import DecisionSupportCurrentnessMixin
 from .operations import DurableOperationsMixin, ensure_operation_schema
 from .risk import ReactiveInvestigationMixin, ensure_risk_schema
 
@@ -2424,6 +2425,7 @@ class LineageStore(
     DurableOperationsMixin,
     ReactiveInvestigationMixin,
     GovernanceMixin,
+    DecisionSupportCurrentnessMixin,
     DecisionSupportEvaluationMixin,
     AuditStore,
 ):

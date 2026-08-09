@@ -480,10 +480,31 @@ def _result_projection(
     *,
     evaluation_occurrence_id: str,
     evaluation_series_id: str,
+    identity_binding: Mapping[str, Any],
     published_at: str,
 ) -> dict[str, Any]:
+    from .decision_support_currentness import (
+        DecisionSupportCurrentnessUnavailable,
+        derive_advice_currentness_metadata,
+    )
+
     result = deepcopy(dict(evaluation))
     result.pop("content_hash", None)
+    try:
+        currentness_metadata = derive_advice_currentness_metadata(
+            result,
+            identity_binding,
+        )
+        metadata_state = currentness_metadata.get("advice_currentness_metadata_state")
+        if not isinstance(metadata_state, Mapping) or metadata_state.get("state") != "COMPLETE":
+            raise DecisionSupportCurrentnessUnavailable(
+                "Decision Support currentness metadata is incomplete"
+            )
+        result.update(currentness_metadata)
+    except DecisionSupportCurrentnessUnavailable as error:
+        raise DecisionSupportEvaluationUnavailable(
+            "Decision Support currentness metadata is unavailable"
+        ) from error
     result["decision_support_evaluation_id"] = evaluation_occurrence_id
     result["decision_support_evaluation_series_id"] = evaluation_series_id
     result["evaluation_published_at"] = published_at
@@ -895,6 +916,51 @@ class DecisionSupportEvaluationMixin:
                     "invalidation": deepcopy(record),
                 }
             )
+        currentness_operations: list[dict[str, Any]] = []
+        currentness_checks: list[dict[str, Any]] = []
+        currentness_claims: list[dict[str, Any]] = []
+        currentness_renders: list[dict[str, Any]] = []
+        currentness_consuming_results: list[dict[str, Any]] = []
+        for operation_row in connection.execute(
+            """
+            SELECT * FROM decision_support_currentness_operations
+            WHERE workspace_id = ? AND evaluation_series_id = ?
+            ORDER BY created_at, operation_occurrence_id
+            """,
+            (workspace_id, evaluation_series_id),
+        ).fetchall():
+            operation = self._currentness_operation_from_row(operation_row)  # type: ignore[attr-defined]
+            currentness_operations.append(operation)
+            check_row = connection.execute(
+                """
+                SELECT * FROM decision_support_currentness_checks
+                WHERE workspace_id = ? AND currentness_operation_key = ?
+                """,
+                (workspace_id, operation_row["currentness_operation_key"]),
+            ).fetchone()
+            if check_row is not None:
+                currentness_checks.append(
+                    self._currentness_check_from_row(check_row)  # type: ignore[attr-defined]
+                )
+            claim_row = connection.execute(
+                """
+                SELECT * FROM decision_support_currentness_terminal_claims
+                WHERE workspace_id = ? AND currentness_operation_key = ?
+                """,
+                (workspace_id, operation_row["currentness_operation_key"]),
+            ).fetchone()
+            if claim_row is not None:
+                claim = self._currentness_claim_from_row(claim_row)  # type: ignore[attr-defined]
+                currentness_claims.append(claim)
+                render, consuming_result = self._consuming_projection_from_claim_locked(  # type: ignore[attr-defined]
+                    connection,
+                    workspace_id=workspace_id,
+                    claim=claim,
+                )
+                if render is not None:
+                    currentness_renders.append(render)
+                if consuming_result is not None:
+                    currentness_consuming_results.append(consuming_result)
         return {
             "schema_version": DECISION_SUPPORT_READ_MODEL_SCHEMA_VERSION,
             "evaluation_series_id": evaluation_series_id,
@@ -904,6 +970,14 @@ class DecisionSupportEvaluationMixin:
             ),
             "head": head,
             "history": history,
+            "currentness": {
+                "schema_version": "decision-support-currentness-read-model.v2",
+                "operations": currentness_operations,
+                "checks": currentness_checks,
+                "terminal_claims": currentness_claims,
+                "render_results": currentness_renders,
+                "consuming_results": currentness_consuming_results,
+            },
         }
 
     def _publish_decision_support_evaluation_locked(
@@ -952,6 +1026,23 @@ class DecisionSupportEvaluationMixin:
             terminal = _mapping(record.get("terminal_result"))
             if terminal is None:
                 raise DecisionSupportEvaluationUnavailable
+            from .decision_support_currentness import (
+                DecisionSupportCurrentnessUnavailable,
+                derive_advice_currentness_metadata,
+            )
+
+            comparable_evaluation = deepcopy(dict(evaluation))
+            try:
+                comparable_evaluation.update(
+                    derive_advice_currentness_metadata(
+                        comparable_evaluation,
+                        identity_binding,
+                    )
+                )
+            except DecisionSupportCurrentnessUnavailable as error:
+                raise DecisionSupportEvaluationUnavailable(
+                    "Decision Support currentness metadata is unavailable"
+                ) from error
             if (
                 str(existing["evaluation_series_id"]) != evaluation_series_id
                 or record.get("identity_binding") != deepcopy(dict(identity_binding))
@@ -961,7 +1052,8 @@ class DecisionSupportEvaluationMixin:
                     and str(existing["evaluation_occurrence_id"])
                     != evaluation_occurrence_id
                 )
-                or _replay_comparable(terminal) != _replay_comparable(evaluation)
+                or _replay_comparable(terminal)
+                != _replay_comparable(comparable_evaluation)
             ):
                 raise DecisionSupportEvaluationConflict
             head = self._head_row_locked(
@@ -1009,6 +1101,7 @@ class DecisionSupportEvaluationMixin:
             evaluation,
             evaluation_occurrence_id=occurrence_id,
             evaluation_series_id=evaluation_series_id,
+            identity_binding=identity_binding,
             published_at=published_at,
         )
         result_hash = str(terminal["content_hash"])
@@ -1118,6 +1211,13 @@ class DecisionSupportEvaluationMixin:
             )
             if cursor.rowcount != 1:
                 raise DecisionSupportHeadRaceLost
+        self._replace_currentness_authority_locked(  # type: ignore[attr-defined]
+            connection,
+            workspace_id=workspace_id,
+            evaluation_series_id=evaluation_series_id,
+            dependencies=terminal.get("advice_currentness_dependency_set", []),
+            updated_at=created_at,
+        )
         head = self._head_row_locked(connection, workspace_id, evaluation_series_id)
         if head is None:
             raise DecisionSupportEvaluationUnavailable("evaluation head was not readable")

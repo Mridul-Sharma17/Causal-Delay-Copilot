@@ -808,6 +808,23 @@ export function DecisionSupportActionsStage({
     },
     {},
   );
+  const lifecycleCurrentness = asRecord(evaluationLifecycle?.currentness);
+  const currentnessChecks =
+    lifecycleCurrentness !== null && Array.isArray(lifecycleCurrentness.checks)
+      ? lifecycleCurrentness.checks
+          .map(asRecord)
+          .filter((item): item is Record<string, unknown> => item !== null)
+      : [];
+  const currentnessStates = currentnessChecks.reduce<Record<string, number>>(
+    (counts, item) => {
+      const outcome = item.currentness_outcome;
+      if (typeof outcome === "string") {
+        counts[outcome] = (counts[outcome] ?? 0) + 1;
+      }
+      return counts;
+    },
+    {},
+  );
 
   return (
     <section className="actions-stage" aria-labelledby="actions-stage-heading">
@@ -872,6 +889,9 @@ export function DecisionSupportActionsStage({
           </span>
           <span>
             Historical/currentness records: <code>{formatValue(lifecycleStates)}</code>
+          </span>
+          <span>
+            Currentness checks: <code>{formatValue(currentnessStates)}</code>
           </span>
         </div>
       )}

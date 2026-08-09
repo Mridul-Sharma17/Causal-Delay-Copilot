@@ -47,6 +47,12 @@ class AuditOccurrenceRequest(BaseModel):
         "BOOT_HEALTH_CHECK",
         "ANALYSIS_RUN_DELIVERY",
         "REFRESH_INVESTIGATION_SNAPSHOT",
+        "DECISION_SUPPORT_CURRENTNESS_OPERATION",
+        "DECISION_SUPPORT_CURRENTNESS_CHECK",
+        "DECISION_SUPPORT_CURRENT_ADVICE_RENDER_REQUEST",
+        "DECISION_SUPPORT_CURRENT_ADVICE_RENDER",
+        "DECISION_SUPPORT_CURRENTNESS_INVALIDATION",
+        "DECISION_SUPPORT_CURRENTNESS_CONSUMING_RESULT",
     ]
     outcome_code: Literal[
         "CORE_READY",
@@ -55,6 +61,15 @@ class AuditOccurrenceRequest(BaseModel):
         "FRESH_REPRODUCTION_REQUESTED",
         "REFRESH_ANALYSIS_REQUESTED",
         "REFRESH_SNAPSHOT_CREATED",
+        "CURRENT_ADVICE",
+        "CURRENTNESS_PROVEN_AT_CHECK",
+        "CURRENTNESS_NOT_AUTHORITATIVE_HEAD",
+        "CURRENTNESS_OPERATION",
+        "CURRENT_ADVICE_RENDER",
+        "ADVICE_CURRENTNESS_INVALIDATION",
+        "TRADEOFF_SELECTION_ACCEPTANCE",
+        "MANAGER_AUTHORIZATION",
+        "MONITORING_TRIGGER_MATCH",
     ]
 
 
@@ -92,6 +107,14 @@ class AuditOccurrenceViewResponse(BaseModel):
         "DECISION_BRIEF_SNAPSHOT",
         "DECISION_SUPPORT_EVALUATION",
         "DECISION_SUPPORT_INVALIDATION",
+        "DECISION_SUPPORT_CURRENTNESS_OPERATION",
+        "DECISION_SUPPORT_CURRENTNESS_CHECK",
+        "DECISION_SUPPORT_CURRENT_ADVICE_RENDER_REQUEST",
+        "DECISION_SUPPORT_CURRENT_ADVICE_RENDER",
+        "DECISION_SUPPORT_CURRENTNESS_INVALIDATION",
+        "DECISION_SUPPORT_CURRENTNESS_CONSUMING_RESULT",
+        "DECISION_SUPPORT_CURRENTNESS_SOURCE_OCCURRENCE",
+        "DECISION_SUPPORT_CURRENTNESS_AUTHORITY",
         "ANALYSIS_RUN_DELIVERY",
         "REFRESH_INVESTIGATION_SNAPSHOT",
     ]
@@ -145,6 +168,16 @@ class AuditOccurrenceViewResponse(BaseModel):
         "FRESH_REPRODUCTION_REQUESTED",
         "REFRESH_ANALYSIS_REQUESTED",
         "REFRESH_SNAPSHOT_CREATED",
+        "CURRENT_ADVICE",
+        "CURRENTNESS_PROVEN_AT_CHECK",
+        "CURRENTNESS_NOT_AUTHORITATIVE_HEAD",
+        "CURRENTNESS_OPERATION",
+        "CURRENT_ADVICE_RENDER",
+        "TRADEOFF_SELECTION_ACCEPTANCE",
+        "MANAGER_AUTHORIZATION",
+        "MONITORING_TRIGGER_MATCH",
+        "CURRENTNESS_SOURCE_REGISTERED",
+        "CURRENTNESS_AUTHORITY_UPDATED",
     ]
     created_at: datetime
     source_role_ceiling: SourceRoleCeilingResponse | None = None
@@ -249,6 +282,45 @@ class DecisionSupportInvalidationResponse(BaseModel):
 
     result: Literal["CREATED", "IDEMPOTENT_REPLAY"]
     invalidation: dict[str, Any]
+    head: dict[str, Any]
+
+
+class DecisionSupportCurrentnessRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    operation: dict[str, Any]
+
+
+class DecisionSupportCurrentAdviceRenderRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_identifier: Literal["current-advice-render-request"]
+    schema_version: Literal["1"]
+    render_mode: Literal["CURRENT_ADVICE"]
+    evaluation_series_id: str = Field(min_length=1, max_length=256)
+    evaluation_occurrence_id: str = Field(min_length=1, max_length=256)
+    evaluation_digest: str = Field(min_length=1, max_length=128)
+    terminal_result_ref_and_hash: DecisionSupportReferenceAndHash
+    advice_chain_kind: str = Field(min_length=1, max_length=128)
+    recommendation_ref_and_hash_or_null: DecisionSupportReferenceAndHash | None = None
+    accepted_selection_claim_ref_and_hash_or_null: DecisionSupportReferenceAndHash | None = None
+    advice_chain_published_at: str | dict[str, Any]
+    requested_at: str | dict[str, Any]
+    available_at: str | dict[str, Any]
+    render_request_occurrence_id: str | None = None
+    current_advice_render_request_key: str | None = None
+    content_hash: str | None = None
+
+
+class DecisionSupportCurrentnessResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    result: Literal["CREATED", "IDEMPOTENT_REPLAY"]
+    operation: dict[str, Any]
+    currentness: dict[str, Any]
+    terminal_claim: dict[str, Any]
+    render: dict[str, Any] | None = None
+    consuming_result: dict[str, Any] | None = None
     head: dict[str, Any]
 
 

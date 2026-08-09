@@ -12,6 +12,7 @@ from .audit import AuditIdempotencyConflict, AuditStoreUnavailable
 from .canonical import canonical_json as _canonical_json
 from .canonical import sha256 as _sha256
 from .decision_support import evaluate_decision_support
+from .decision_support_currentness import ensure_currentness_schema
 from .decision_support_heads import (
     DecisionSupportEvaluationUnavailable,
     ensure_decision_support_schema,
@@ -28,7 +29,7 @@ from .validity import (
 )
 
 
-GOVERNANCE_SCHEMA_VERSION = "governance.v2"
+GOVERNANCE_SCHEMA_VERSION = "governance.v4"
 DECISION_BRIEF_SNAPSHOT_SCHEMA_VERSION = "decision-brief-snapshot.v2"
 REPLAY_SCHEMA_VERSION = "replay.v1"
 
@@ -131,6 +132,7 @@ def ensure_governance_schema(connection: sqlite3.Connection, *, create: bool) ->
             """
         )
     ensure_decision_support_schema(connection, create=create)
+    ensure_currentness_schema(connection, create=create)
 
 
 def _as_utc(value: datetime) -> datetime:

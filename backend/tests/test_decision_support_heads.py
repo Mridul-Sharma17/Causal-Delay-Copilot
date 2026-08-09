@@ -64,6 +64,26 @@ def _evaluation(*, digest: str = "sha256:" + "a" * 64) -> dict[str, object]:
         "decision_support_evaluation_id": "calculated-evaluation-id",
         "decision_support_evaluation_series_id": "series-1",
         "decision_support_input_digest": digest,
+        "advice_currentness_dependency_set": [
+            {
+                "dependency_kind": "INTERVENTION_LIBRARY_VERSION",
+                "id": "core-intervention-library",
+                "version": "1",
+                "content_hash": "sha256:" + "6" * 64,
+                "consumed_disposition": "NOT_APPLICABLE",
+                "unique_unsuperseded_head": True,
+                "supported": True,
+            }
+        ],
+        "consumed_operational_horizons": [
+            {
+                "input_path": "operational_snapshot",
+                "reference": "constraints-1",
+                "content_hash": "sha256:" + "5" * 64,
+                "valid_through": "NO_EXPIRY",
+            }
+        ],
+        "advice_valid_through": "NO_EXPIRY",
         "options": [{"option_code": "PROTECTED_PRODUCTION_SLOT"}],
         "action_recommendation": {
             "occurrence_id": "recommendation-1",
@@ -82,6 +102,28 @@ def _store(tmp_path: Path) -> tuple[TestClient, str, LineageStore]:
     client.__enter__()
     workspace_id = client.get("/api/workspace").json()["workspace_id"]
     return client, workspace_id, client.app.state.audit_store
+
+
+def test_evaluation_publication_fails_closed_without_complete_currentness_metadata(
+    tmp_path: Path,
+) -> None:
+    client, workspace_id, store = _store(tmp_path)
+    try:
+        incomplete = _evaluation()
+        incomplete.pop("advice_currentness_dependency_set")
+        incomplete.pop("consumed_operational_horizons")
+        incomplete.pop("advice_valid_through")
+        with pytest.raises(DecisionSupportEvaluationUnavailable):
+            store.publish_decision_support_evaluation(
+                workspace_id,
+                idempotency_key="evaluation-without-currentness-metadata",
+                evaluation=incomplete,
+                identity_binding=_identity_binding(),
+                now=datetime(2026, 8, 9, 10, 1, tzinfo=timezone.utc),
+            )
+        assert store.get_decision_support_evaluation_head(workspace_id, "series-1") is None
+    finally:
+        client.__exit__(None, None, None)
 
 
 def test_evaluation_series_publishes_immutable_successors_and_read_states(

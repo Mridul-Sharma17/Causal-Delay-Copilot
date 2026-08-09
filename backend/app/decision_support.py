@@ -280,7 +280,7 @@ def _build_registry_inspection(
         "supersession_ref": None,
         "release_binding": deepcopy(release_binding),
     })
-    return {
+    inspection = {
         "inspection_kind": "GOVERNED_RECORD_INSPECTION",
         "effect_bearing": False,
         "consumed_by_evaluation": False,
@@ -297,6 +297,164 @@ def _build_registry_inspection(
         "monitoring_triggers": monitoring_triggers,
         "composite_reviews": [composite],
     }
+    inspection["advice_currentness_dependency_set"] = _registry_currentness_dependencies(
+        inspection
+    )
+    return inspection
+
+
+def _registry_currentness_dependencies(
+    registry: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    def dependency(
+        kind: str,
+        record: Mapping[str, Any],
+        *,
+        identifier: str,
+        version: str,
+        disposition: str,
+        lifecycle: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        fields = {
+            "dependency_kind": kind,
+            "reference": identifier,
+            "id": identifier,
+            "version": version,
+            "content_hash": record["content_hash"],
+            "consumed_disposition": disposition,
+        }
+        if lifecycle is not None:
+            fields.update(deepcopy(dict(lifecycle)))
+        current = deepcopy(dict(record))
+        current.update(
+            {
+                "id": identifier,
+                "version": version,
+                "content_hash": record["content_hash"],
+                "disposition": disposition,
+            }
+        )
+        if lifecycle is not None:
+            current.update(deepcopy(dict(lifecycle)))
+        fields["current"] = current
+        return fields
+
+    dependencies: list[dict[str, Any]] = []
+    policy = _mapping(registry.get("policy"))
+    if policy is not None:
+        dependencies.append(
+            dependency(
+                "GOVERNED_VERSION_ENVELOPE",
+                policy,
+                identifier=str(policy["identifier"]),
+                version=str(policy["version"]),
+                disposition=str(policy.get("state", "NOT_APPLICABLE")),
+            )
+        )
+    library = _mapping(registry.get("intervention_library"))
+    if library is not None:
+        dependencies.append(
+            dependency(
+                "INTERVENTION_LIBRARY_VERSION",
+                library,
+                identifier=str(library["identifier"]),
+                version=str(library["version"]),
+                disposition=str(library.get("state", "NOT_APPLICABLE")),
+                lifecycle={
+                    "unique_unsuperseded_head": True,
+                    "supported": True,
+                },
+            )
+        )
+    for option in registry.get("intervention_library", {}).get("options", []):
+        if not isinstance(option, Mapping):
+            continue
+        dependencies.append(
+            dependency(
+                "INTERVENTION_OPTION_VERSION",
+                option,
+                identifier=str(option["option_code"]),
+                version=str(option["option_version"]),
+                disposition=str(option.get("status", "NOT_APPLICABLE")),
+                lifecycle={
+                    "effective": True,
+                    "unique_unsuperseded_head": True,
+                    "supported_result": option.get("status") == "ACTIVE",
+                },
+            )
+        )
+    for record in registry.get("driver_action_links", []):
+        if not isinstance(record, Mapping):
+            continue
+        dependencies.append(
+            dependency(
+                "DRIVER_ACTION_LINK_VERSION",
+                record,
+                identifier=str(record["link_id"]),
+                version=str(record["link_version"]),
+                disposition=str(record.get("review_status", "NOT_APPLICABLE")),
+                lifecycle={
+                    "effective": True,
+                    "unique_unsuperseded_head": True,
+                    "supported_result": False,
+                },
+            )
+        )
+    for record in registry.get("advisory_rubrics", []):
+        if not isinstance(record, Mapping):
+            continue
+        dependencies.append(
+            dependency(
+                "ADVISORY_RUBRIC_VERSION",
+                record,
+                identifier=str(record["rubric_id"]),
+                version=str(record["rubric_version"]),
+                disposition=str(record.get("state", "NOT_APPLICABLE")),
+                lifecycle={
+                    "effective": True,
+                    "unique_unsuperseded_head": True,
+                    "applicable": True,
+                    "known_result": False,
+                },
+            )
+        )
+    for record in registry.get("monitoring_triggers", []):
+        if not isinstance(record, Mapping):
+            continue
+        dependencies.append(
+            dependency(
+                "MONITORING_ESCALATION_TRIGGER_VERSION",
+                record,
+                identifier=str(record["trigger_id"]),
+                version=str(record["trigger_version"]),
+                disposition=str(record.get("state", "NOT_APPLICABLE")),
+                lifecycle={
+                    "effective": True,
+                    "unique_unsuperseded_head": True,
+                    "applicable": True,
+                    "supported_result": False,
+                },
+            )
+        )
+    for record in registry.get("composite_reviews", []):
+        if not isinstance(record, Mapping):
+            continue
+        dependencies.append(
+            dependency(
+                "COMPOSITE_COMPATIBILITY_REVIEW_VERSION",
+                record,
+                identifier=str(record.get("review_id", record.get("option_code"))),
+                version=str(record.get("review_version", "1")),
+                disposition=str(record.get("review_status", "NOT_APPLICABLE")),
+                lifecycle={
+                    "effective": True,
+                    "unique_unsuperseded_head": True,
+                    "satisfied_result": False,
+                    "fully_specified": True,
+                },
+            )
+        )
+    return dependencies
 
 
 def _mapping(value: object) -> Mapping[str, Any] | None:
@@ -583,6 +741,8 @@ def _base_result(
         "monitoring": {"state": "NOT_EVALUATED"},
         "drafting": {"state": "NOT_PERMITTED"},
         "authorization": {"state": "NOT_PERMITTED"},
+        "consumed_operational_horizons": [],
+        "advice_valid_through": "NO_EXPIRY",
         "consumed_inputs": ["permission_envelope"],
     }
 

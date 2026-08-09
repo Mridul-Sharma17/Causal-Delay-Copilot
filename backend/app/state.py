@@ -21,7 +21,7 @@ from .settings import Settings
 from .workspace import DEMO_WORKSPACE_SCHEMA_VERSION, ensure_workspace_schema
 
 
-CORE_STATE_SCHEMA_VERSION = "core-state.v9"
+CORE_STATE_SCHEMA_VERSION = "core-state.v11"
 RELEASE_IDENTITY_SCHEMA_VERSION = "release-identity.v1"
 QUOTA_POLICY_SCHEMA_VERSION = "quota-policy.v1"
 VALIDATED_REFERENCE_PARTITION_SCHEMA_VERSION = "validated-reference-partition.v1"
