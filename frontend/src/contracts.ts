@@ -45,6 +45,11 @@ export type DecisionSupportSuppressionReason = {
   category: string;
   priority: number;
   reason: string;
+  constraint_rule_priority?: number;
+  rule_code?: string;
+  option_scope?: string;
+  explanation_code?: string;
+  evidence_refs?: unknown[];
 };
 
 export type DecisionSupportOption = Record<string, unknown> & {
@@ -55,6 +60,8 @@ export type DecisionSupportOption = Record<string, unknown> & {
   evidence_tags: DecisionSupportEvidenceTags;
   action_effect_evidence: string;
   suppression_reasons: DecisionSupportSuppressionReason[];
+  constraint_results?: Array<Record<string, unknown>>;
+  provenance?: Record<string, unknown>;
 };
 
 export type DecisionSupportRegistryInspection = Record<string, unknown> & {
@@ -62,7 +69,10 @@ export type DecisionSupportRegistryInspection = Record<string, unknown> & {
   effect_bearing: false;
   consumed_by_evaluation: false;
   release_binding: {
-    state: "BUNDLED_RELEASE_BOUND" | "RELEASE_BINDING_UNAVAILABLE";
+    state:
+      | "BUNDLED_RELEASE_BOUND"
+      | "RELEASE_BINDING_UNAVAILABLE"
+      | "TEST_ONLY_NOT_SHIPPED";
     release_candidate_id: string | null;
     runtime_fingerprint_digest: string | null;
   };
@@ -75,6 +85,7 @@ export type DecisionSupportBoundary = Record<string, unknown> & {
     | "not_permitted"
     | "inactive_driver"
     | "approval_dependent_suppressed"
+    | "constraints_evaluated"
     | "unavailable";
   primary_reason_code: string | null;
   reason: string | null;
@@ -1153,6 +1164,7 @@ function parseDecisionSupportReason(value: unknown): DecisionSupportSuppressionR
     throw new Error("invalid Decision Support suppression reason");
   }
   return {
+    ...value,
     code: value.code,
     category: value.category,
     priority: value.priority,
@@ -1197,6 +1209,7 @@ function parseDecisionSupportBoundary(value: unknown): DecisionSupportBoundary {
     (value.state !== "not_permitted" &&
       value.state !== "inactive_driver" &&
       value.state !== "approval_dependent_suppressed" &&
+      value.state !== "constraints_evaluated" &&
       value.state !== "unavailable") ||
     (value.primary_reason_code !== null && typeof value.primary_reason_code !== "string") ||
     (value.reason !== null && typeof value.reason !== "string") ||
@@ -1229,7 +1242,11 @@ function parseDecisionSupportBoundary(value: unknown): DecisionSupportBoundary {
       typeof item.option_version !== "string" ||
       typeof item.label !== "string" ||
       typeof item.evaluation_state !== "string" ||
-      typeof item.action_effect_evidence !== "string"
+      typeof item.action_effect_evidence !== "string" ||
+      (item.constraint_results !== undefined &&
+        (!Array.isArray(item.constraint_results) ||
+          !item.constraint_results.every(isRecord))) ||
+      (item.provenance !== undefined && !isRecord(item.provenance))
     ) {
       throw new Error("invalid Decision Support option");
     }
@@ -1288,7 +1305,8 @@ function parseDecisionSupportRegistry(
     value.consumed_by_evaluation !== false ||
     !isRecord(value.release_binding) ||
     (value.release_binding.state !== "BUNDLED_RELEASE_BOUND" &&
-      value.release_binding.state !== "RELEASE_BINDING_UNAVAILABLE") ||
+      value.release_binding.state !== "RELEASE_BINDING_UNAVAILABLE" &&
+      value.release_binding.state !== "TEST_ONLY_NOT_SHIPPED") ||
     (value.release_binding.release_candidate_id !== null &&
       typeof value.release_binding.release_candidate_id !== "string") ||
     (value.release_binding.runtime_fingerprint_digest !== null &&

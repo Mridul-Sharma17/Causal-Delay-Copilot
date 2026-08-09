@@ -799,6 +799,7 @@ def evaluate_decision_support(
     intended_role: str,
     release_candidate_id: str | None = None,
     runtime_fingerprint_digest: str | None = None,
+    synthetic_conformance: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Project the shipped Decision Support boundary without authorizing action."""
 
@@ -813,7 +814,12 @@ def evaluate_decision_support(
         "population_verdict": population_verdict,
         "intended_role": intended_role,
     }
-    if is_synthetic_fixture_identity(identity_envelope):
+    synthetic_conformance_allowed = bool(
+        isinstance(synthetic_conformance, Mapping)
+        and is_synthetic_fixture_identity(synthetic_conformance)
+        and is_synthetic_fixture_identity(identity_envelope)
+    )
+    if is_synthetic_fixture_identity(identity_envelope) and not synthetic_conformance_allowed:
         permission = {
             "decision_support_evaluation_permitted": False,
             "denial_reason_code": "SYNTHETIC_FIXTURE_NOT_SHIPPED",
@@ -968,6 +974,43 @@ def evaluate_decision_support(
         )
         return _with_content_hash(result)
 
+    if synthetic_conformance is not None:
+        if not synthetic_conformance_allowed:
+            reason = (
+                "The synthetic conformance context is missing its test-only identity "
+                "binding."
+            )
+            result.update(
+                {
+                    "outcome": "FAILED",
+                    "state": "unavailable",
+                    "primary_reason_code": "DECISION_SUPPORT_INPUT_SCHEMA_INVALID",
+                    "reason": reason,
+                    "next_step": "Use the isolated synthetic conformance harness with its bound fixture pack.",
+                    "suppression_reasons": [
+                        {
+                            "code": "DECISION_SUPPORT_INPUT_SCHEMA_INVALID",
+                            "category": "INPUT",
+                            "priority": 100,
+                            "reason": reason,
+                        }
+                    ],
+                }
+            )
+            return _with_content_hash(result)
+        from .decision_support_constraints import evaluate_active_synthetic_conformance
+
+        result = evaluate_active_synthetic_conformance(
+            result=result,
+            investigation_request=investigation_request,
+            subject_applicability=subject_applicability,
+            subject_verdict=subject_verdict,
+            population_verdict=population_verdict,
+            driver_state=driver_state,
+            synthetic_conformance=synthetic_conformance,
+        )
+        return _with_content_hash(result)
+
     release_binding = _mapping(registry_inspection.get("release_binding"))
     if release_binding is None or release_binding.get("state") != "BUNDLED_RELEASE_BOUND":
         reason = (
@@ -1071,3 +1114,18 @@ def evaluate_decision_support(
         }
     )
     return _with_content_hash(result)
+
+
+def evaluate_synthetic_decision_support_fixture(
+    *,
+    fixture_case: Mapping[str, Any],
+    governed_records: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Evaluate one isolated synthetic conformance fixture through the public seam."""
+
+    from .decision_support_constraints import evaluate_synthetic_fixture
+
+    return evaluate_synthetic_fixture(
+        fixture_case=fixture_case,
+        governed_records=governed_records,
+    )

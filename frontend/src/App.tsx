@@ -515,6 +515,8 @@ function decisionSupportStateLabel(state: DecisionSupportBoundary["state"]): str
       return "Inactive driver — no option evaluated";
     case "approval_dependent_suppressed":
       return "Approval-dependent paths suppressed";
+    case "constraints_evaluated":
+      return "Constraint evaluation complete";
     case "unavailable":
       return "Decision Support unavailable";
   }
@@ -585,6 +587,16 @@ function DecisionSupportActionsStage({
       value: "composite_reviews" in registry ? registry.composite_reviews : null,
       records: Array.isArray(registry.composite_reviews)
         ? registry.composite_reviews.filter(
+            (record): record is Record<string, unknown> =>
+              typeof record === "object" && record !== null,
+          )
+        : [],
+    },
+    {
+      label: "Constraint Rules",
+      value: "constraint_rules" in registry ? registry.constraint_rules : null,
+      records: Array.isArray(registry.constraint_rules)
+        ? registry.constraint_rules.filter(
             (record): record is Record<string, unknown> =>
               typeof record === "object" && record !== null,
           )
@@ -685,6 +697,54 @@ function DecisionSupportActionsStage({
                 </div>
               </li>
             ))}
+          </ul>
+        </div>
+      )}
+
+      {boundary.options.some(
+        (option) =>
+          (option.constraint_results?.length ?? 0) > 0 ||
+          option.provenance !== undefined,
+      ) && (
+        <div className="action-constraint-results">
+          <strong>Typed constraint outcomes and provenance</strong>
+          <ul>
+            {boundary.options.map((option) => {
+              const results = option.constraint_results ?? [];
+              if (results.length === 0 && option.provenance === undefined) {
+                return null;
+              }
+              return (
+                <li key={`${option.option_code}-constraints`}>
+                  <strong>{option.option_code}</strong>
+                  <ul>
+                    {results.length === 0 ? (
+                      <li>
+                        <code>NOT_EVALUATED</code>
+                        <span>No rule result was produced before this option was suppressed.</span>
+                      </li>
+                    ) : (
+                      results.map((rule, index) => (
+                        <li key={`${String(rule.rule_code ?? "rule")}-${index}`}>
+                          <code>
+                            {String(rule.rule_code ?? "UNKNOWN_RULE")} / {String(rule.status ?? "UNKNOWN")}
+                          </code>
+                          <span>
+                            {String(rule.explanation_code ?? "No explanation code")} / scope {String(rule.option_scope ?? "Unavailable")}
+                          </span>
+                        </li>
+                      ))
+                    )}
+                  </ul>
+                  {option.provenance !== undefined && (
+                    <details className="option-provenance">
+                      <summary>Inspect option provenance</summary>
+                      <code>{formatValue(option.provenance)}</code>
+                    </details>
+                  )}
+                </li>
+              );
+            })}
           </ul>
         </div>
       )}
