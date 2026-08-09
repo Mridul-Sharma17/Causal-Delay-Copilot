@@ -1,0 +1,1 @@
+{"fixture_id":"fixture_overlap_and_subject","expected_branch":"estimated","expected_paths":["subject_support","sensitivity_results"],"expected_facts":["inclusive_0.10_and_0.90_support","ten_subject_propensities","no_individualized_effect"],"numeric_tolerances":{"abs":1e-10,"rel":1e-8}}

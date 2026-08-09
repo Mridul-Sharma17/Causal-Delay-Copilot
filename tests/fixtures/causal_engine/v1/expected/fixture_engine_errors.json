@@ -1,0 +1,1 @@
+{"fixture_id":"fixture_engine_errors","expected_branch":"failed","expected_paths":["safe_detail"],"expected_facts":["no_consumable_primary_result","safe_detail_only"],"expected_primary_code":"ENGINE_COMPARISON_FIT_FAILED","numeric_tolerances":{"abs":1e-10,"rel":1e-8}}

@@ -683,7 +683,34 @@ function FreshRunDetailPanel({
             typeof entry[1] === "object" && entry[1] !== null && !Array.isArray(entry[1]),
         )
       : [];
-  const sensitivityLabel = (variantId: string): string => {
+  const comparisonEntries =
+    primaryResult !== null &&
+    primaryResult !== undefined &&
+    typeof primaryResult.comparison_results === "object" &&
+    primaryResult.comparison_results !== null &&
+    !Array.isArray(primaryResult.comparison_results)
+      ? Object.entries(primaryResult.comparison_results).filter(
+          (entry): entry is [string, Record<string, unknown>] =>
+            typeof entry[1] === "object" && entry[1] !== null && !Array.isArray(entry[1]),
+        )
+      : [];
+  const subjectSupport =
+    primaryResult !== null &&
+    primaryResult !== undefined &&
+    typeof primaryResult.subject_support === "object" &&
+    primaryResult.subject_support !== null &&
+    !Array.isArray(primaryResult.subject_support)
+      ? (primaryResult.subject_support as Record<string, unknown>)
+      : null;
+  const sensitivityLabel = (estimandId: string, variantId: string): string => {
+    switch (estimandId) {
+      case "sensitivity_late_risk_atte":
+        return "Binary late-outcome risk difference";
+      case "sensitivity_continuous_load_slope":
+        return "Continuous-load slope";
+      default:
+        break;
+    }
     switch (variantId) {
       case "stricter_threshold":
         return "Stricter threshold";
@@ -795,15 +822,24 @@ function FreshRunDetailPanel({
               const hasEstimate = typeof effect.estimate === "number";
               return (
                 <li key={estimandId}>
-                  <strong>{sensitivityLabel(variantId)}</strong> · <code>{status}</code>
+                  <strong>{sensitivityLabel(estimandId, variantId)}</strong> · <code>{status}</code>
                   <dl className="risk-facts">
                     <div>
                       <dt>Result</dt>
-                      <dd>
-                        {hasEstimate
-                          ? `${String(effect.estimate ?? "Unavailable")} days · 95% interval ${effectInterval(effect)}`
-                          : String(sensitivity.reason_code ?? "No estimate published")}
-                      </dd>
+                      <dd>{hasEstimate ? (() => {
+                        const displayTransform =
+                          typeof effect.display_transform === "object" &&
+                          effect.display_transform !== null &&
+                          !Array.isArray(effect.display_transform)
+                            ? (effect.display_transform as Record<string, unknown>)
+                            : null;
+                        const displayEstimate = displayTransform?.estimate ?? effect.estimate;
+                        const displayUnit =
+                          displayTransform?.display_unit ?? effect.unit ?? "days";
+                        const displayLower = displayTransform?.ci_lower ?? effect.ci_lower;
+                        const displayUpper = displayTransform?.ci_upper ?? effect.ci_upper;
+                        return `${String(displayEstimate ?? "Unavailable")} ${String(displayUnit)} · 95% interval ${String(displayLower ?? "Unavailable")} to ${String(displayUpper ?? "Unavailable")}`;
+                      })() : String(sensitivity.reason_code ?? "No estimate published")}</dd>
                     </div>
                     <div>
                       <dt>Threshold rule</dt>
@@ -838,6 +874,90 @@ function FreshRunDetailPanel({
               );
             })}
           </ul>
+        </section>
+      )}
+      {comparisonEntries.length > 0 && (
+        <section
+          className="operation-detail sensitivity-detail"
+          aria-label="Descriptive comparison diagnostics"
+        >
+          <p className="eyebrow">Descriptive comparison diagnostics</p>
+          <p className="supporting-copy">
+            These registered comparisons use the primary cohort for triangulation. They are
+            descriptive diagnostics and never replace the primary DoubleML estimand.
+          </p>
+          <ul className="status-list">
+            {comparisonEntries.map(([comparisonId, comparison]) => (
+              <li key={comparisonId}>
+                <strong>{comparisonId}</strong> · {String(comparison.model_class ?? "model")}
+                <dl className="risk-facts">
+                  <div>
+                    <dt>Exposure coefficient</dt>
+                    <dd>
+                      {String(comparison.estimate ?? "Unavailable")} days · 95% interval {String(
+                        comparison.ci_lower ?? "Unavailable",
+                      )} to {String(comparison.ci_upper ?? "Unavailable")}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Clustered inference</dt>
+                    <dd>
+                      {String(comparison.cluster_key ?? "Unavailable")} · df {String(
+                        comparison.inference_df ?? "Unavailable",
+                      )} · corrected t interval
+                    </dd>
+                  </div>
+                </dl>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+      {subjectSupport !== null && (
+        <section className="operation-detail sensitivity-detail" aria-label="Subject support output">
+          <p className="eyebrow">Subject support output</p>
+          <p className="supporting-copy">
+            Population evidence is not relabelled as an individualized effect. This output only
+            reports whether the subject is supported by the registered population overlap checks.
+          </p>
+          <dl className="risk-facts">
+            <div>
+              <dt>Subject state</dt>
+              <dd>{String(subjectSupport.state ?? "unavailable")} · {String(subjectSupport.reason_code ?? "no reason")}</dd>
+            </div>
+            <div>
+              <dt>Propensity support</dt>
+              <dd><code>{formatValue(subjectSupport.propensity)}</code></dd>
+            </div>
+            <div>
+              <dt>Subject profile</dt>
+              <dd><code>{formatValue(subjectSupport.subject_profile)}</code></dd>
+            </div>
+            <div>
+              <dt>Exposure record</dt>
+              <dd>
+                <code>
+                  {formatValue(subjectSupport.canonical_exposure ?? subjectSupport.provisional_exposure_preview)}
+                </code>
+              </dd>
+            </div>
+            <div>
+              <dt>Overlap</dt>
+              <dd><code>{formatValue(subjectSupport.overlap)}</code></dd>
+            </div>
+            <div>
+              <dt>Distribution support</dt>
+              <dd><code>{formatValue(subjectSupport.distribution_support)}</code></dd>
+            </div>
+            <div>
+              <dt>Eligibility codes</dt>
+              <dd><code>{formatValue(subjectSupport.eligibility_codes)}</code></dd>
+            </div>
+            <div>
+              <dt>Evidence references</dt>
+              <dd><code>{formatValue(subjectSupport.evidence_refs)}</code></dd>
+            </div>
+          </dl>
         </section>
       )}
     </>

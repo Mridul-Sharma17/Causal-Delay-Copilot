@@ -1,0 +1,1 @@
+{"fixture_id":"fixture_continuous_load","expected_branch":"estimated","expected_paths":["sensitivity_results.sensitivity_continuous_load_slope"],"expected_facts":["sensitivity_continuous_load_slope","linear_average_slope","display_scale_0.10"],"numeric_tolerances":{"abs":1e-10,"rel":1e-8}}

@@ -1,0 +1,1 @@
+{"fixture_id":"fixture_constant_effect","expected_branch":"estimated","expected_paths":["primary_atte","context_ate","comparison_results","sensitivity_results"],"expected_facts":["primary_atte","context_ate","four_comparisons","repeat_results"],"numeric_tolerances":{"abs":1e-10,"rel":1e-8}}

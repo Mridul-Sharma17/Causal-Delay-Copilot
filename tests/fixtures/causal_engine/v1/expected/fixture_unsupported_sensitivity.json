@@ -1,0 +1,1 @@
+{"fixture_id":"fixture_unsupported_sensitivity","expected_branch":"estimated","expected_paths":["primary_atte","sensitivity_results.sensitivity_late_risk_atte"],"expected_facts":["primary_preserved","sensitivity_late_risk_atte_unsupported"],"expected_secondary_codes":["COHORT_SUPPORT_INSUFFICIENT"],"numeric_tolerances":{"abs":1e-10,"rel":1e-8}}

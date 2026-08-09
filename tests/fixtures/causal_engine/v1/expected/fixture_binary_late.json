@@ -1,0 +1,1 @@
+{"fixture_id":"fixture_binary_late","expected_branch":"estimated","expected_paths":["sensitivity_results.sensitivity_late_risk_atte"],"expected_facts":["sensitivity_late_risk_atte","absolute_probability","display_scale_100"],"numeric_tolerances":{"abs":1e-10,"rel":1e-8}}

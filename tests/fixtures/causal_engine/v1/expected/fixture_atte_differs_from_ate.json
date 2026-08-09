@@ -1,0 +1,1 @@
+{"fixture_id":"fixture_atte_differs_from_ate","expected_branch":"estimated","expected_paths":["primary_atte","context_ate","shared_nuisance"],"expected_facts":["atte_and_ate_are_distinct_scores","shared_nuisance_identity"],"numeric_tolerances":{"abs":1e-10,"rel":1e-8}}

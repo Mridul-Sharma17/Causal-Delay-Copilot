@@ -1,0 +1,1 @@
+{"fixture_id":"fixture_comparisons","expected_branch":"estimated","expected_paths":["comparison_results"],"expected_facts":["naive_mean_difference","covariate_ols","normalized_ipw_atte","supplier_fe_ols","supplier_clustered_t_inference"],"numeric_tolerances":{"abs":1e-10,"rel":1e-8}}

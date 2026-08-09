@@ -39,6 +39,19 @@ SENSITIVITY_ESTIMAND_IDS = {
     "short_history": "sensitivity_short_history_atte_slippage",
     "long_history": "sensitivity_long_history_atte_slippage",
 }
+LATE_SENSITIVITY_ESTIMAND_ID = "sensitivity_late_risk_atte"
+CONTINUOUS_LOAD_SENSITIVITY_ESTIMAND_ID = "sensitivity_continuous_load_slope"
+SECONDARY_ESTIMAND_IDS = (
+    *SENSITIVITY_ESTIMAND_IDS.values(),
+    LATE_SENSITIVITY_ESTIMAND_ID,
+    CONTINUOUS_LOAD_SENSITIVITY_ESTIMAND_ID,
+)
+COMPARISON_IDS = (
+    "naive_mean_difference",
+    "covariate_ols",
+    "normalized_ipw_atte",
+    "supplier_fe_ols",
+)
 ALLOWED_ROLES = frozenset(
     {"semi_synthetic_hero", "out_of_domain_validation", "rejection_vignette"}
 )
@@ -100,6 +113,15 @@ THREAD_VARIABLES = (
 )
 NUMERIC_ADJUSTMENT_FIELDS = frozenset({"quantity", "value"})
 VALUE_STATES = ("present", "missing", "not_applicable", "unknown", "redacted")
+CATEGORICAL_ADJUSTMENT_VOCABULARIES = {
+    "material_class": ["class-a", "class-b"],
+    "complexity_class": ["standard", "complex"],
+    "project_id": ["project-a", "project-b"],
+    "project_phase": ["substructure", "fitout"],
+    "urgency_class": ["normal", "urgent"],
+    "geography_code": ["north", "south"],
+    "contract_form": ["lump-sum", "remeasure"],
+}
 PROPENSITY_FAILURE_CODES = frozenset(
     {
         "ENGINE_FEATURE_CONTRACT_VIOLATION",
@@ -114,6 +136,7 @@ PROPENSITY_ABSTENTION_CODES = frozenset({"OVERLAP_COHORT_INSUFFICIENT"})
 ESTIMATOR_FAILURE_CODES = frozenset(
     {
         "ENGINE_ESTIMATOR_FIT_FAILED",
+        "ENGINE_COMPARISON_FIT_FAILED",
         "ENGINE_FEATURE_CONTRACT_VIOLATION",
         "ENGINE_INPUT_INTEGRITY_MISMATCH",
         "ENGINE_INPUT_SCHEMA_UNSUPPORTED",
@@ -627,18 +650,51 @@ def _subject_input(
         if isinstance(eligibility_subject, Mapping)
         else "unavailable"
     )
+    if state != "eligible":
+        return {
+            "state": "scientifically_unavailable",
+            "subject_id": subject_id,
+            "eligibility_codes": deepcopy(
+                eligibility_subject.get("eligibility_codes", [])
+                if isinstance(eligibility_subject, Mapping)
+                else []
+            ),
+            "scientific_code": (
+                eligibility_subject.get("reason_code")
+                if isinstance(eligibility_subject, Mapping)
+                else "COHORT_SUPPORT_INSUFFICIENT"
+            ),
+            "evidence_refs": sorted({str(ref) for ref in evidence_refs}),
+        }
+    profile = {
+        "supplier_id": deepcopy(analytical.get("supplier_id")),
+        "adjustment_inputs": deepcopy(analytical.get("adjustment_inputs", {})),
+        "original_promise": deepcopy(analytical.get("original_promise")),
+        "subject_exclusion_identity": subject_id,
+        "decision_cutoff": deepcopy(causal_input.get("decision_cutoff")),
+        "observation_cutoff": deepcopy(causal_input.get("observation_cutoff")),
+        "target_milestone_kind": deepcopy(causal_input.get("target_milestone_kind")),
+    }
+    load_exposure = causal_input.get("supplier_load_exposure")
+    if isinstance(load_exposure, Mapping):
+        primary_exposure = load_exposure.get("primary")
+        if isinstance(primary_exposure, Mapping):
+            trigger_mode = investigation_request.get("trigger_mode")
+            if isinstance(trigger_mode, str):
+                profile[
+                    "provisional_exposure_preview"
+                    if trigger_mode == "proactive"
+                    else "canonical_exposure"
+                ] = deepcopy(dict(primary_exposure))
     return {
-        "state": "eligible" if state == "eligible" else "scientifically_unavailable",
+        "state": "eligible",
         "subject_id": subject_id,
-        "profile": {
-            "supplier_id": deepcopy(analytical.get("supplier_id")),
-            "adjustment_inputs": deepcopy(analytical.get("adjustment_inputs", {})),
-            "original_promise": deepcopy(analytical.get("original_promise")),
-            "subject_exclusion_identity": subject_id,
-            "decision_cutoff": deepcopy(causal_input.get("decision_cutoff")),
-            "observation_cutoff": deepcopy(causal_input.get("observation_cutoff")),
-            "target_milestone_kind": deepcopy(causal_input.get("target_milestone_kind")),
-        },
+        "profile": profile,
+        "eligibility_codes": deepcopy(
+            eligibility_subject.get("eligibility_codes", [])
+            if isinstance(eligibility_subject, Mapping)
+            else []
+        ),
         "scientific_code": (
             eligibility_subject.get("reason_code")
             if isinstance(eligibility_subject, Mapping)
@@ -738,6 +794,11 @@ def build_suite_request_from_investigation(
                 "logical_type": "typed_value",
                 "estimation_encoding": "explicit_state_preserving",
                 "pre_treatment": True,
+                **(
+                    {"categories": deepcopy(CATEGORICAL_ADJUSTMENT_VOCABULARIES[name])}
+                    if name in CATEGORICAL_ADJUSTMENT_VOCABULARIES
+                    else {}
+                ),
             }
             for name in ADJUSTMENT_SET_FIELDS
         ],
@@ -808,6 +869,12 @@ def build_suite_request_from_investigation(
                 "evidence_refs": sorted({str(ref) for ref in evidence_refs}),
             }
         variant_inputs.append(variant)
+    subject_input = _subject_input(
+        investigation_request,
+        causal_input,
+        eligibility,
+        evidence_refs,
+    )
     suite: dict[str, Any] = {
         "engine_input_schema_version": ENGINE_INPUT_SCHEMA_VERSION,
         "engine_output_schema_version": ENGINE_OUTPUT_SCHEMA_VERSION,
@@ -830,9 +897,10 @@ def build_suite_request_from_investigation(
         "adjustment_set": adjustment_set,
         "propensity_spec": _propensity_spec(adjustment_set),
         "root_seed": root_seed,
-        "subject": _subject_input(investigation_request, causal_input, eligibility, evidence_refs),
         "evidence_refs": evidence_refs,
     }
+    if subject_input is not None:
+        suite["subject"] = subject_input
     return suite
 
 
@@ -1976,6 +2044,20 @@ def _outcome_regressor(seed: int) -> Any:
     return HistGradientBoostingRegressor(**parameters)
 
 
+def _outcome_classifier(seed: int) -> Any:
+    from sklearn.ensemble import HistGradientBoostingClassifier
+
+    parameters = _propensity_learner_parameters()
+    parameters.update(
+        {
+            "loss": "log_loss",
+            "class_weight": None,
+            "random_state": seed,
+        }
+    )
+    return HistGradientBoostingClassifier(**parameters)
+
+
 def _variant_rows_and_layout(
     request: Mapping[str, Any],
     propensity_stage: Mapping[str, Any],
@@ -2171,6 +2253,9 @@ def _fit_variant_outcome_nuisances(
     layout: Any,
     retained_ids: Sequence[str],
     variant_stage: Mapping[str, Any],
+    *,
+    outcome_field: str = "supplier_milestone_slippage_days",
+    outcome_kind: str = "continuous",
 ) -> dict[str, Any]:
     import numpy as np
     from threadpoolctl import threadpool_limits
@@ -2179,10 +2264,20 @@ def _fit_variant_outcome_nuisances(
         matrix = layout.transform(rows)
     except PropensityStageError as error:
         raise EstimatorStageError(error.code) from None
-    outcome = np.asarray(
-        [float(row["supplier_milestone_slippage_days"]) for row in rows],
-        dtype=np.float64,
-    )
+    if outcome_kind not in {"continuous", "binary"}:
+        raise EstimatorStageError("ENGINE_FEATURE_CONTRACT_VIOLATION")
+    if outcome_kind == "binary":
+        if not all(isinstance(row.get(outcome_field), bool) for row in rows):
+            raise EstimatorStageError("ENGINE_FEATURE_CONTRACT_VIOLATION")
+        outcome = np.asarray(
+            [1.0 if bool(row[outcome_field]) else 0.0 for row in rows],
+            dtype=np.float64,
+        )
+    else:
+        outcome = np.asarray(
+            [float(row[outcome_field]) for row in rows],
+            dtype=np.float64,
+        )
     exposure = np.asarray(
         [1 if bool(row["high_load_exposure"]) else 0 for row in rows],
         dtype=np.int8,
@@ -2283,6 +2378,19 @@ def _fit_variant_outcome_nuisances(
 
     g0 = np.full((len(rows), 2), np.nan, dtype=np.float64)
     g1 = np.full((len(rows), 2), np.nan, dtype=np.float64)
+    learner_factory = (
+        _outcome_classifier if outcome_kind == "binary" else _outcome_regressor
+    )
+    unexposed_component = (
+        "binary_outcome_learner_unexposed"
+        if outcome_kind == "binary"
+        else "outcome_learner_unexposed"
+    )
+    exposed_component = (
+        "binary_outcome_learner_exposed"
+        if outcome_kind == "binary"
+        else "outcome_learner_exposed"
+    )
     with threadpool_limits(limits=1):
         for repeat_index, repeat_smpls in enumerate(all_smpls):
             for fold_index, (train, test) in enumerate(repeat_smpls):
@@ -2291,28 +2399,36 @@ def _fit_variant_outcome_nuisances(
                 if len(train_unexposed) == 0 or len(train_exposed) == 0:
                     raise EstimatorStageError("ENGINE_SPLIT_INFEASIBLE")
                 try:
-                    unexposed_model = _outcome_regressor(
+                    unexposed_model = learner_factory(
                         _stage_seed(
                             request,
                             variant_id=variant_id,
                             repeat_index=repeat_index,
                             outer_fold_index=fold_index,
-                            component="outcome_learner_unexposed",
+                            component=unexposed_component,
                         )
                     )
-                    exposed_model = _outcome_regressor(
+                    exposed_model = learner_factory(
                         _stage_seed(
                             request,
                             variant_id=variant_id,
                             repeat_index=repeat_index,
                             outer_fold_index=fold_index,
-                            component="outcome_learner_exposed",
+                            component=exposed_component,
                         )
                     )
                     unexposed_model.fit(matrix[train_unexposed], outcome[train_unexposed])
                     exposed_model.fit(matrix[train_exposed], outcome[train_exposed])
-                    g0[test, repeat_index] = unexposed_model.predict(matrix[test])
-                    g1[test, repeat_index] = exposed_model.predict(matrix[test])
+                    if outcome_kind == "binary":
+                        g0[test, repeat_index] = unexposed_model.predict_proba(
+                            matrix[test]
+                        )[:, 1]
+                        g1[test, repeat_index] = exposed_model.predict_proba(
+                            matrix[test]
+                        )[:, 1]
+                    else:
+                        g0[test, repeat_index] = unexposed_model.predict(matrix[test])
+                        g1[test, repeat_index] = exposed_model.predict(matrix[test])
                 except EstimatorStageError:
                     raise
                 except Exception:
@@ -2325,7 +2441,10 @@ def _fit_variant_outcome_nuisances(
         raise EstimatorStageError("ENGINE_NUISANCE_PREDICTION_INVALID")
     return {
         "matrix": matrix,
+        "rows": deepcopy(list(rows)),
         "outcome": outcome,
+        "outcome_field": outcome_field,
+        "outcome_kind": outcome_kind,
         "exposure": exposure,
         "groups": groups,
         "cohort_identity_hash": variant_stage["s9"].get("identity_hash"),
@@ -2347,6 +2466,8 @@ def _fit_variant_irm(
     nuisances: Mapping[str, Any],
     *,
     score: str,
+    outcome_field: str = "supplier_milestone_slippage_days",
+    outcome_kind: str = "continuous",
 ) -> Any:
     from doubleml import DoubleMLClusterData, DoubleMLIRM
     from doubleml.utils.propensity_score_processing import PSProcessorConfig
@@ -2356,26 +2477,38 @@ def _fit_variant_irm(
 
     feature_names = list(nuisances["feature_names"])
     frame = pd.DataFrame(nuisances["matrix"], columns=feature_names)
-    frame["supplier_milestone_slippage_days"] = nuisances["outcome"]
+    frame[outcome_field] = nuisances["outcome"]
     frame["high_load_exposure"] = nuisances["exposure"]
     frame["supplier_id"] = nuisances["groups"]
+    if outcome_kind not in {"continuous", "binary"}:
+        raise EstimatorStageError("ENGINE_FEATURE_CONTRACT_VIOLATION")
+    outcome_learner = (
+        _outcome_classifier
+        if outcome_kind == "binary"
+        else _outcome_regressor
+    )
+    outcome_component = (
+        "binary_outcome_learner_unexposed"
+        if outcome_kind == "binary"
+        else "outcome_learner_unexposed"
+    )
     try:
         data = DoubleMLClusterData(
             frame,
-            y_col="supplier_milestone_slippage_days",
+            y_col=outcome_field,
             d_cols="high_load_exposure",
             cluster_cols="supplier_id",
             x_cols=feature_names,
         )
         model = DoubleMLIRM(
             data,
-            _outcome_regressor(
+            outcome_learner(
                 _stage_seed(
                     request,
                     variant_id=variant_id,
                     repeat_index=0,
                     outer_fold_index=0,
-                    component="outcome_learner_unexposed",
+                    component=outcome_component,
                 )
             ),
             _propensity_classifier(
@@ -2456,6 +2589,16 @@ def _effect_result(
     role: str,
     score: str,
     label: str | None = None,
+    estimator_class: str = "DoubleMLIRM",
+    unit: str = "days",
+    display_scale: float = 1.0,
+    display_unit: str | None = None,
+    duration_basis: str | None = None,
+    nuisance_keys: Sequence[tuple[str, str]] = (
+        ("ml_g0", "g0"),
+        ("ml_g1", "g1"),
+        ("ml_m", "ml_m"),
+    ),
 ) -> dict[str, Any]:
     import numpy as np
 
@@ -2500,9 +2643,24 @@ def _effect_result(
         or ci_lower > ci_upper
     ):
         raise EstimatorStageError("ENGINE_RESULT_INVALID")
-    g0_ref = f"nuisance:ml_g0:{scientific_sha256(nuisances['g0'].tolist())}"
-    g1_ref = f"nuisance:ml_g1:{scientific_sha256(nuisances['g1'].tolist())}"
-    propensity_ref = f"nuisance:ml_m:{scientific_sha256(nuisances['ml_m'].tolist())}"
+    nuisance_refs = [
+        f"nuisance:{name}:{scientific_sha256(nuisances[key].tolist())}"
+        for name, key in nuisance_keys
+    ]
+    if display_unit is None:
+        display_unit = unit
+    if duration_basis is None:
+        duration_basis = (
+            request["canonical_slippage_duration_basis"]
+            if unit != "absolute_probability"
+            else "NOT_APPLICABLE"
+        )
+    display_values = {
+        "estimate": float(coefficient[0]) * display_scale,
+        "standard_error": float(standard_error[0]) * display_scale,
+        "ci_lower": ci_lower * display_scale,
+        "ci_upper": ci_upper * display_scale,
+    }
     repeat_results = [
         {
             "repeat_index": index,
@@ -2515,7 +2673,7 @@ def _effect_result(
         "estimand_id": estimand_id,
         "role": role,
         "label": label,
-        "estimator_class": "DoubleMLIRM",
+        "estimator_class": estimator_class,
         "score": score,
         "estimate": float(coefficient[0]),
         "standard_error": float(standard_error[0]),
@@ -2524,15 +2682,12 @@ def _effect_result(
         "ci_level": 0.95,
         "ci_lower": ci_lower,
         "ci_upper": ci_upper,
-        "unit": "days",
-        "duration_basis": request["canonical_slippage_duration_basis"],
+        "unit": unit,
+        "duration_basis": duration_basis,
         "display_transform": {
-            "scale": 1.0,
-            "display_unit": "days",
-            "estimate": float(coefficient[0]),
-            "standard_error": float(standard_error[0]),
-            "ci_lower": ci_lower,
-            "ci_upper": ci_upper,
+            "scale": display_scale,
+            "display_unit": display_unit,
+            **display_values,
         },
         "cluster_key": "supplier_id",
         "cluster_count": len(set(nuisances["groups"].tolist())),
@@ -2541,7 +2696,7 @@ def _effect_result(
         "row_count": len(nuisances["retained_ids"]),
         "repeat_results": repeat_results,
         "cohort_identity_hash": nuisances["cohort_identity_hash"],
-        "nuisance_refs": [g0_ref, g1_ref, propensity_ref],
+        "nuisance_refs": nuisance_refs,
         "fold_ref": f"folds:{variant_id}-s9:{scientific_sha256(nuisances['fold_records'])}",
         "inference": {
             "method": "DoubleML.native",
@@ -2552,6 +2707,622 @@ def _effect_result(
     }
     if not isinstance(result["cohort_identity_hash"], str):
         raise EstimatorStageError("ENGINE_RESULT_INVALID")
+    return result
+
+
+def _fit_variant_plr_nuisances(
+    request: Mapping[str, Any],
+    variant_id: str,
+    rows: Sequence[Mapping[str, Any]],
+    layout: Any,
+    retained_ids: Sequence[str],
+    variant_stage: Mapping[str, Any],
+) -> dict[str, Any]:
+    import numpy as np
+    from threadpoolctl import threadpool_limits
+
+    try:
+        matrix = layout.transform(rows)
+    except PropensityStageError as error:
+        raise EstimatorStageError(error.code) from None
+    outcome = np.asarray(
+        [float(row["supplier_milestone_slippage_days"]) for row in rows],
+        dtype=np.float64,
+    )
+    load = np.asarray(
+        [float(row["load_percentile"]) for row in rows],
+        dtype=np.float64,
+    )
+    groups = np.asarray([str(row["supplier_id"]) for row in rows], dtype=object)
+    if (
+        not np.isfinite(matrix).all()
+        or not np.isfinite(outcome).all()
+        or not np.isfinite(load).all()
+        or np.any(load < 0.0)
+        or np.any(load > 1.0)
+    ):
+        raise EstimatorStageError("ENGINE_FEATURE_CONTRACT_VIOLATION")
+    try:
+        all_smpls, all_smpls_cluster, fold_records = _variant_s9_splits(
+            variant_stage,
+            rows,
+            retained_ids,
+        )
+    except EstimatorStageError:
+        raise
+    ml_l = np.full((len(rows), 2), np.nan, dtype=np.float64)
+    ml_m = np.full((len(rows), 2), np.nan, dtype=np.float64)
+    with threadpool_limits(limits=1):
+        for repeat_index, repeat_smpls in enumerate(all_smpls):
+            for fold_index, (train, test) in enumerate(repeat_smpls):
+                try:
+                    outcome_model = _outcome_regressor(
+                        _stage_seed(
+                            request,
+                            variant_id=variant_id,
+                            repeat_index=repeat_index,
+                            outer_fold_index=fold_index,
+                            component="continuous_outcome_learner",
+                        )
+                    )
+                    exposure_model = _outcome_regressor(
+                        _stage_seed(
+                            request,
+                            variant_id=variant_id,
+                            repeat_index=repeat_index,
+                            outer_fold_index=fold_index,
+                            component="continuous_exposure_learner",
+                        )
+                    )
+                    outcome_model.fit(matrix[train], outcome[train])
+                    exposure_model.fit(matrix[train], load[train])
+                    ml_l[test, repeat_index] = outcome_model.predict(matrix[test])
+                    ml_m[test, repeat_index] = exposure_model.predict(matrix[test])
+                except EstimatorStageError:
+                    raise
+                except Exception:
+                    raise EstimatorStageError("ENGINE_NUISANCE_FIT_FAILED") from None
+    if not np.isfinite(ml_l).all() or not np.isfinite(ml_m).all():
+        raise EstimatorStageError("ENGINE_NUISANCE_PREDICTION_INVALID")
+    return {
+        "matrix": matrix,
+        "outcome": outcome,
+        "continuous_exposure": load,
+        "exposure": np.asarray(
+            [1 if bool(row["high_load_exposure"]) else 0 for row in rows],
+            dtype=np.int8,
+        ),
+        "groups": groups,
+        "cohort_identity_hash": variant_stage["s9"].get("identity_hash"),
+        "retained_ids": list(retained_ids),
+        "feature_names": list(layout.feature_names),
+        "feature_schema_digest": scientific_sha256(list(layout.feature_names)),
+        "all_smpls": all_smpls,
+        "all_smpls_cluster": all_smpls_cluster,
+        "fold_records": fold_records,
+        "l": ml_l,
+        "m": ml_m,
+    }
+
+
+def _fit_variant_plr(
+    request: Mapping[str, Any],
+    variant_id: str,
+    nuisances: Mapping[str, Any],
+) -> Any:
+    from doubleml import DoubleMLClusterData, DoubleMLPLR
+    import numpy as np
+    import pandas as pd
+    from threadpoolctl import threadpool_limits
+
+    feature_names = list(nuisances["feature_names"])
+    frame = pd.DataFrame(nuisances["matrix"], columns=feature_names)
+    frame["supplier_milestone_slippage_days"] = nuisances["outcome"]
+    frame["load_percentile"] = nuisances["continuous_exposure"]
+    frame["supplier_id"] = nuisances["groups"]
+    try:
+        data = DoubleMLClusterData(
+            frame,
+            y_col="supplier_milestone_slippage_days",
+            d_cols="load_percentile",
+            cluster_cols="supplier_id",
+            x_cols=feature_names,
+        )
+        model = DoubleMLPLR(
+            data,
+            _outcome_regressor(
+                _stage_seed(
+                    request,
+                    variant_id=variant_id,
+                    repeat_index=0,
+                    outer_fold_index=0,
+                    component="continuous_outcome_learner",
+                )
+            ),
+            _outcome_regressor(
+                _stage_seed(
+                    request,
+                    variant_id=variant_id,
+                    repeat_index=0,
+                    outer_fold_index=0,
+                    component="continuous_exposure_learner",
+                )
+            ),
+            n_folds=5,
+            n_rep=2,
+            score="partialling out",
+            draw_sample_splitting=False,
+        )
+        model.set_sample_splitting(
+            nuisances["all_smpls"],
+            nuisances["all_smpls_cluster"],
+        )
+        external_predictions = {
+            "load_percentile": {
+                "ml_l": nuisances["l"],
+                "ml_m": nuisances["m"],
+            }
+        }
+        with threadpool_limits(limits=1):
+            model.fit(
+                n_jobs_cv=1,
+                store_predictions=True,
+                external_predictions=external_predictions,
+            )
+        for learner_name, expected_key in (("ml_l", "l"), ("ml_m", "m")):
+            observed = np.asarray(model.predictions[learner_name], dtype=np.float64)
+            if observed.shape == (len(nuisances["retained_ids"]), 2, 1):
+                observed = observed[:, :, 0]
+            elif observed.shape == (len(nuisances["retained_ids"]), 1, 2):
+                observed = observed[:, 0, :]
+            expected = np.asarray(nuisances[expected_key], dtype=np.float64)
+            if (
+                observed.shape != expected.shape
+                or not np.isfinite(observed).all()
+                or not np.allclose(
+                    observed,
+                    expected,
+                    atol=NUMERIC_TOLERANCE_REGISTRY["external_prediction_absolute"],
+                    rtol=0.0,
+                )
+            ):
+                raise EstimatorStageError("ENGINE_NUISANCE_PREDICTION_INVALID")
+    except EstimatorStageError:
+        raise
+    except Exception:
+        raise EstimatorStageError("ENGINE_ESTIMATOR_FIT_FAILED") from None
+    return model
+
+
+def _comparison_feature_layout(
+    request: Mapping[str, Any],
+    rows: Sequence[Mapping[str, Any]],
+) -> tuple[list[str], Any]:
+    import numpy as np
+
+    adjustment_set = request.get("adjustment_set")
+    if not isinstance(adjustment_set, Mapping):
+        raise EstimatorStageError("ENGINE_FEATURE_CONTRACT_VIOLATION")
+    fields = adjustment_set.get("fields")
+    if not isinstance(fields, list) or not all(isinstance(field, str) for field in fields):
+        raise EstimatorStageError("ENGINE_FEATURE_CONTRACT_VIOLATION")
+    definitions = _field_definition_map(adjustment_set)
+    numeric_fields = {
+        field
+        for field in fields
+        if field in NUMERIC_ADJUSTMENT_FIELDS
+        or definitions.get(field, {}).get("estimation_type") in {"numeric", "continuous"}
+        or definitions.get(field, {}).get("logical_type") in {"numeric", "number"}
+    }
+    feature_names: list[str] = []
+    columns: list[list[float]] = []
+    for field in fields:
+        values = [
+            row.get("covariates", {}).get(field)
+            for row in rows
+            if isinstance(row.get("covariates"), Mapping)
+        ]
+        if len(values) != len(rows) or any(not isinstance(value, Mapping) for value in values):
+            raise EstimatorStageError("ENGINE_FEATURE_CONTRACT_VIOLATION")
+        if field in numeric_fields:
+            value_column = [
+                float(value.get("value"))
+                if value.get("state") == "present"
+                and isinstance(value.get("value"), (int, float))
+                and not isinstance(value.get("value"), bool)
+                and math.isfinite(float(value.get("value")))
+                else 0.0
+                for value in values
+            ]
+            if any(value != 0.0 for value in value_column):
+                feature_names.append(f"{field}::value")
+                columns.append(value_column)
+            for state in VALUE_STATES[1:]:
+                state_column = [
+                    1.0 if value.get("state") == state else 0.0 for value in values
+                ]
+                if any(state_column):
+                    feature_names.append(f"{field}::state:{state}")
+                    columns.append(state_column)
+            continue
+
+        declared_values = _declared_categorical_values(definitions.get(field, {}))
+        levels: list[str] = []
+        if declared_values is not None:
+            try:
+                for value in declared_values:
+                    token = f"value:{scientific_json(value)}"
+                    if token not in levels:
+                        levels.append(token)
+            except (TypeError, ValueError, OverflowError):
+                raise EstimatorStageError("ENGINE_FEATURE_CONTRACT_VIOLATION") from None
+        else:
+            try:
+                observed_values = {_value_token(value) for value in values}
+            except PropensityStageError as error:
+                raise EstimatorStageError(error.code) from None
+            levels.extend(
+                sorted(
+                    (token for token in observed_values if token.startswith("value:")),
+                    key=lambda token: token.encode("utf-8"),
+                )
+            )
+        levels.extend(
+            token
+            for token in (f"state:{state}" for state in VALUE_STATES[1:])
+            if token not in levels
+        )
+        if len(levels) < 1:
+            raise EstimatorStageError("ENGINE_FEATURE_CONTRACT_VIOLATION")
+        observed_tokens = set(observed_values) if declared_values is None else set()
+        if declared_values is not None:
+            try:
+                observed_tokens = {_value_token(value) for value in values}
+            except PropensityStageError as error:
+                raise EstimatorStageError(error.code) from None
+            if not observed_tokens.issubset(set(levels)):
+                raise EstimatorStageError("ENGINE_FEATURE_CONTRACT_VIOLATION")
+        for token in levels[1:]:
+            if declared_values is None and token not in observed_tokens:
+                continue
+            column = [1.0 if _value_token(value) == token else 0.0 for value in values]
+            if not any(column):
+                continue
+            feature_names.append(f"{field}::{token}")
+            columns.append(column)
+    matrix = np.asarray(columns, dtype=np.float64).T if columns else np.empty((len(rows), 0))
+    if not np.isfinite(matrix).all():
+        raise EstimatorStageError("ENGINE_FEATURE_CONTRACT_VIOLATION")
+    return feature_names, matrix
+
+
+def _comparison_result(
+    request: Mapping[str, Any],
+    nuisances: Mapping[str, Any],
+    comparison_id: str,
+) -> dict[str, Any]:
+    import numpy as np
+    import statsmodels.api as sm
+
+    if comparison_id not in COMPARISON_IDS:
+        raise EstimatorStageError("ENGINE_COMPARISON_FIT_FAILED")
+    y = np.asarray(nuisances["outcome"], dtype=np.float64)
+    exposure = np.asarray(nuisances["exposure"], dtype=np.float64)
+    groups = np.asarray(nuisances["groups"], dtype=object)
+    row_count = len(y)
+    supplier_ids = sorted({str(value) for value in groups.tolist()}, key=lambda value: value.encode("utf-8"))
+    if row_count == 0 or len(set(exposure.tolist())) != 2 or len(supplier_ids) < 2:
+        raise EstimatorStageError("ENGINE_COMPARISON_FIT_FAILED")
+    feature_names: list[str] = []
+    feature_matrix = np.empty((row_count, 0), dtype=np.float64)
+    if comparison_id in {"covariate_ols", "supplier_fe_ols"}:
+        feature_names, feature_matrix = _comparison_feature_layout(
+            request,
+            [
+                {
+                    "covariates": {
+                        field: row["covariates"][field]
+                        for field in request["adjustment_set"]["fields"]
+                    }
+                }
+                for row in nuisances["rows"]
+            ],
+        )
+    columns = ["intercept", "high_load_exposure", *feature_names]
+    design_parts = [np.ones((row_count, 1)), exposure.reshape(-1, 1)]
+    if feature_matrix.shape[1]:
+        design_parts.append(feature_matrix)
+    if comparison_id == "supplier_fe_ols":
+        supplier_columns = [
+            (f"supplier_id::{supplier_id}", (groups == supplier_id).astype(np.float64))
+            for supplier_id in supplier_ids[1:]
+        ]
+        columns.extend(name for name, _ in supplier_columns)
+        if supplier_columns:
+            design_parts.append(
+                np.column_stack([values for _, values in supplier_columns])
+            )
+    design = np.column_stack(design_parts)
+    weights = None
+    weight_diagnostics: dict[str, Any] | None = None
+    model_class = "OLS"
+    if comparison_id == "normalized_ipw_atte":
+        propensity = np.asarray(nuisances["ml_m"], dtype=np.float64)[:, 0]
+        if (
+            propensity.shape != (row_count,)
+            or not np.isfinite(propensity).all()
+            or np.any(propensity <= 0.0)
+            or np.any(propensity >= 1.0)
+        ):
+            raise EstimatorStageError("ENGINE_COMPARISON_FIT_FAILED")
+        weights = np.where(exposure == 1.0, 1.0, propensity / (1.0 - propensity))
+        exposed_mask = exposure == 1.0
+        unexposed_mask = ~exposed_mask
+        exposed_count = int(exposed_mask.sum())
+        unexposed_raw_sum = float(weights[unexposed_mask].sum())
+        if exposed_count <= 0 or unexposed_raw_sum <= 0.0:
+            raise EstimatorStageError("ENGINE_COMPARISON_FIT_FAILED")
+        weights[unexposed_mask] *= exposed_count / unexposed_raw_sum
+        model_class = "WLS"
+        weight_diagnostics = {
+            "raw_weight_sums": {
+                "exposed": float(weights[exposed_mask].sum()),
+                "unexposed": unexposed_raw_sum,
+            },
+            "normalized_weight_sums": {
+                "exposed": float(weights[exposed_mask].sum()),
+                "unexposed": float(weights[unexposed_mask].sum()),
+            },
+            "effective_sample_sizes": {
+                "exposed": float(
+                    weights[exposed_mask].sum() ** 2
+                    / np.square(weights[exposed_mask]).sum()
+                ),
+                "unexposed": float(
+                    weights[unexposed_mask].sum() ** 2
+                    / np.square(weights[unexposed_mask]).sum()
+                ),
+            },
+        }
+    if not np.isfinite(design).all():
+        raise EstimatorStageError("ENGINE_COMPARISON_FIT_FAILED")
+    design_rank = np.linalg.matrix_rank(design)
+    if design_rank <= 1:
+        raise EstimatorStageError("ENGINE_COMPARISON_FIT_FAILED")
+    exposure_rank = np.linalg.matrix_rank(np.delete(design, 1, axis=1))
+    if exposure_rank == design_rank:
+        raise EstimatorStageError("ENGINE_COMPARISON_FIT_FAILED")
+    try:
+        if model_class == "WLS":
+            fitted = sm.WLS(y, design, weights=weights).fit(
+                cov_type="cluster",
+                cov_kwds={
+                    "groups": np.asarray(
+                        [supplier_ids.index(str(value)) for value in groups],
+                        dtype=int,
+                    ),
+                    "use_correction": True,
+                    "df_correction": True,
+                },
+                use_t=True,
+            )
+        else:
+            fitted = sm.OLS(y, design).fit(
+                cov_type="cluster",
+                cov_kwds={
+                    "groups": np.asarray(
+                        [supplier_ids.index(str(value)) for value in groups],
+                        dtype=int,
+                    ),
+                    "use_correction": True,
+                    "df_correction": True,
+                },
+                use_t=True,
+            )
+        coefficient = float(fitted.params[1])
+        standard_error = float(fitted.bse[1])
+        t_statistic = float(fitted.tvalues[1])
+        p_value = float(fitted.pvalues[1])
+        interval = fitted.conf_int(alpha=0.05)
+        ci_lower = float(interval[1, 0])
+        ci_upper = float(interval[1, 1])
+        rank = int(design_rank)
+        condition_number = float(np.linalg.cond(design))
+    except Exception:
+        raise EstimatorStageError("ENGINE_COMPARISON_FIT_FAILED") from None
+    if (
+        not all(
+            math.isfinite(value)
+            for value in [coefficient, standard_error, t_statistic, p_value, ci_lower, ci_upper, condition_number]
+        )
+        or standard_error <= 0.0
+        or not 0.0 <= p_value <= 1.0
+        or ci_lower > ci_upper
+        or not math.isfinite(condition_number)
+        or condition_number <= 0.0
+    ):
+        raise EstimatorStageError("ENGINE_COMPARISON_FIT_FAILED")
+    result = {
+        "comparison_id": comparison_id,
+        "model_class": model_class,
+        "coefficient_name": "high_load_exposure",
+        "estimate": coefficient,
+        "standard_error": standard_error,
+        "t_statistic": t_statistic,
+        "p_value": p_value,
+        "ci_level": 0.95,
+        "ci_lower": ci_lower,
+        "ci_upper": ci_upper,
+        "covariance_type": "cluster",
+        "cluster_key": "supplier_id",
+        "use_correction": True,
+        "df_correction": True,
+        "use_t": True,
+        "inference_df": len(supplier_ids) - 1,
+        "row_count": row_count,
+        "exposed_count": int(exposure.sum()),
+        "unexposed_count": int(row_count - exposure.sum()),
+        "supplier_count": len(supplier_ids),
+        "matrix_column_count": int(design.shape[1]),
+        "matrix_rank": rank,
+        "condition_number": condition_number,
+        "design_matrix_digest": scientific_sha256(
+            {"columns": columns, "shape": list(design.shape), "values": design.tolist()}
+        ),
+        "feature_schema_digest": scientific_sha256(columns),
+        "cohort_identity_hash": nuisances["cohort_identity_hash"],
+    }
+    if comparison_id == "normalized_ipw_atte":
+        result["propensity_ref"] = (
+            f"nuisance:ml_m:{scientific_sha256(nuisances['ml_m'].tolist())}"
+        )
+        result["fold_ref"] = (
+            f"folds:primary-s9:{scientific_sha256(nuisances['fold_records'])}"
+        )
+        result["weight_diagnostics"] = weight_diagnostics
+    return result
+
+
+def _comparison_suite(
+    request: Mapping[str, Any],
+    nuisances: Mapping[str, Any],
+) -> dict[str, dict[str, Any]]:
+    return {
+        comparison_id: _comparison_result(request, nuisances, comparison_id)
+        for comparison_id in COMPARISON_IDS
+    }
+
+
+def _subject_support_result(
+    request: Mapping[str, Any],
+    primary_stage: Mapping[str, Any],
+    rows: Sequence[Mapping[str, Any]],
+) -> dict[str, Any] | None:
+    subject = request.get("subject")
+    if subject is None:
+        return None
+    if not isinstance(subject, Mapping):
+        raise EstimatorStageError("ENGINE_FEATURE_CONTRACT_VIOLATION")
+    if subject.get("state") == "scientifically_unavailable":
+        return {
+            "state": "unsupported",
+            "scope": "subject",
+            "reason_code": subject.get("scientific_code"),
+            "subject_id": subject.get("subject_id"),
+            "subject_profile": None,
+            "propensity": None,
+            "overlap": None,
+            "distribution_support": None,
+            "eligibility_codes": deepcopy(subject.get("eligibility_codes", [])),
+            "evidence_refs": deepcopy(subject.get("evidence_refs", [])),
+        }
+    if subject.get("state") != "eligible":
+        raise EstimatorStageError("ENGINE_FEATURE_CONTRACT_VIOLATION")
+    subject_id = subject.get("subject_id")
+    profile = subject.get("profile")
+    if (
+        not isinstance(subject_id, str)
+        or not subject_id
+        or not isinstance(profile, Mapping)
+        or not isinstance(profile.get("adjustment_inputs"), Mapping)
+    ):
+        raise EstimatorStageError("ENGINE_FEATURE_CONTRACT_VIOLATION")
+    adjustment_set = request.get("adjustment_set")
+    subject_inputs = profile["adjustment_inputs"]
+    if (
+        not isinstance(adjustment_set, Mapping)
+        or set(subject_inputs) != set(adjustment_set.get("fields", []))
+        or any(
+            not isinstance(subject_inputs[field], Mapping)
+            for field in subject_inputs
+        )
+    ):
+        raise EstimatorStageError("ENGINE_FEATURE_CONTRACT_VIOLATION")
+    subject_propensity = primary_stage.get("subject_propensity")
+    if not isinstance(subject_propensity, Mapping):
+        raise EstimatorStageError("ENGINE_NUISANCE_PREDICTION_INVALID")
+    predictions = subject_propensity.get("repeat_fold_predictions")
+    mean = subject_propensity.get("value")
+    if (
+        not isinstance(predictions, list)
+        or len(predictions) != 10
+        or not all(
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(float(value))
+            and 0.0 <= float(value) <= 1.0
+            for value in predictions
+        )
+        or not isinstance(mean, (int, float))
+        or isinstance(mean, bool)
+        or not math.isfinite(float(mean))
+    ):
+        raise EstimatorStageError("ENGINE_NUISANCE_PREDICTION_INVALID")
+    from .eligibility import evaluate_subject_distribution_support
+
+    historical_rows = [
+        {
+            "order_line_id": str(row["order_line_id"]),
+            "supplier_id": str(row["supplier_id"]),
+            "exposure": bool(row["high_load_exposure"]),
+            "inputs": deepcopy(row["covariates"]),
+        }
+        for row in rows
+    ]
+    distribution_support = evaluate_subject_distribution_support(
+        subject_inputs,
+        historical_rows,
+    )
+    subject_overlap_supported = 0.10 <= float(mean) <= 0.90
+    overlap = {
+        "state": "supported" if subject_overlap_supported else "unsupported",
+        "support_interval": {"lower": 0.10, "upper": 0.90, "inclusive": True},
+        "value": float(mean),
+        "reason_code": None
+        if subject_overlap_supported
+        else "SUBJECT_OVERLAP_INSUFFICIENT",
+    }
+    distribution_supported = distribution_support.get("state") == "supported"
+    reason_code = (
+        None
+        if subject_overlap_supported and distribution_supported
+        else (
+            "SUBJECT_OVERLAP_INSUFFICIENT"
+            if not subject_overlap_supported
+            else "SUBJECT_DISTRIBUTION_UNSUPPORTED"
+        )
+    )
+    result = {
+        "state": "supported" if reason_code is None else "unsupported",
+        "scope": "subject",
+        "reason_code": reason_code,
+        "subject_id": subject_id,
+        "subject_profile": deepcopy(dict(profile)),
+        "canonical_exposure": deepcopy(
+            subject.get(
+                "canonical_exposure",
+                profile.get("canonical_exposure", profile.get("provisional_exposure_preview")),
+            )
+        ),
+        "provisional_exposure_preview": deepcopy(
+            subject.get(
+                "provisional_exposure_preview",
+                profile.get("provisional_exposure_preview"),
+            )
+        ),
+        "propensity": {
+            "state": "present",
+            "repeat_fold_predictions": [float(value) for value in predictions],
+            "value": float(mean),
+            "aggregation": subject_propensity.get(
+                "aggregation", "arithmetic_mean_of_ten_primary_outer_fold_models"
+            ),
+        },
+        "overlap": overlap,
+        "distribution_support": distribution_support,
+        "eligibility_codes": deepcopy(subject.get("eligibility_codes", [])),
+        "evidence_refs": deepcopy(subject.get("evidence_refs", [])),
+    }
     return result
 
 
@@ -2627,8 +3398,10 @@ def _sensitivity_state_result(
     component_failures: Sequence[Mapping[str, Any]] = (),
     last_completed_stage: str,
     effect: Mapping[str, Any] | None = None,
+    estimand_id: str | None = None,
 ) -> dict[str, Any]:
     variant_id = str(source_variant["variant_id"])
+    resolved_estimand_id = estimand_id or SENSITIVITY_ESTIMAND_IDS[variant_id]
     provenance = _variant_provenance(
         request,
         source_variant,
@@ -2651,7 +3424,7 @@ def _sensitivity_state_result(
         "status": state,
         "state": state,
         "reason_code": reason_code,
-        "estimand_id": SENSITIVITY_ESTIMAND_IDS[variant_id],
+        "estimand_id": resolved_estimand_id,
         "role": "sensitivity",
         "effect": None,
         "component_failures": deepcopy(list(component_failures)),
@@ -2721,9 +3494,12 @@ def _public_primary_result(engine_result: Mapping[str, Any]) -> dict[str, Any] |
         "estimand_id",
         "role",
         "label",
+        "estimator_class",
         "score",
         "estimate",
         "standard_error",
+        "t_statistic",
+        "p_value",
         "ci_level",
         "ci_lower",
         "ci_upper",
@@ -2735,13 +3511,16 @@ def _public_primary_result(engine_result: Mapping[str, Any]) -> dict[str, Any] |
         "exposed_count",
         "unexposed_count",
         "row_count",
+        "repeat_results",
+        "cohort_identity_hash",
+        "nuisance_refs",
+        "fold_ref",
         "inference",
     )
     public_sensitivities: dict[str, dict[str, Any]] = {}
     raw_sensitivities = engine_result.get("sensitivity_results")
     if isinstance(raw_sensitivities, Mapping):
-        for variant_id in SENSITIVITY_VARIANTS:
-            estimand_id = SENSITIVITY_ESTIMAND_IDS[variant_id]
+        for estimand_id in SECONDARY_ESTIMAND_IDS:
             raw = raw_sensitivities.get(estimand_id)
             if not isinstance(raw, Mapping):
                 continue
@@ -2755,9 +3534,12 @@ def _public_primary_result(engine_result: Mapping[str, Any]) -> dict[str, Any] |
                     "estimand_id",
                     "role",
                     "label",
+                    "estimator_class",
                     "score",
                     "estimate",
                     "standard_error",
+                    "t_statistic",
+                    "p_value",
                     "ci_level",
                     "ci_lower",
                     "ci_upper",
@@ -2769,6 +3551,7 @@ def _public_primary_result(engine_result: Mapping[str, Any]) -> dict[str, Any] |
                     "exposed_count",
                     "unexposed_count",
                     "row_count",
+                    "repeat_results",
                     "cohort_identity_hash",
                     "nuisance_refs",
                     "fold_ref",
@@ -2795,6 +3578,8 @@ def _public_primary_result(engine_result: Mapping[str, Any]) -> dict[str, Any] |
             if key in engine_result["context_ate"]
         },
         "sensitivity_results": public_sensitivities,
+        "comparison_results": deepcopy(engine_result.get("comparison_results", {})),
+        "subject_support": deepcopy(engine_result.get("subject_support")),
         "permission": {
             "evidence_verdict": False,
             "action_permission": False,
@@ -2807,11 +3592,11 @@ def estimate_primary_atte_and_context(
     value: Mapping[str, Any] | ValidatedSuiteRequest,
     propensity_stage: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Estimate the primary suite and its registered binary sensitivities.
+    """Estimate the closed causal engine suite.
 
-    The primary ATTE remains authoritative when the suite completes. Each
-    sensitivity uses its own materialized variant, folds, seeds, nuisances,
-    and clustered DoubleML fit; scientific unavailability remains a typed
+    The primary ATTE remains authoritative when the suite completes. The
+    registered alternate forms and comparisons are descriptive or sensitivity
+    outputs and never replace it. Scientific unavailability remains a typed
     subordinate state, while a required runtime failure fails closed without
     publishing a partial primary estimate.
     """
@@ -3148,6 +3933,149 @@ def estimate_primary_atte_and_context(
         result["result_identity_digest"] = scientific_sha256(result)
         return result
 
+    secondary_failures: list[dict[str, Any]] = []
+    try:
+        late_support_rows = primary_source.get("rows")
+        if not isinstance(late_support_rows, list):
+            raise EstimatorStageError("ENGINE_REPRODUCIBILITY_VIOLATION")
+        late_count = sum(
+            1
+            for row in late_support_rows
+            if isinstance(row.get("supplier_milestone_late"), bool)
+            and row["supplier_milestone_late"]
+        )
+        non_late_count = len(late_support_rows) - late_count
+        if late_count < 50 or non_late_count < 50:
+            sensitivity_results[LATE_SENSITIVITY_ESTIMAND_ID] = _sensitivity_state_result(
+                request,
+                primary_source,
+                primary_stage,
+                state="unsupported",
+                reason_code="COHORT_SUPPORT_INSUFFICIENT",
+                last_completed_stage="S9_OVERLAP",
+                estimand_id=LATE_SENSITIVITY_ESTIMAND_ID,
+            )
+        else:
+            late_nuisances = _fit_variant_outcome_nuisances(
+                request,
+                "primary",
+                rows,
+                layout,
+                retained_ids,
+                primary_stage,
+                outcome_field="supplier_milestone_late",
+                outcome_kind="binary",
+            )
+            late_model = _fit_variant_irm(
+                request,
+                "primary",
+                late_nuisances,
+                score="ATTE",
+                outcome_field="supplier_milestone_late",
+                outcome_kind="binary",
+            )
+            late_effect = _effect_result(
+                request,
+                late_model,
+                late_nuisances,
+                variant_id="primary",
+                estimand_id=LATE_SENSITIVITY_ESTIMAND_ID,
+                role="sensitivity",
+                score="ATTE",
+                label="binary_late_risk_difference",
+                unit="absolute_probability",
+                display_scale=100.0,
+                display_unit="percentage_points",
+                duration_basis="NOT_APPLICABLE",
+            )
+            sensitivity_results[LATE_SENSITIVITY_ESTIMAND_ID] = _sensitivity_state_result(
+                request,
+                primary_source,
+                primary_stage,
+                state="estimated",
+                reason_code=None,
+                last_completed_stage="SENSITIVITY_ESTIMATION",
+                effect=late_effect,
+                estimand_id=LATE_SENSITIVITY_ESTIMAND_ID,
+            )
+
+        continuous_nuisances = _fit_variant_plr_nuisances(
+            request,
+            "primary",
+            rows,
+            layout,
+            retained_ids,
+            primary_stage,
+        )
+        continuous_model = _fit_variant_plr(
+            request,
+            "primary",
+            continuous_nuisances,
+        )
+        continuous_effect = _effect_result(
+            request,
+            continuous_model,
+            continuous_nuisances,
+            variant_id="primary",
+            estimand_id=CONTINUOUS_LOAD_SENSITIVITY_ESTIMAND_ID,
+            role="sensitivity",
+            score="partialling out",
+            label="linear_average_slope",
+            estimator_class="DoubleMLPLR",
+            unit="days_per_unit_load_percentile",
+            display_scale=0.10,
+            display_unit="days_per_0_10_load_percentile",
+            nuisance_keys=(("ml_l", "l"), ("ml_m", "m")),
+        )
+        sensitivity_results[CONTINUOUS_LOAD_SENSITIVITY_ESTIMAND_ID] = _sensitivity_state_result(
+            request,
+            primary_source,
+            primary_stage,
+            state="estimated",
+            reason_code=None,
+            last_completed_stage="SENSITIVITY_ESTIMATION",
+            effect=continuous_effect,
+            estimand_id=CONTINUOUS_LOAD_SENSITIVITY_ESTIMAND_ID,
+        )
+        comparison_results = _comparison_suite(request, nuisances)
+        subject_support = _subject_support_result(request, primary_stage, rows)
+    except EstimatorStageError as error:
+        secondary_failures.append(
+            {
+                "component": "secondary_suite",
+                "variant_id": "primary",
+                "code": error.code,
+            }
+        )
+    except Exception:
+        secondary_failures.append(
+            {
+                "component": "secondary_suite",
+                "variant_id": "primary",
+                "code": "ENGINE_INTERNAL_ERROR",
+            }
+        )
+
+    if secondary_failures:
+        result.update(
+            {
+                "status": "failed",
+                "scientific_outcome": "failed",
+                "reason_code": secondary_failures[0]["code"],
+                "estimator_executed": estimator_executed,
+                "sensitivity_failures": secondary_failures,
+                "safe_detail": _estimator_safe_detail(
+                    stage,
+                    execution_state="failed",
+                    last_completed_stage="S9_OVERLAP",
+                    estimator_executed=estimator_executed,
+                    failures=secondary_failures,
+                ),
+            }
+        )
+        result["result_identity_digest"] = scientific_sha256(result)
+        return result
+
     result.update(
         {
             "status": "estimated",
@@ -3158,6 +4086,8 @@ def estimate_primary_atte_and_context(
             "context_ate": context_effect,
             "sensitivity_results": sensitivity_results,
             "sensitivity_failures": sensitivity_failures,
+            "comparison_results": comparison_results,
+            "subject_support": subject_support,
             "shared_nuisance": {
                 "schema_version": "doubleml-shared-nuisance.v1",
                 "feature_schema_digest": nuisances["feature_schema_digest"],

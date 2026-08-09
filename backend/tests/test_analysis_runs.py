@@ -7,6 +7,7 @@ import time
 
 from fastapi.testclient import TestClient
 
+from backend.app import analysis_runs as analysis_runs_module
 from backend.app.analysis_runs import (
     ENGINE_INPUT_SCHEMA_VERSION,
     analysis_run_id_for_operation,
@@ -330,6 +331,15 @@ def _released_propensity_rows(request: dict[str, object]) -> list[dict[str, obje
     assert isinstance(adjustment_set, dict)
     fields = adjustment_set["fields"]
     assert isinstance(fields, list)
+    categorical_values = {
+        "material_class": ("class-a", "class-b"),
+        "complexity_class": ("standard", "complex"),
+        "project_id": ("project-a", "project-b"),
+        "project_phase": ("substructure", "fitout"),
+        "urgency_class": ("normal", "urgent"),
+        "geography_code": ("north", "south"),
+        "contract_form": ("lump-sum", "remeasure"),
+    }
     rows: list[dict[str, object]] = []
     for supplier_index in range(30):
         for within_supplier in range(2):
@@ -344,7 +354,14 @@ def _released_propensity_rows(request: dict[str, object]) -> list[dict[str, obje
                     "supplier_milestone_late": bool(row_index % 3),
                     "load_percentile": (row_index % 10) / 10,
                     "covariates": {
-                        field: {"state": "present", "value": float(row_index + offset)}
+                        field: {
+                            "state": "present",
+                            "value": (
+                                float(row_index + offset)
+                                if field in {"quantity", "value"}
+                                else categorical_values[field][supplier_index % 2]
+                            ),
+                        }
                         for offset, field in enumerate(fields)
                     },
                     "lineage_refs": [f"lineage:line-{row_index:03d}"],
@@ -463,13 +480,24 @@ def _released_primary_request(*, subject: bool = False) -> dict[str, object]:
     if subject:
         fields = request["adjustment_set"]["fields"]
         assert isinstance(fields, list)
+        subject_values = {
+            "material_class": "class-a",
+            "complexity_class": "standard",
+            "quantity": 0.0,
+            "value": 1.0,
+            "project_id": "project-a",
+            "project_phase": "substructure",
+            "urgency_class": "normal",
+            "geography_code": "north",
+            "contract_form": "lump-sum",
+        }
         request["subject"] = {
             "state": "eligible",
             "subject_id": "current-subject",
             "profile": {
                 "adjustment_inputs": {
-                    field: {"state": "present", "value": float(offset)}
-                    for offset, field in enumerate(fields)
+                    field: {"state": "present", "value": subject_values[field]}
+                    for field in fields
                 }
             },
         }
@@ -572,12 +600,14 @@ def _released_supported_primary_request() -> dict[str, object]:
                     "supplier_id": f"supplier-supported-{supplier_index:03d}",
                     "high_load_exposure": exposed,
                     "supplier_milestone_slippage_days": float(
-                        1.5 * exposed
+                        (1.5 + (supplier_index % 5) * 0.03) * exposed
                         + (supplier_index % 5) * 0.1
                         + (within_supplier % 7) * 0.07
                     ),
                     "supplier_milestone_slippage_duration_basis": "CALENDAR_DAY",
-                    "supplier_milestone_late": exposed,
+                    "supplier_milestone_late": bool(
+                        (row_index + supplier_index * 7) % 7 == 0
+                    ),
                     "load_percentile": 0.25 + (supplier_index % 10) / 20,
                     "covariates": covariates,
                     "lineage_refs": [f"lineage:line-supported-{row_index:04d}"],
@@ -708,7 +738,9 @@ def test_registered_sensitivities_use_variant_specific_cohorts_seeds_and_provena
         "short_history": "sensitivity_short_history_atte_slippage",
         "long_history": "sensitivity_long_history_atte_slippage",
     }
-    assert list(sensitivities) == list(estimands.values())
+    assert [estimand_id for estimand_id in sensitivities if estimand_id in estimands.values()] == list(
+        estimands.values()
+    )
     for variant_id, estimand_id in estimands.items():
         sensitivity = sensitivities[estimand_id]
         source_variant = next(
@@ -741,6 +773,171 @@ def test_registered_sensitivities_use_variant_specific_cohorts_seeds_and_provena
         propensity_stage["variants"]["primary"]["fold_assignments"]
         != propensity_stage["variants"]["stricter_threshold"]["fold_assignments"]
     )
+
+
+def test_closed_suite_publishes_secondary_forms_and_registered_comparisons() -> None:
+    result = estimate_primary_atte_and_context(_released_supported_variants_request())
+
+    assert result["status"] == "estimated"
+    late = result["sensitivity_results"]["sensitivity_late_risk_atte"]
+    assert late["status"] == "estimated"
+    assert late["estimand_id"] == "sensitivity_late_risk_atte"
+    assert late["unit"] == "absolute_probability"
+    assert late["display_transform"] == {
+        "scale": 100.0,
+        "display_unit": "percentage_points",
+        "estimate": late["estimate"] * 100.0,
+        "standard_error": late["standard_error"] * 100.0,
+        "ci_lower": late["ci_lower"] * 100.0,
+        "ci_upper": late["ci_upper"] * 100.0,
+    }
+
+    continuous = result["sensitivity_results"]["sensitivity_continuous_load_slope"]
+    assert continuous["status"] == "estimated"
+    assert continuous["estimator_class"] == "DoubleMLPLR"
+    assert continuous["score"] == "partialling out"
+    assert continuous["label"] == "linear_average_slope"
+    assert continuous["unit"] == "days_per_unit_load_percentile"
+    assert continuous["display_transform"]["scale"] == 0.10
+
+    comparisons = result["comparison_results"]
+    assert list(comparisons) == [
+        "naive_mean_difference",
+        "covariate_ols",
+        "normalized_ipw_atte",
+        "supplier_fe_ols",
+    ]
+    assert all(
+        comparison["coefficient_name"] == "high_load_exposure"
+        and comparison["covariance_type"] == "cluster"
+        and comparison["cluster_key"] == "supplier_id"
+        and comparison["inference_df"] == comparison["supplier_count"] - 1
+        for comparison in comparisons.values()
+    )
+    comparison_fields = {
+        "comparison_id",
+        "model_class",
+        "coefficient_name",
+        "estimate",
+        "standard_error",
+        "t_statistic",
+        "p_value",
+        "ci_level",
+        "ci_lower",
+        "ci_upper",
+        "covariance_type",
+        "cluster_key",
+        "use_correction",
+        "df_correction",
+        "use_t",
+        "inference_df",
+        "row_count",
+        "exposed_count",
+        "unexposed_count",
+        "supplier_count",
+        "matrix_column_count",
+        "matrix_rank",
+        "condition_number",
+        "design_matrix_digest",
+        "feature_schema_digest",
+        "cohort_identity_hash",
+    }
+    assert set(comparisons["naive_mean_difference"]) == comparison_fields
+    assert set(comparisons["normalized_ipw_atte"]) == comparison_fields | {
+        "propensity_ref",
+        "fold_ref",
+        "weight_diagnostics",
+    }
+    weight_diagnostics = comparisons["normalized_ipw_atte"]["weight_diagnostics"]
+    assert weight_diagnostics["normalized_weight_sums"]["unexposed"] == (
+        weight_diagnostics["normalized_weight_sums"]["exposed"]
+    )
+    assert comparisons["naive_mean_difference"]["cohort_identity_hash"] == result[
+        "primary_atte"
+    ]["cohort_identity_hash"]
+    assert "cate" not in str(result).lower()
+    assert "individualized_effect" not in result
+
+
+def test_late_support_failure_preserves_primary_and_marks_only_late_unsupported() -> None:
+    request = _released_supported_primary_request()
+    variant = request["variant_inputs"][0]
+    assert isinstance(variant, dict)
+    rows = variant["rows"]
+    assert isinstance(rows, list)
+    for row in rows:
+        assert isinstance(row, dict)
+        row["supplier_milestone_late"] = False
+    variant["s8_content_hash"] = scientific_sha256(
+        {
+            key: value
+            for key, value in variant.items()
+            if key not in {"s8_identity_hash", "s8_content_hash"}
+        }
+    )
+
+    result = estimate_primary_atte_and_context(request)
+
+    assert result["status"] == "estimated"
+    assert result["primary_atte"]["estimand_id"] == "primary_atte_slippage"
+    late = result["sensitivity_results"]["sensitivity_late_risk_atte"]
+    assert late["status"] == "unsupported"
+    assert late["reason_code"] == "COHORT_SUPPORT_INSUFFICIENT"
+    assert late["effect"] is None
+    assert result["sensitivity_results"]["sensitivity_continuous_load_slope"]["status"] == (
+        "estimated"
+    )
+
+
+def test_subject_support_is_published_without_an_individualized_effect() -> None:
+    request = _released_supported_primary_request()
+    variant = request["variant_inputs"][0]
+    assert isinstance(variant, dict)
+    rows = variant["rows"]
+    assert isinstance(rows, list) and rows
+    first_row = rows[0]
+    assert isinstance(first_row, dict)
+    request["subject"] = {
+        "state": "eligible",
+        "subject_id": "current-subject",
+        "profile": {"adjustment_inputs": deepcopy(first_row["covariates"])},
+    }
+
+    result = estimate_primary_atte_and_context(request)
+
+    assert result["status"] == "estimated"
+    subject = result["subject_support"]
+    assert subject["subject_id"] == "current-subject"
+    assert subject["subject_profile"]["adjustment_inputs"] == first_row["covariates"]
+    assert len(subject["propensity"]["repeat_fold_predictions"]) == 10
+    assert subject["overlap"]["support_interval"] == {
+        "lower": 0.10,
+        "upper": 0.90,
+        "inclusive": True,
+    }
+    assert "distribution_support" in subject
+    assert "individualized_effect" not in subject
+    assert all(str(key).lower() != "cate" for key in subject)
+
+
+def test_required_comparison_failure_fails_closed_without_primary_result(monkeypatch) -> None:
+    def fail_comparisons(request, nuisances):
+        raise analysis_runs_module.EstimatorStageError("ENGINE_COMPARISON_FIT_FAILED")
+
+    monkeypatch.setattr(analysis_runs_module, "_comparison_suite", fail_comparisons)
+
+    result = estimate_primary_atte_and_context(_released_supported_primary_request())
+
+    assert result["status"] == "failed"
+    assert result["reason_code"] == "ENGINE_COMPARISON_FIT_FAILED"
+    assert "primary_atte" not in result
+    assert result["safe_detail"]["component_failures"] == [
+        {
+            "component": "secondary_suite",
+            "variant_id": "primary",
+            "code": "ENGINE_COMPARISON_FIT_FAILED",
+        }
+    ]
 
 
 def test_unavailable_sensitivities_remain_explicit_without_replacing_primary() -> None:
@@ -858,6 +1055,14 @@ def test_fresh_worker_publishes_provisional_primary_result_without_permission(
     assert analysis_run["estimator_executed"] is True
     assert analysis_run["primary_result"]["schema_version"] == "fresh-primary-result.v1"
     assert analysis_run["primary_result"]["state"] == "provisional"
+    public_result = analysis_run["primary_result"]
+    assert len(public_result["primary_atte"]["repeat_results"]) == 2
+    assert set(public_result["comparison_results"]) == {
+        "naive_mean_difference",
+        "covariate_ols",
+        "normalized_ipw_atte",
+        "supplier_fe_ols",
+    }
     assert analysis_run["primary_result"]["permission"] == {
         "evidence_verdict": False,
         "action_permission": False,
