@@ -496,10 +496,11 @@ def test_corrupt_fresh_bundle_is_suppressed_from_the_current_read_model(
 
     assert read_back.status_code == 200
     assert read_back.json()["status"] == "FAILED"
-    assert read_back.json()["lifecycle"] == "failed"
+    assert read_back.json()["lifecycle"] == "quarantined"
     assert read_back.json()["verification_state"] == "invalid"
     assert read_back.json()["availability_state"] == "suppressed"
-    assert read_back.json()["reason_code"] == "RUN_RESULT_UNAVAILABLE"
+    assert read_back.json()["reason_code"] == "RUN_ARTIFACT_INTEGRITY_FAILED"
+    assert read_back.json()["recovery_action"] == "EXPLICIT_RETRY_AS_NEW_OPERATION"
     assert read_back.json()["primary_result"] is None
     assert read_back.json()["diagnostics"] == []
 

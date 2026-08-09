@@ -19,6 +19,7 @@ from uuid import uuid4
 from .canonical import canonical_json as _canonical_json
 from .canonical import sha256 as _sha256
 from .canonical import timestamp as _timestamp
+from .artifacts import quarantine_operation_material
 from .errors import SafeErrorCode, WorkspaceRequestError
 from .settings import QuotaPolicy
 
@@ -966,6 +967,27 @@ class DurableOperationsMixin:
             recovered.append(operation_id)
         return recovered
 
+    def cleanup_artifacts(
+        self,
+        layout: Any,
+        *,
+        eligible_before: datetime,
+        now: datetime | None = None,
+        operation_id: str | None = None,
+    ) -> Any:
+        """Run explicit retention against artifacts without appending governance events."""
+
+        from .artifacts import cleanup_artifacts as run_cleanup
+
+        return run_cleanup(
+            Path(layout.artifact_root),
+            eligible_before=eligible_before,
+            release_candidate_id=getattr(self, "_release_candidate_id", None),
+            database_path=Path(self._database_path),
+            now=now,
+            operation_id=operation_id,
+        )
+
 
 def _write_json_durable(path: Path, payload: object) -> None:
     temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
@@ -986,42 +1008,10 @@ def _quarantine_operation_material(
     *,
     reason_code: str,
 ) -> None:
-    temporary_root = layout.temporary_root / operation_id
-    published_root = layout.run_root / operation_id
-    quarantine_root = layout.quarantine_root / operation_id
-    if quarantine_root.exists():
-        if not quarantine_root.is_dir():
-            raise OSError("operation quarantine target is not a directory")
-        if temporary_root.exists():
-            temporary_target = quarantine_root / "temporary"
-            if temporary_target.exists():
-                raise OSError("operation temporary quarantine target already exists")
-            os.replace(temporary_root, temporary_target)
-        if published_root.exists():
-            published_target = quarantine_root / "published"
-            if published_target.exists():
-                raise OSError("operation published quarantine target already exists")
-            os.replace(published_root, published_target)
-    else:
-        quarantine_root.parent.mkdir(parents=True, exist_ok=True)
-        if temporary_root.exists() and not published_root.exists():
-            os.replace(temporary_root, quarantine_root)
-        elif published_root.exists() and not temporary_root.exists():
-            os.replace(published_root, quarantine_root)
-        else:
-            quarantine_root.mkdir()
-            if temporary_root.exists():
-                os.replace(temporary_root, quarantine_root / "temporary")
-            if published_root.exists():
-                os.replace(published_root, quarantine_root / "published")
-    _write_json_durable(
-        quarantine_root / "quarantine-manifest.json",
-        {
-            "schema_version": "analysis-run-quarantine-manifest.v1",
-            "operation_id": operation_id,
-            "reason_code": reason_code,
-            "cleanup_eligible": True,
-        },
+    quarantine_operation_material(
+        layout,
+        operation_id,
+        reason_code=reason_code,
     )
 
 

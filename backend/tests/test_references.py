@@ -1,13 +1,21 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import datetime, timezone
 import json
 from pathlib import Path
+import sqlite3
 
 from fastapi.testclient import TestClient
 import pytest
 
 from backend.app.canonical import canonical_json, sha256
+from backend.app.artifacts import (
+    ArtifactLifecycleError,
+    RunLease,
+    build_artifact_pin_set,
+    cleanup_artifacts,
+)
 from backend.app.main import create_app
 from backend.app.references import (
     ARTIFACT_CONTRACT_VERSION,
@@ -948,3 +956,207 @@ def test_promotion_rejects_a_quarantined_source_run_and_a_revoked_reference(
             release_candidate_id=RELEASE_ID,
             runtime_fingerprint=_runtime(RELEASE_ID, BUILD_ID),
         )
+
+
+def test_verification_failure_quarantines_material_and_returns_a_safe_status(
+    tmp_path: Path,
+) -> None:
+    artifact_root = tmp_path / "artifacts"
+    run_id = "analysis-run-00000000-0000-4000-8000-000000000020"
+    bundle_hash = _install_reference(
+        artifact_root,
+        run_id=run_id,
+        slot_id=DEFAULT_REFERENCE_SLOT_ID,
+        validated_at="2026-08-01T00:00:00+00:00",
+    )
+    _write_registry(
+        artifact_root,
+        [
+            {
+                "reference_slot_id": DEFAULT_REFERENCE_SLOT_ID,
+                "analysis_run_id": run_id,
+                "bundle_manifest_hash": bundle_hash,
+                "validation_attestation_id": "attestation-ordinary-demo",
+                "read_model_schema_version": READ_MODEL_SCHEMA_VERSION,
+                "intended_role": "semi_synthetic_hero",
+            }
+        ],
+    )
+    manifest = json.loads(
+        (artifact_root / "runs" / run_id / "manifest.json").read_text(encoding="utf-8")
+    )
+    result_descriptor = next(
+        item
+        for item in manifest["artifact_descriptors"]
+        if item["logical_role"] == "engine_result"
+    )
+    result_object = (
+        artifact_root
+        / "objects"
+        / result_descriptor["confidentiality_class"]
+        / "sha256"
+        / result_descriptor["sha256"][7:9]
+        / result_descriptor["sha256"][9:]
+    )
+    result_object.write_bytes(b"tampered")
+
+    store = ValidatedReferenceStore(
+        artifact_root,
+        release_candidate_id=RELEASE_ID,
+        runtime_fingerprint=_runtime(RELEASE_ID, BUILD_ID),
+    )
+
+    assert store.select_reference() is None
+    status = store.read_artifact_status(run_id)
+
+    assert status.lifecycle == "quarantined"
+    assert status.availability_state == "suppressed"
+    assert status.reason_code == "RUN_ARTIFACT_INTEGRITY_FAILED"
+    assert status.recovery_action == "EXPLICIT_RETRY_AS_NEW_OPERATION"
+    assert not (artifact_root / "runs" / run_id).exists()
+    assert (artifact_root / "quarantine" / run_id / "quarantine-manifest.json").is_file()
+    assert result_object.read_bytes() == b"tampered"
+    assert all("path" not in key.lower() for key in status.__dataclass_fields__)
+
+
+def test_run_leases_reject_conflicting_publication_without_overwriting_the_lease(
+    tmp_path: Path,
+) -> None:
+    artifact_root = tmp_path / "artifacts"
+    run_id = "analysis-run-00000000-0000-4000-8000-000000000021"
+    first = RunLease(artifact_root, run_id, owner_id="first")
+    second = RunLease(artifact_root, run_id, owner_id="second")
+
+    first.acquire()
+    with pytest.raises(ArtifactLifecycleError, match="RUN_LEASE_CONFLICT"):
+        second.acquire()
+    first.release()
+
+    second.acquire()
+    second.release()
+    assert not (artifact_root / "leases" / run_id).exists()
+
+
+def test_cleanup_honors_transitive_reference_pins_and_records_its_result(
+    tmp_path: Path,
+) -> None:
+    artifact_root = tmp_path / "artifacts"
+    pinned_run_id = "analysis-run-00000000-0000-4000-8000-000000000022"
+    unpinned_run_id = "analysis-run-00000000-0000-4000-8000-000000000023"
+    pinned_hash = _install_reference(
+        artifact_root,
+        run_id=pinned_run_id,
+        slot_id=DEFAULT_REFERENCE_SLOT_ID,
+        validated_at="2026-08-01T00:00:00+00:00",
+    )
+    publish_analysis_bundle(
+        artifact_root,
+        analysis_run_id=unpinned_run_id,
+        manifest=_manifest(RELEASE_ID, BUILD_ID, dataset_version_id="sha256:" + "b" * 64),
+        members=_members(
+            RELEASE_ID,
+            BUILD_ID,
+            dataset_version_id="sha256:" + "b" * 64,
+        ),
+    )
+    _write_registry(
+        artifact_root,
+        [
+            {
+                "reference_slot_id": DEFAULT_REFERENCE_SLOT_ID,
+                "analysis_run_id": pinned_run_id,
+                "bundle_manifest_hash": pinned_hash,
+                "validation_attestation_id": "attestation-ordinary-demo",
+                "read_model_schema_version": READ_MODEL_SCHEMA_VERSION,
+                "intended_role": "semi_synthetic_hero",
+            }
+        ],
+    )
+
+    pins = build_artifact_pin_set(
+        artifact_root,
+        release_candidate_id=RELEASE_ID,
+    )
+    receipt = cleanup_artifacts(
+        artifact_root,
+        release_candidate_id=RELEASE_ID,
+        eligible_before=datetime(2026, 8, 10, tzinfo=timezone.utc),
+        now=datetime(2026, 8, 11, tzinfo=timezone.utc),
+        operation_id="cleanup-test",
+    )
+
+    assert pinned_run_id in pins.run_ids
+    assert unpinned_run_id not in pins.run_ids
+    assert receipt.status == "SUCCEEDED"
+    assert receipt.deleted_run_count == 1
+    assert receipt.pinned_material_count >= 1
+    assert (artifact_root / "runs" / pinned_run_id).is_dir()
+    assert not (artifact_root / "runs" / unpinned_run_id).exists()
+    assert (artifact_root / "cleanup" / "cleanup-test.intent.json").is_file()
+    assert (artifact_root / "cleanup" / "cleanup-test.result.json").is_file()
+
+
+def test_pin_set_resolves_a_database_bundle_reference_to_its_run(
+    tmp_path: Path,
+) -> None:
+    artifact_root = tmp_path / "artifacts"
+    run_id = "analysis-run-00000000-0000-4000-8000-000000000024"
+    bundle_hash = publish_analysis_bundle(
+        artifact_root,
+        analysis_run_id=run_id,
+        manifest=_manifest(RELEASE_ID, BUILD_ID),
+        members=_members(RELEASE_ID, BUILD_ID),
+    ).bundle_manifest_hash
+    database_path = tmp_path / "core.sqlite3"
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("CREATE TABLE workspace_artifacts (artifact_ref TEXT)")
+        connection.execute(
+            "INSERT INTO workspace_artifacts (artifact_ref) VALUES (?)",
+            (bundle_hash,),
+        )
+        connection.commit()
+
+    pins = build_artifact_pin_set(
+        artifact_root,
+        database_path=database_path,
+    )
+
+    assert run_id in pins.run_ids
+    assert bundle_hash in pins.object_digests
+
+
+def test_cleanup_evaluates_staging_events_independently(
+    tmp_path: Path,
+) -> None:
+    artifact_root = tmp_path / "artifacts"
+    staging_root = artifact_root / "quarantine" / "staging"
+    eligible = staging_root / "eligible-event"
+    newer = staging_root / "newer-event"
+    for event_root, created_at in (
+        (eligible, "2026-08-01T00:00:00+00:00"),
+        (newer, "2026-08-20T00:00:00+00:00"),
+    ):
+        _write_json(
+            event_root / "quarantine-manifest.json",
+            {
+                "schema_version": "analysis-run-quarantine-manifest.v1",
+                "analysis_run_id": "analysis-run-00000000-0000-4000-8000-0000000000" + ("25" if event_root == newer else "26"),
+                "reason_code": "RUN_ARTIFACT_PUBLICATION_FAILED",
+                "recovery_action": "EXPLICIT_RETRY_AS_NEW_OPERATION",
+                "cleanup_eligible": True,
+                "created_at": created_at,
+            },
+        )
+        (event_root / "partial.json").write_text("partial", encoding="utf-8")
+
+    receipt = cleanup_artifacts(
+        artifact_root,
+        eligible_before=datetime(2026, 8, 10, tzinfo=timezone.utc),
+        now=datetime(2026, 8, 21, tzinfo=timezone.utc),
+        operation_id="cleanup-staging-test",
+    )
+
+    assert receipt.status == "SUCCEEDED"
+    assert receipt.deleted_quarantine_count == 1
+    assert not eligible.exists()
+    assert newer.is_dir()

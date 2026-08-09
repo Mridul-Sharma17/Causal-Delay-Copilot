@@ -13,6 +13,16 @@ from typing import Any, Iterable, Mapping
 from uuid import uuid4
 
 from .canonical import canonical_json, sha256
+from .artifacts import (
+    ArtifactLifecycleError,
+    ArtifactReadStatus,
+    RunLease,
+    ARTIFACT_MUTATION_LOCK,
+    artifact_read_status,
+    is_analysis_run_quarantined,
+    quarantine_analysis_run,
+    quarantine_staging_material,
+)
 from .diagnostics import DiagnosticIntegrityError
 from .validity import publish_validity_results
 
@@ -587,30 +597,33 @@ def _attestation_path(
 
 
 def _run_is_quarantined(artifact_root: Path, analysis_run_id: str) -> bool:
-    quarantine_root = artifact_root / "quarantine"
-    if not _regular_directory(quarantine_root):
-        return False
-    direct = quarantine_root / analysis_run_id
-    if direct.exists():
-        return True
     try:
-        manifests = quarantine_root.rglob("quarantine-manifest.json")
-        for manifest_path in manifests:
-            if not _regular_file(manifest_path):
-                continue
-            try:
-                payload = _read_canonical_file(manifest_path, "quarantine manifest")
-            except ReferenceVerificationError:
-                continue
-            if isinstance(payload, Mapping) and payload.get("analysis_run_id") == analysis_run_id:
-                return True
-            if isinstance(payload, Mapping) and payload.get("operation_id") == (
-                "operation-" + analysis_run_id.removeprefix("analysis-run-")
-            ):
-                return True
-    except OSError:
+        return is_analysis_run_quarantined(artifact_root, analysis_run_id)
+    except (ArtifactLifecycleError, OSError):
         return True
-    return False
+
+
+def _quarantine_verification_failure(
+    artifact_root: Path,
+    analysis_run_id: str,
+    *,
+    reason_code: str = "RUN_ARTIFACT_INTEGRITY_FAILED",
+) -> None:
+    if _run_is_quarantined(artifact_root, analysis_run_id):
+        return
+    run_directory = artifact_root / "runs" / analysis_run_id
+    if not run_directory.exists():
+        return
+    try:
+        quarantine_analysis_run(
+            artifact_root,
+            analysis_run_id,
+            reason_code=reason_code,
+        )
+    except (ArtifactLifecycleError, OSError) as error:
+        raise ReferenceVerificationError(
+            "analysis run quarantine is unavailable"
+        ) from error
 
 
 def _read_canonical_file(path: Path, label: str) -> object:
@@ -1042,12 +1055,19 @@ class ValidatedReferenceStore:
             raise ReferenceVerificationError("runtime release does not match current release")
         if _run_is_quarantined(self._artifact_root, analysis_run_id):
             raise ReferenceVerificationError("analysis run is quarantined")
-        return _verify_bundle(
-            self._artifact_root,
-            analysis_run_id,
-            self.expected_build_id,
-            self._runtime_fingerprint,
-        )
+        try:
+            return _verify_bundle(
+                self._artifact_root,
+                analysis_run_id,
+                self.expected_build_id,
+                self._runtime_fingerprint,
+            )
+        except ReferenceVerificationError:
+            _quarantine_verification_failure(
+                self._artifact_root,
+                analysis_run_id,
+            )
+            raise
 
     def _verify_entry(self, entry: Mapping[str, Any]) -> ValidatedReference:
         manifest, payloads = self._verify_run(str(entry["analysis_run_id"]))
@@ -1177,6 +1197,13 @@ class ValidatedReferenceStore:
                 try:
                     verified.append(self._verify_entry(entry))
                 except ReferenceVerificationError:
+                    try:
+                        _quarantine_verification_failure(
+                            self._artifact_root,
+                            str(entry["analysis_run_id"]),
+                        )
+                    except ReferenceVerificationError:
+                        pass
                     continue
             return sorted(
                 verified,
@@ -1320,6 +1347,22 @@ class ValidatedReferenceStore:
             scientific_request_digest=scientific_request_digest,
             cache_key=cache_key,
         )
+
+    def read_artifact_status(self, analysis_run_id: str) -> ArtifactReadStatus:
+        """Return an identity-safe lifecycle projection for one analysis run."""
+
+        bundle_manifest_hash: str | None = None
+        with self._lock:
+            try:
+                manifest, _ = self._verify_run(analysis_run_id)
+                bundle_manifest_hash = str(manifest["bundle_manifest_hash"])
+            except (ReferenceVerificationError, OSError, TypeError, ValueError):
+                pass
+            return artifact_read_status(
+                self._artifact_root,
+                analysis_run_id,
+                bundle_manifest_hash=bundle_manifest_hash,
+            )
 
     def promote_reference(
         self,
@@ -1724,6 +1767,8 @@ def publish_analysis_bundle(
 
     if _RUN_ID.fullmatch(analysis_run_id) is None:
         raise ValueError("analysis run id is unsupported")
+    if is_analysis_run_quarantined(artifact_root, analysis_run_id):
+        raise ValueError("analysis run is quarantined")
     if "artifact_descriptors" in manifest or "bundle_manifest_hash" in manifest:
         raise ValueError("publisher accepts only the manifest core")
     manifest_core = dict(manifest)
@@ -1773,13 +1818,27 @@ def publish_analysis_bundle(
     runs_root = artifact_root / "runs"
     temporary_root.mkdir(parents=True, exist_ok=True)
     runs_root.mkdir(parents=True, exist_ok=True)
-    stage_root = _under(
-        artifact_root,
-        temporary_root / f".{analysis_run_id}.{uuid4().hex}",
-    )
-    stage_root.mkdir()
     run_dir = _under(artifact_root, runs_root / analysis_run_id)
+    lease = RunLease(
+        artifact_root,
+        analysis_run_id,
+        owner_id=f"publisher-{uuid4().hex}",
+    )
+    ARTIFACT_MUTATION_LOCK.acquire()
     try:
+        lease.acquire()
+    except Exception:
+        ARTIFACT_MUTATION_LOCK.release()
+        raise
+    stage_root: Path | None = None
+    moved_global_objects: list[Path] = []
+    published = False
+    try:
+        stage_root = _under(
+            artifact_root,
+            temporary_root / f".{analysis_run_id}.{uuid4().hex}",
+        )
+        stage_root.mkdir()
         for descriptor in descriptors:
             object_path = _object_path(stage_root, descriptor)
             content = member_bytes[(descriptor["logical_role"], descriptor["logical_id"])]
@@ -1823,14 +1882,39 @@ def publish_analysis_bundle(
                 continue
             global_object.parent.mkdir(parents=True, exist_ok=True)
             os.replace(stage_object, global_object)
+            moved_global_objects.append(global_object)
         os.replace(stage_manifest, run_dir / "manifest.json")
-    except Exception:
+        published = True
+    except Exception as error:
+        quarantine_error: Exception | None = None
+        if stage_root is not None and stage_root.exists():
+            try:
+                quarantine_staging_material(
+                    artifact_root,
+                    stage_root,
+                    analysis_run_id,
+                    reason_code="RUN_ARTIFACT_PUBLICATION_FAILED",
+                    published_object_paths=tuple(moved_global_objects),
+                )
+            except Exception as quarantine_failure:
+                quarantine_error = quarantine_failure
         if run_dir.exists() and not (run_dir / "manifest.json").exists():
-            run_dir.rmdir()
+            try:
+                quarantine_analysis_run(
+                    artifact_root,
+                    analysis_run_id,
+                    reason_code="RUN_ARTIFACT_PUBLICATION_FAILED",
+                )
+            except Exception as quarantine_failure:
+                quarantine_error = quarantine_failure
+        if quarantine_error is not None:
+            raise ValueError("analysis run quarantine is unavailable") from error
         raise
     finally:
-        if stage_root.exists():
+        if published and stage_root is not None and stage_root.exists():
             shutil.rmtree(stage_root, ignore_errors=True)
+        lease.release()
+        ARTIFACT_MUTATION_LOCK.release()
     return PublishedBundle(analysis_run_id, bundle_manifest_hash)
 
 
@@ -1843,12 +1927,16 @@ def verify_published_analysis_bundle(
 ) -> PublishedBundle:
     """Verify a bundle again after its manifest has been published."""
 
-    manifest, _ = _verify_bundle(
-        artifact_root,
-        analysis_run_id,
-        expected_build_id,
-        expected_runtime,
-    )
+    try:
+        manifest, _ = _verify_bundle(
+            artifact_root,
+            analysis_run_id,
+            expected_build_id,
+            expected_runtime,
+        )
+    except ReferenceVerificationError:
+        _quarantine_verification_failure(artifact_root, analysis_run_id)
+        raise
     return PublishedBundle(
         analysis_run_id=analysis_run_id,
         bundle_manifest_hash=str(manifest["bundle_manifest_hash"]),
@@ -1864,9 +1952,13 @@ def read_verified_analysis_bundle(
 ) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
     """Read a verified manifest and its safe payloads for reproduction only."""
 
-    return _verify_bundle(
-        artifact_root,
-        analysis_run_id,
-        expected_build_id,
-        expected_runtime,
-    )
+    try:
+        return _verify_bundle(
+            artifact_root,
+            analysis_run_id,
+            expected_build_id,
+            expected_runtime,
+        )
+    except ReferenceVerificationError:
+        _quarantine_verification_failure(artifact_root, analysis_run_id)
+        raise

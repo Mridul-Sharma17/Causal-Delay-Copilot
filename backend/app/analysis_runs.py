@@ -5553,6 +5553,27 @@ def load_fresh_analysis_result(layout: Any, operation_id: str) -> dict[str, Any]
     status = result.get("status")
     if status not in {"estimated", "abstained", "failed"}:
         return None
+    analysis_run_id = analysis_run_id_for_operation(operation_id)
+
+    def quarantined_projection() -> dict[str, Any] | None:
+        from .artifacts import artifact_read_status
+
+        artifact_status = artifact_read_status(
+            Path(layout.artifact_root),
+            analysis_run_id,
+        )
+        if artifact_status.lifecycle != "quarantined":
+            return None
+        return {
+            "status": "failed",
+            "reason_code": artifact_status.reason_code
+            or "RUN_ARTIFACT_INTEGRITY_FAILED",
+            "failure_code": "RUN_ARTIFACT_INTEGRITY_FAILED",
+            "recovery_action": artifact_status.recovery_action,
+            "artifact_lifecycle": artifact_status.lifecycle,
+            "safe_detail": deepcopy(dict(safe_detail)),
+        }
+
     if status in {"estimated", "abstained"}:
         result_identity_digest = result.get("result_identity_digest")
         identity_payload = {
@@ -5578,18 +5599,24 @@ def load_fresh_analysis_result(layout: Any, operation_id: str) -> dict[str, Any]
         ):
             return None
         try:
+            from .artifacts import ArtifactLifecycleError, quarantine_analysis_run
             from .references import verify_published_analysis_bundle
 
             verified = verify_published_analysis_bundle(
                 Path(layout.artifact_root),
-                analysis_run_id=analysis_run_id_for_operation(operation_id),
+                analysis_run_id=analysis_run_id,
                 expected_build_id=str(runtime["application_build_id"]),
                 expected_runtime=runtime,
             )
             if verified.bundle_manifest_hash != bundle_manifest_hash:
-                return None
-        except (OSError, TypeError, ValueError):
-            return None
+                quarantine_analysis_run(
+                    Path(layout.artifact_root),
+                    analysis_run_id,
+                    reason_code="RUN_ARTIFACT_BINDING_MISMATCH",
+                )
+                return quarantined_projection()
+        except (ArtifactLifecycleError, OSError, TypeError, ValueError):
+            return quarantined_projection()
         diagnostics = result.get("diagnostics")
         grade = result.get("robustness_grade")
         verdict = result.get("evidence_verdict")
@@ -5699,6 +5726,7 @@ def load_fresh_analysis_result(layout: Any, operation_id: str) -> dict[str, Any]
             if isinstance(result.get("reproduction_comparison"), Mapping)
             else None
         ),
+        "artifact_lifecycle": "sealed" if status in {"estimated", "abstained"} else None,
     }
 
 
@@ -5709,6 +5737,11 @@ def analysis_run_status(
 ) -> dict[str, Any]:
     state = str(operation.state)
     result_status = execution_result.get("status") if execution_result else None
+    artifact_lifecycle = (
+        execution_result.get("artifact_lifecycle")
+        if execution_result and isinstance(execution_result.get("artifact_lifecycle"), str)
+        else None
+    )
     if state in {"QUEUED", "CANCELLING"}:
         status = "PENDING"
         lifecycle = "executing"
@@ -5732,11 +5765,17 @@ def analysis_run_status(
         reason_code = None
     elif state == "SUCCEEDED" and result_status == "failed":
         status = "FAILED"
-        lifecycle = "failed"
+        lifecycle = (
+            "quarantined" if artifact_lifecycle == "quarantined" else "failed"
+        )
         outcome = "failed"
         verification = "invalid"
         availability = "suppressed"
-        reason_code = execution_result.get("reason_code") or "ENGINE_INTERNAL_ERROR"
+        reason_code = execution_result.get("reason_code") or (
+            "RUN_ARTIFACT_INTEGRITY_FAILED"
+            if artifact_lifecycle == "quarantined"
+            else "ENGINE_INTERNAL_ERROR"
+        )
     elif state == "SUCCEEDED" and result_status == "abstained":
         status = "ABSTAINED"
         lifecycle = "sealed"
@@ -5830,7 +5869,12 @@ def analysis_run_status(
         ),
         "reason_code": reason_code,
         "failure_code": operation.failure_code or execution_failure_code,
-        "recovery_action": operation.recovery_action,
+        "recovery_action": (
+            execution_result.get("recovery_action")
+            if execution_result
+            and isinstance(execution_result.get("recovery_action"), str)
+            else operation.recovery_action
+        ),
         "estimator_executed": bool(
             execution_result.get("estimator_executed") is True
             if execution_result

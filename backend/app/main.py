@@ -600,6 +600,13 @@ def create_app(
                     ),
                 )
             )
+        artifact_state = operation.artifact_state
+        failure_code = operation.failure_code
+        recovery_action = operation.recovery_action
+        if analysis_run is not None and analysis_run.lifecycle == "quarantined":
+            artifact_state = "QUARANTINED"
+            failure_code = failure_code or analysis_run.failure_code
+            recovery_action = recovery_action or analysis_run.recovery_action
         return OperationResponse(
             schema_version="durable-operation.v1",
             operation_id=operation.operation_id,
@@ -613,10 +620,10 @@ def create_app(
             finished_at=operation.finished_at,
             cancel_requested_at=operation.cancel_requested_at,
             retry_of_operation_id=operation.retry_of_operation_id,
-            failure_code=operation.failure_code,
-            recovery_action=operation.recovery_action,
+            failure_code=failure_code,
+            recovery_action=recovery_action,
             resource_warnings=list(operation.resource_warnings),
-            artifact_state=operation.artifact_state,
+            artifact_state=artifact_state,
             retryable=operation.state
             in {"INTERRUPTED", "FAILED", "TIMED_OUT", "CANCELLED"},
             timeout_seconds=operation.timeout_seconds,
