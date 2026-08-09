@@ -11,6 +11,7 @@ from uuid import NAMESPACE_URL, uuid5
 from .audit import AuditIdempotencyConflict, AuditStoreUnavailable
 from .canonical import canonical_json as _canonical_json
 from .canonical import sha256 as _sha256
+from .decision_support import evaluate_decision_support
 from .diagnostics import diagnostic_summary as _diagnostic_summary
 from .validity import (
     ValidityIntegrityError,
@@ -520,6 +521,21 @@ def _snapshot_content(
         request=request,
         reference=reference,
     )
+    decision_support_projection = evaluate_decision_support(
+        investigation_request=request,
+        subject_applicability=subject_applicability,
+        subject_verdict=subject_verdict,
+        population_verdict=_mapping(reference.get("evidence_verdict")),
+        intended_role=_text(reference.get("intended_role")),
+        release_candidate_id=_text(reference.get("release_candidate_id")),
+        runtime_fingerprint_digest=_text(reference.get("runtime_fingerprint_digest")),
+    )
+    decision_support_registry = decision_support_projection.pop(
+        "registry_inspection",
+        None,
+    )
+    decision_support_projection.pop("content_hash", None)
+    decision_support_projection["content_hash"] = _sha256(decision_support_projection)
     ingress_attempt = _ingress_attempt_projection(
         connection,
         workspace_id=workspace_id,
@@ -571,6 +587,8 @@ def _snapshot_content(
         "subject_applicability": subject_applicability,
         "subject_verdict": subject_verdict,
         "rendered_subject_verdict": rendered_subject,
+        "decision_support": decision_support_projection,
+        "decision_support_registry": decision_support_registry,
         "action_lane": {
             "schema_version": "reference-journey-action-lane.v1",
             "state": action_state,
@@ -584,6 +602,58 @@ def _snapshot_content(
             "replay_source": "immutable_decision_brief_snapshot",
         },
     }
+
+
+def _valid_decision_support_registry(value: object) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    if (
+        value.get("inspection_kind") != "GOVERNED_RECORD_INSPECTION"
+        or value.get("effect_bearing") is not False
+        or value.get("consumed_by_evaluation") is not False
+    ):
+        return False
+    release_binding = value.get("release_binding")
+    if not isinstance(release_binding, Mapping) or release_binding.get("state") not in {
+        "BUNDLED_RELEASE_BOUND",
+        "RELEASE_BINDING_UNAVAILABLE",
+    }:
+        return False
+    for key in ("release_candidate_id", "runtime_fingerprint_digest"):
+        if release_binding.get(key) is not None and not isinstance(
+            release_binding.get(key), str
+        ):
+            return False
+
+    def valid_hash(record: object) -> bool:
+        if not isinstance(record, Mapping) or not isinstance(
+            record.get("content_hash"), str
+        ):
+            return False
+        content = deepcopy(dict(record))
+        content.pop("content_hash", None)
+        return _sha256(content) == record["content_hash"]
+
+    if not valid_hash(value.get("policy")):
+        return False
+    library = value.get("intervention_library")
+    if not isinstance(library, Mapping) or not valid_hash(library):
+        return False
+    options = library.get("options")
+    if not isinstance(options, list) or not all(valid_hash(option) for option in options):
+        return False
+    for collection_name in (
+        "driver_action_links",
+        "advisory_rubrics",
+        "monitoring_triggers",
+        "composite_reviews",
+    ):
+        collection = value.get(collection_name)
+        if not isinstance(collection, list) or not all(
+            valid_hash(record) for record in collection
+        ):
+            return False
+    return True
 
 
 def _snapshot_from_row(row: sqlite3.Row) -> dict[str, Any]:
@@ -604,6 +674,23 @@ def _snapshot_from_row(row: sqlite3.Row) -> dict[str, Any]:
         if not isinstance(subject_verdict, Mapping):
             raise DecisionBriefUnavailable
         if subject_verdict.get("scope") != "subject":
+            raise DecisionBriefUnavailable
+    decision_support = content.get("decision_support")
+    if decision_support is not None:
+        if not isinstance(decision_support, Mapping):
+            raise DecisionBriefUnavailable
+        decision_support_content = deepcopy(dict(decision_support))
+        decision_support_hash = decision_support_content.pop("content_hash", None)
+        if (
+            not isinstance(decision_support_hash, str)
+            or _sha256(decision_support_content) != decision_support_hash
+            or decision_support.get("schema_version")
+            != "decision-support-boundary.v1"
+        ):
+            raise DecisionBriefUnavailable
+    decision_support_registry = content.get("decision_support_registry")
+    if decision_support_registry is not None:
+        if not _valid_decision_support_registry(decision_support_registry):
             raise DecisionBriefUnavailable
     if content.get("schema_version") != DECISION_BRIEF_SNAPSHOT_SCHEMA_VERSION:
         raise DecisionBriefUnavailable

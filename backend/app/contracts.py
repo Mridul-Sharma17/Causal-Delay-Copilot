@@ -181,6 +181,8 @@ class DecisionBriefSnapshotResponse(BaseModel):
     lineage: dict[str, Any]
     reference: dict[str, Any]
     referenced_records: dict[str, Any]
+    decision_support: dict[str, Any] | None = None
+    decision_support_registry: dict[str, Any] | None = None
 
 
 class DecisionBriefResponse(BaseModel):

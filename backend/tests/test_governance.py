@@ -117,6 +117,23 @@ def test_decision_brief_snapshot_is_immutable_and_replay_does_not_read_current_r
         assert snapshot["subject_verdict"]["scope"] == "subject"
         assert snapshot["subject_applicability"]["state"] == "abstained"
         assert snapshot["action_lane"]["state"] == "read_only"
+        decision_support = snapshot["decision_support"]
+        assert decision_support["schema_version"] == "decision-support-boundary.v1"
+        assert decision_support["outcome"] == "NOT_PERMITTED"
+        assert decision_support["permission"][
+            "decision_support_evaluation_permitted"
+        ] is False
+        assert decision_support["decision_support_evaluation_id"] is None
+        assert decision_support["action_recommendation"] is None
+        assert decision_support["consumed_inputs"] == ["permission_envelope"]
+        assert "constraints_as_of" not in str(decision_support)
+        assert "registry_inspection" not in decision_support
+        assert snapshot["decision_support_registry"]["inspection_kind"] == (
+            "GOVERNED_RECORD_INSPECTION"
+        )
+        assert snapshot["decision_support_registry"]["release_binding"]["state"] == (
+            "BUNDLED_RELEASE_BOUND"
+        )
         assert snapshot["ingress_attempt"]["attempt"]["status"] == "accepted"
         assert (
             snapshot["lineage"]["payload"]["dataset_version"]["dataset_version_id"]

@@ -21,6 +21,8 @@ import {
   type AnalysisRunStatus,
   type AuditOccurrenceResponse,
   type DecisionBriefSnapshot,
+  type DecisionSupportBoundary,
+  type DecisionSupportRegistryInspection,
   type DiagnosticResult,
   type DiagnosticSummary,
   type DurableOperation,
@@ -505,6 +507,223 @@ function subjectApplicabilityLabel(
   }
 }
 
+function decisionSupportStateLabel(state: DecisionSupportBoundary["state"]): string {
+  switch (state) {
+    case "not_permitted":
+      return "Not permitted by the verified evidence";
+    case "inactive_driver":
+      return "Inactive driver — no option evaluated";
+    case "approval_dependent_suppressed":
+      return "Approval-dependent paths suppressed";
+    case "unavailable":
+      return "Decision Support unavailable";
+  }
+}
+
+function DecisionSupportActionsStage({
+  boundary,
+  registryInspection,
+}: {
+  boundary: DecisionSupportBoundary;
+  registryInspection: DecisionSupportRegistryInspection | null;
+}) {
+  const registry: Record<string, unknown> = registryInspection ?? {};
+  const releaseBinding =
+    typeof registry.release_binding === "object" && registry.release_binding !== null
+      ? (registry.release_binding as Record<string, unknown>)
+      : null;
+  const library =
+    typeof registry.intervention_library === "object" &&
+    registry.intervention_library !== null
+      ? (registry.intervention_library as Record<string, unknown>)
+      : null;
+  const libraryOptions =
+    library !== null && Array.isArray(library.options)
+      ? library.options.filter(
+          (option): option is Record<string, unknown> =>
+            typeof option === "object" && option !== null,
+        )
+      : [];
+  const governedRecords = [
+    {
+      label: "Intervention Library",
+      value: library === null ? "Unavailable" : library.state,
+      records: libraryOptions,
+    },
+    {
+      label: "Driver-Action Links",
+      value: "driver_action_links" in registry ? registry.driver_action_links : null,
+      records: Array.isArray(registry.driver_action_links)
+        ? registry.driver_action_links.filter(
+            (record): record is Record<string, unknown> =>
+              typeof record === "object" && record !== null,
+          )
+        : [],
+    },
+    {
+      label: "Advisory Rubrics",
+      value: "advisory_rubrics" in registry ? registry.advisory_rubrics : null,
+      records: Array.isArray(registry.advisory_rubrics)
+        ? registry.advisory_rubrics.filter(
+            (record): record is Record<string, unknown> =>
+              typeof record === "object" && record !== null,
+          )
+        : [],
+    },
+    {
+      label: "Monitoring Triggers",
+      value: "monitoring_triggers" in registry ? registry.monitoring_triggers : null,
+      records: Array.isArray(registry.monitoring_triggers)
+        ? registry.monitoring_triggers.filter(
+            (record): record is Record<string, unknown> =>
+              typeof record === "object" && record !== null,
+          )
+        : [],
+    },
+    {
+      label: "Composite Reviews",
+      value: "composite_reviews" in registry ? registry.composite_reviews : null,
+      records: Array.isArray(registry.composite_reviews)
+        ? registry.composite_reviews.filter(
+            (record): record is Record<string, unknown> =>
+              typeof record === "object" && record !== null,
+          )
+        : [],
+    },
+  ];
+
+  return (
+    <section className="actions-stage" aria-labelledby="actions-stage-heading">
+      <div className="record-heading">
+        <div>
+          <p className="eyebrow">Actions stage</p>
+          <h3 id="actions-stage-heading">Decision Support boundary</h3>
+        </div>
+        <span>{decisionSupportStateLabel(boundary.state)}</span>
+      </div>
+      <p className="verdict-language">
+        {boundary.reason ?? "Decision Support did not produce an effect-bearing result."}
+      </p>
+      <p className="verdict-next-step">
+        <strong>Next step:</strong>{" "}
+        {boundary.next_step ?? boundary.permission.next_step}
+      </p>
+      <dl className="verdict-facts">
+        <div>
+          <dt>Terminal outcome</dt>
+          <dd><code>{boundary.outcome}</code></dd>
+        </div>
+        <div>
+          <dt>Permission denial reason</dt>
+          <dd><code>{boundary.permission.denial_reason_code ?? "None"}</code></dd>
+        </div>
+        <div>
+          <dt>Action effect evidence</dt>
+          <dd><code>{boundary.action_effect_evidence}</code></dd>
+        </div>
+        <div>
+          <dt>Recommendation</dt>
+          <dd>None — approval is not fabricated.</dd>
+        </div>
+        <div>
+          <dt>Governed data release binding</dt>
+          <dd>
+            <code>{formatValue(releaseBinding?.state ?? "Unavailable")}</code>
+          </dd>
+        </div>
+      </dl>
+
+      <div className="action-evidence">
+        <strong>Evidence tags</strong>
+        <ul>
+          {Object.entries(boundary.evidence_tags).map(([slot, tag]) => (
+            <li key={slot}>
+              <span>{slot}</span>
+              <code>{tag}</code>
+            </li>
+          ))}
+        </ul>
+      </div>
+
+      <div className="action-suppressions">
+        <strong>Deterministic suppression reasons</strong>
+        {boundary.suppression_reasons.length === 0 ? (
+          <span>None recorded.</span>
+        ) : (
+          <ol>
+            {boundary.suppression_reasons.map((reason) => (
+              <li key={`${reason.priority}-${reason.code}`}>
+                <code>{reason.code}</code>
+                <span>{reason.reason}</span>
+              </li>
+            ))}
+          </ol>
+        )}
+      </div>
+
+      {boundary.options.length === 0 ? (
+        <p className="supporting-copy">No Decision Support evaluation was created.</p>
+      ) : (
+        <div className="action-options">
+          <strong>Option evaluations</strong>
+          <ul>
+            {boundary.options.map((option) => (
+              <li key={`${option.option_code}-${option.option_version}`}>
+                <div>
+                  <strong>{option.label}</strong>
+                  <code>{option.option_code} · {option.evaluation_state}</code>
+                </div>
+                <div>
+                  <span>
+                    {option.suppression_reasons.map((reason) => reason.code).join(", ")}
+                  </span>
+                  <code>
+                    {Object.entries(option.evidence_tags)
+                      .map(([slot, tag]) => `${slot}: ${tag}`)
+                      .join(" · ")}
+                  </code>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      <details className="governed-records">
+        <summary>Inspect governed Decision Support records</summary>
+        <div className="governed-record-list">
+          {governedRecords.map((group) => (
+            <div key={group.label}>
+              <strong>{group.label}</strong>
+              <span>
+                {Array.isArray(group.value)
+                  ? `${group.value.length} record${group.value.length === 1 ? "" : "s"}`
+                  : formatValue(group.value)}
+              </span>
+              <ul>
+                {group.records.map((record, index) => (
+                  <li key={`${group.label}-${String(record.option_code ?? record.link_id ?? record.rubric_id ?? record.trigger_id ?? index)}`}>
+                    <code>
+                      {String(
+                        record.option_code ??
+                          record.link_id ??
+                          record.rubric_id ??
+                          record.trigger_id ??
+                          "record",
+                      )}
+                    </code>
+                    <span>{formatValue(record.state ?? record.review_status ?? record.lifecycle_status)}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))}
+        </div>
+      </details>
+    </section>
+  );
+}
+
 function DecisionBriefPanel({
   state,
   snapshot,
@@ -644,6 +863,12 @@ function DecisionBriefPanel({
         <span>{formatValue(snapshot.action_lane.reason)}</span>
         <span>{formatValue(snapshot.action_lane.next_step)}</span>
       </div>
+      {snapshot.decision_support !== null && (
+        <DecisionSupportActionsStage
+          boundary={snapshot.decision_support}
+          registryInspection={snapshot.decision_support_registry}
+        />
+      )}
       <p className="audit-status">
         Immutable snapshot {snapshot.snapshot_id} · event {snapshot.event_seq}
       </p>

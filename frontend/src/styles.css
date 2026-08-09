@@ -278,6 +278,98 @@ code {
   background: #f4f4f4;
 }
 
+.actions-stage {
+  display: grid;
+  gap: 16px;
+  margin-top: 24px;
+  padding: 24px;
+  background: #ffffff;
+  border-top: 4px solid #da1e28;
+}
+
+.actions-stage h3 {
+  margin: 0;
+  font-size: 1.25rem;
+  font-weight: 500;
+}
+
+.action-evidence,
+.action-suppressions,
+.action-options,
+.governed-records {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  background: #f4f4f4;
+}
+
+.action-evidence ul,
+.action-suppressions ol,
+.action-options ul,
+.governed-record-list,
+.governed-record-list ul {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.action-evidence li,
+.action-suppressions li,
+.action-options li,
+.governed-record-list li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: baseline;
+  justify-content: space-between;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #c6c6c6;
+}
+
+.action-evidence li:last-child,
+.action-suppressions li:last-child,
+.action-options li:last-child,
+.governed-record-list li:last-child {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+.action-evidence code,
+.action-suppressions code,
+.action-options code,
+.governed-record-list code {
+  display: inline;
+  margin-top: 0;
+}
+
+.action-options li > div {
+  display: grid;
+  gap: 4px;
+}
+
+.governed-record-list > div {
+  display: grid;
+  gap: 8px;
+  padding: 12px 0;
+  border-bottom: 1px solid #c6c6c6;
+}
+
+.governed-record-list > div:last-child {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+.governed-record-list ul {
+  padding-left: 16px;
+}
+
+.governed-records summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
 .support-gates ul {
   display: grid;
   gap: 8px;

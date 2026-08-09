@@ -33,6 +33,72 @@ export type AuditOccurrenceResponse = {
   event_seq: number;
 };
 
+export type DecisionSupportEvidenceTags = {
+  DRIVER_EVIDENCE: string;
+  MECHANISTIC_LINK: string;
+  RULE_BASED_ELIGIBILITY: string;
+  ASSUMPTION_BASED_BENEFIT: string;
+};
+
+export type DecisionSupportSuppressionReason = {
+  code: string;
+  category: string;
+  priority: number;
+  reason: string;
+};
+
+export type DecisionSupportOption = Record<string, unknown> & {
+  option_code: string;
+  option_version: string;
+  label: string;
+  evaluation_state: string;
+  evidence_tags: DecisionSupportEvidenceTags;
+  action_effect_evidence: string;
+  suppression_reasons: DecisionSupportSuppressionReason[];
+};
+
+export type DecisionSupportRegistryInspection = Record<string, unknown> & {
+  inspection_kind: "GOVERNED_RECORD_INSPECTION";
+  effect_bearing: false;
+  consumed_by_evaluation: false;
+  release_binding: {
+    state: "BUNDLED_RELEASE_BOUND" | "RELEASE_BINDING_UNAVAILABLE";
+    release_candidate_id: string | null;
+    runtime_fingerprint_digest: string | null;
+  };
+};
+
+export type DecisionSupportBoundary = Record<string, unknown> & {
+  schema_version: "decision-support-boundary.v1";
+  outcome: "FAILED" | "NOT_PERMITTED" | "NO_ELIGIBLE_OPTION";
+  state:
+    | "not_permitted"
+    | "inactive_driver"
+    | "approval_dependent_suppressed"
+    | "unavailable";
+  primary_reason_code: string | null;
+  reason: string | null;
+  next_step: string | null;
+  permission: {
+    decision_support_evaluation_permitted: boolean;
+    denial_reason_code: string | null;
+    reason: string;
+    next_step: string;
+  };
+  subject_driver_state: Record<string, unknown> | null;
+  decision_support_evaluation_id: string | null;
+  options: DecisionSupportOption[];
+  evidence_tags: DecisionSupportEvidenceTags;
+  suppression_reasons: DecisionSupportSuppressionReason[];
+  action_effect_evidence: string;
+  action_recommendation: null;
+  tradeoff: Record<string, unknown> | null;
+  monitoring: Record<string, unknown>;
+  drafting: Record<string, unknown>;
+  authorization: Record<string, unknown>;
+  consumed_inputs: string[];
+};
+
 export type DecisionBriefSnapshot = {
   schema_version: "decision-brief-snapshot.v2";
   snapshot_id: string;
@@ -50,6 +116,8 @@ export type DecisionBriefSnapshot = {
   action_lane: Record<string, unknown> & {
     state: "read_only" | "unavailable";
   };
+  decision_support: DecisionSupportBoundary | null;
+  decision_support_registry: DecisionSupportRegistryInspection | null;
   investigation_request: Record<string, unknown>;
   ingress_attempt: Record<string, unknown>;
   lineage: Record<string, unknown>;
@@ -1074,6 +1142,174 @@ export function parseOperationMutationResponse(
   };
 }
 
+function parseDecisionSupportReason(value: unknown): DecisionSupportSuppressionReason {
+  if (
+    !isRecord(value) ||
+    typeof value.code !== "string" ||
+    typeof value.category !== "string" ||
+    !isNonNegativeInteger(value.priority) ||
+    typeof value.reason !== "string"
+  ) {
+    throw new Error("invalid Decision Support suppression reason");
+  }
+  return {
+    code: value.code,
+    category: value.category,
+    priority: value.priority,
+    reason: value.reason,
+  };
+}
+
+function parseDecisionSupportReasons(value: unknown): DecisionSupportSuppressionReason[] {
+  if (!Array.isArray(value)) {
+    throw new Error("invalid Decision Support suppression reasons");
+  }
+  return value.map(parseDecisionSupportReason);
+}
+
+function parseDecisionSupportTags(value: unknown): DecisionSupportEvidenceTags {
+  if (
+    !isRecord(value) ||
+    typeof value.DRIVER_EVIDENCE !== "string" ||
+    typeof value.MECHANISTIC_LINK !== "string" ||
+    typeof value.RULE_BASED_ELIGIBILITY !== "string" ||
+    typeof value.ASSUMPTION_BASED_BENEFIT !== "string"
+  ) {
+    throw new Error("invalid Decision Support evidence tags");
+  }
+  return {
+    DRIVER_EVIDENCE: value.DRIVER_EVIDENCE,
+    MECHANISTIC_LINK: value.MECHANISTIC_LINK,
+    RULE_BASED_ELIGIBILITY: value.RULE_BASED_ELIGIBILITY,
+    ASSUMPTION_BASED_BENEFIT: value.ASSUMPTION_BASED_BENEFIT,
+  };
+}
+
+function parseDecisionSupportBoundary(value: unknown): DecisionSupportBoundary {
+  if (!isRecord(value)) {
+    throw new Error("invalid Decision Support boundary");
+  }
+  if (
+    value.schema_version !== "decision-support-boundary.v1" ||
+    (value.outcome !== "FAILED" &&
+      value.outcome !== "NOT_PERMITTED" &&
+      value.outcome !== "NO_ELIGIBLE_OPTION") ||
+    (value.state !== "not_permitted" &&
+      value.state !== "inactive_driver" &&
+      value.state !== "approval_dependent_suppressed" &&
+      value.state !== "unavailable") ||
+    (value.primary_reason_code !== null && typeof value.primary_reason_code !== "string") ||
+    (value.reason !== null && typeof value.reason !== "string") ||
+    (value.next_step !== null && typeof value.next_step !== "string") ||
+    !isRecord(value.permission) ||
+    typeof value.permission.decision_support_evaluation_permitted !== "boolean" ||
+    (value.permission.denial_reason_code !== null &&
+      typeof value.permission.denial_reason_code !== "string") ||
+    typeof value.permission.reason !== "string" ||
+    typeof value.permission.next_step !== "string" ||
+    (value.subject_driver_state !== null && !isRecord(value.subject_driver_state)) ||
+    (value.decision_support_evaluation_id !== null &&
+      typeof value.decision_support_evaluation_id !== "string") ||
+    !Array.isArray(value.options) ||
+    typeof value.action_effect_evidence !== "string" ||
+    value.action_recommendation !== null ||
+    (value.tradeoff !== null && !isRecord(value.tradeoff)) ||
+    !isRecord(value.monitoring) ||
+    !isRecord(value.drafting) ||
+    !isRecord(value.authorization) ||
+    !Array.isArray(value.consumed_inputs) ||
+    !value.consumed_inputs.every((item) => typeof item === "string")
+  ) {
+    throw new Error("invalid Decision Support boundary");
+  }
+  const options = value.options.map((item) => {
+    if (
+      !isRecord(item) ||
+      typeof item.option_code !== "string" ||
+      typeof item.option_version !== "string" ||
+      typeof item.label !== "string" ||
+      typeof item.evaluation_state !== "string" ||
+      typeof item.action_effect_evidence !== "string"
+    ) {
+      throw new Error("invalid Decision Support option");
+    }
+    return {
+      ...item,
+      option_code: item.option_code,
+      option_version: item.option_version,
+      label: item.label,
+      evaluation_state: item.evaluation_state,
+      evidence_tags: parseDecisionSupportTags(item.evidence_tags),
+      action_effect_evidence: item.action_effect_evidence,
+      suppression_reasons: parseDecisionSupportReasons(item.suppression_reasons),
+    };
+  });
+  return {
+    ...value,
+    schema_version: "decision-support-boundary.v1",
+    outcome: value.outcome,
+    state: value.state,
+    primary_reason_code: value.primary_reason_code as string | null,
+    reason: value.reason as string | null,
+    next_step: value.next_step as string | null,
+    permission: {
+      decision_support_evaluation_permitted:
+        value.permission.decision_support_evaluation_permitted,
+      denial_reason_code: value.permission.denial_reason_code as string | null,
+      reason: value.permission.reason,
+      next_step: value.permission.next_step,
+    },
+    subject_driver_state:
+      value.subject_driver_state === null ? null : value.subject_driver_state,
+    decision_support_evaluation_id:
+      value.decision_support_evaluation_id === null
+        ? null
+        : (value.decision_support_evaluation_id as string),
+    options,
+    evidence_tags: parseDecisionSupportTags(value.evidence_tags),
+    suppression_reasons: parseDecisionSupportReasons(value.suppression_reasons),
+    action_effect_evidence: value.action_effect_evidence,
+    action_recommendation: null,
+    tradeoff: value.tradeoff === null ? null : value.tradeoff,
+    monitoring: value.monitoring,
+    drafting: value.drafting,
+    authorization: value.authorization,
+    consumed_inputs: value.consumed_inputs,
+  };
+}
+
+function parseDecisionSupportRegistry(
+  value: unknown,
+): DecisionSupportRegistryInspection {
+  if (
+    !isRecord(value) ||
+    value.inspection_kind !== "GOVERNED_RECORD_INSPECTION" ||
+    value.effect_bearing !== false ||
+    value.consumed_by_evaluation !== false ||
+    !isRecord(value.release_binding) ||
+    (value.release_binding.state !== "BUNDLED_RELEASE_BOUND" &&
+      value.release_binding.state !== "RELEASE_BINDING_UNAVAILABLE") ||
+    (value.release_binding.release_candidate_id !== null &&
+      typeof value.release_binding.release_candidate_id !== "string") ||
+    (value.release_binding.runtime_fingerprint_digest !== null &&
+      typeof value.release_binding.runtime_fingerprint_digest !== "string")
+  ) {
+    throw new Error("invalid Decision Support registry inspection");
+  }
+  return {
+    ...value,
+    inspection_kind: "GOVERNED_RECORD_INSPECTION",
+    effect_bearing: false,
+    consumed_by_evaluation: false,
+    release_binding: {
+      state: value.release_binding.state,
+      release_candidate_id: value.release_binding.release_candidate_id as string | null,
+      runtime_fingerprint_digest:
+        value.release_binding.runtime_fingerprint_digest as string | null,
+    },
+  };
+}
+
 function parseDecisionBriefSnapshot(value: unknown): DecisionBriefSnapshot {
   if (
     !isRecord(value) ||
@@ -1108,6 +1344,15 @@ function parseDecisionBriefSnapshot(value: unknown): DecisionBriefSnapshot {
   ) {
     throw new Error("invalid decision brief response");
   }
+  const decisionSupport =
+    value.decision_support === undefined || value.decision_support === null
+      ? null
+      : parseDecisionSupportBoundary(value.decision_support);
+  const decisionSupportRegistry =
+    value.decision_support_registry === undefined ||
+    value.decision_support_registry === null
+      ? null
+      : parseDecisionSupportRegistry(value.decision_support_registry);
   return {
     schema_version: "decision-brief-snapshot.v2",
     snapshot_id: value.snapshot_id,
@@ -1127,6 +1372,8 @@ function parseDecisionBriefSnapshot(value: unknown): DecisionBriefSnapshot {
         ? null
         : (value.rendered_subject_verdict as Record<string, string>),
     action_lane: value.action_lane as DecisionBriefSnapshot["action_lane"],
+    decision_support: decisionSupport,
+    decision_support_registry: decisionSupportRegistry,
     investigation_request: value.investigation_request,
     ingress_attempt: value.ingress_attempt,
     lineage: value.lineage,

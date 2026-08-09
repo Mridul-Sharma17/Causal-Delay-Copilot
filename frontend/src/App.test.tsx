@@ -158,6 +158,85 @@ const decisionBriefSnapshotResponse = {
     reason: "Subject applicability is insufficient; no action is authorized from this reference journey.",
     next_step: "Supply the frozen subject propensity support before applying population evidence.",
   },
+  decision_support: {
+    schema_version: "decision-support-boundary.v1",
+    outcome: "NOT_PERMITTED",
+    state: "not_permitted",
+    primary_reason_code: "SUBJECT_PROPENSITY_UNAVAILABLE",
+    reason: "Subject applicability is unavailable because subject propensity unavailable.",
+    next_step: "Supply the frozen subject propensity support before applying population evidence.",
+    permission: {
+      decision_support_evaluation_permitted: false,
+      denial_reason_code: "SUBJECT_PROPENSITY_UNAVAILABLE",
+      reason: "Subject applicability is unavailable because subject propensity unavailable.",
+      next_step: "Supply the frozen subject propensity support before applying population evidence.",
+    },
+    subject_driver_state: null,
+    decision_support_evaluation_id: null,
+    decision_support_evaluation_series_id: null,
+    decision_support_permission_digest: null,
+    decision_support_driver_state_digest: null,
+    options: [],
+    evidence_tags: {
+      DRIVER_EVIDENCE: "NOT_EVALUATED",
+      MECHANISTIC_LINK: "NOT_EVALUATED",
+      RULE_BASED_ELIGIBILITY: "NOT_EVALUATED",
+      ASSUMPTION_BASED_BENEFIT: "NOT_EVALUATED",
+    },
+    suppression_reasons: [
+      {
+        code: "SUBJECT_PROPENSITY_UNAVAILABLE",
+        category: "PERMISSION",
+        priority: 100,
+        reason: "Subject applicability is unavailable because subject propensity unavailable.",
+      },
+    ],
+    action_effect_evidence: "INTERVENTION_EFFECT_NOT_ESTIMATED",
+    action_recommendation: null,
+    tradeoff: null,
+    monitoring: { state: "NOT_EVALUATED" },
+    drafting: { state: "NOT_PERMITTED" },
+    authorization: { state: "NOT_PERMITTED" },
+    consumed_inputs: ["permission_envelope"],
+    content_hash: "sha256:decision-support",
+  },
+  decision_support_registry: {
+    inspection_kind: "GOVERNED_RECORD_INSPECTION",
+    effect_bearing: false,
+    consumed_by_evaluation: false,
+    release_binding: {
+      state: "BUNDLED_RELEASE_BOUND",
+      release_candidate_id: "local-local_development",
+      runtime_fingerprint_digest: "sha256:runtime",
+    },
+    intervention_library: {
+      identifier: "core-intervention-library",
+      version: "1",
+      state: "BUNDLED_CLOSED",
+      options: [
+        {
+          option_code: "PROTECTED_PRODUCTION_SLOT",
+          option_version: "1",
+          lifecycle_status: "ACTIVE",
+        },
+      ],
+    },
+    driver_action_links: [
+      { link_id: "dal:protected-production-slot:reactive", review_status: "PROVISIONAL" },
+    ],
+    advisory_rubrics: [
+      { rubric_id: "rubric:protected-production-slot", state: "UNAVAILABLE_PENDING_REVIEW" },
+    ],
+    monitoring_triggers: [
+      { trigger_id: "trigger:accept-and-monitor:reactive", state: "UNAVAILABLE_PENDING_REVIEW" },
+    ],
+    composite_reviews: [
+      {
+        option_code: "PROTECTED_SLOT_WITH_PHASED_DELIVERY",
+        state: "UNAVAILABLE_PENDING_REVIEW",
+      },
+    ],
+  },
   investigation_request: {
     investigation_request_id: "ir-1",
     content_hash: "sha256:request",
@@ -947,6 +1026,10 @@ describe("Core health journey", () => {
     expect(await screen.findByText("Canonical lineage")).toBeInTheDocument();
     expect(await screen.findByText("Investigation request accepted")).toBeInTheDocument();
     expect(await screen.findByText("Subject applicability")).toBeInTheDocument();
+    expect(await screen.findByText("Actions stage")).toBeInTheDocument();
+    expect(screen.getByText("No Decision Support evaluation was created.")).toBeInTheDocument();
+    expect(screen.getByText("Inspect governed Decision Support records")).toBeInTheDocument();
+    expect(screen.getByText("INTERVENTION_EFFECT_NOT_ESTIMATED")).toBeInTheDocument();
     expect(screen.getByText("Insufficient subject support — abstained")).toBeInTheDocument();
     expect(screen.getByText(/Replay verified from stored state at event 4/)).toBeInTheDocument();
     expect(await screen.findByText("Proactive preview accepted")).toBeInTheDocument();
