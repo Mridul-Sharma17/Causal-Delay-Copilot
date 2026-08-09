@@ -12,6 +12,12 @@ from .audit import AuditIdempotencyConflict, AuditStoreUnavailable
 from .canonical import canonical_json as _canonical_json
 from .canonical import sha256 as _sha256
 from .decision_support import evaluate_decision_support
+from .decision_support_heads import (
+    DecisionSupportEvaluationUnavailable,
+    ensure_decision_support_schema,
+    evaluation_series_id_for,
+    permission_invalidation_verdict_bindings,
+)
 from .diagnostics import diagnostic_summary as _diagnostic_summary
 from .validity import (
     ValidityIntegrityError,
@@ -22,7 +28,7 @@ from .validity import (
 )
 
 
-GOVERNANCE_SCHEMA_VERSION = "governance.v1"
+GOVERNANCE_SCHEMA_VERSION = "governance.v2"
 DECISION_BRIEF_SNAPSHOT_SCHEMA_VERSION = "decision-brief-snapshot.v2"
 REPLAY_SCHEMA_VERSION = "replay.v1"
 
@@ -124,6 +130,7 @@ def ensure_governance_schema(connection: sqlite3.Connection, *, create: bool) ->
             END
             """
         )
+    ensure_decision_support_schema(connection, create=create)
 
 
 def _as_utc(value: datetime) -> datetime:
@@ -516,6 +523,8 @@ def _snapshot_content(
     workspace_id: str,
     request: Mapping[str, Any],
     reference: Mapping[str, Any],
+    evaluation_occurrence_id: str | None = None,
+    evaluation_series_id: str | None = None,
 ) -> dict[str, Any]:
     subject_applicability, subject_verdict, rendered_subject = _subject_applicability(
         request=request,
@@ -529,6 +538,8 @@ def _snapshot_content(
         intended_role=_text(reference.get("intended_role")),
         release_candidate_id=_text(reference.get("release_candidate_id")),
         runtime_fingerprint_digest=_text(reference.get("runtime_fingerprint_digest")),
+        evaluation_occurrence_id=evaluation_occurrence_id,
+        evaluation_series_id=evaluation_series_id,
     )
     decision_support_registry = decision_support_projection.pop(
         "registry_inspection",
@@ -601,6 +612,69 @@ def _snapshot_content(
             "rendered_from": "stored_subject_verdict",
             "replay_source": "immutable_decision_brief_snapshot",
         },
+    }
+
+
+def _decision_support_identity_binding(
+    *,
+    request: Mapping[str, Any],
+    reference: Mapping[str, Any],
+    content: Mapping[str, Any],
+) -> dict[str, Any]:
+    decision_support = _mapping(content.get("decision_support")) or {}
+    subject_applicability = _mapping(content.get("subject_applicability")) or {}
+    driver_state = _mapping(decision_support.get("subject_driver_state"))
+    subject_identity = (
+        driver_state.get("subject_identity")
+        if driver_state is not None
+        else subject_applicability.get("subject_identity")
+    )
+    request_ref = {
+        "record_id": request.get("investigation_request_id"),
+        "content_hash": request.get("content_hash"),
+    }
+    stable_series_id = evaluation_series_id_for(
+        {
+            "investigation_request": request_ref,
+            "subject_identity": deepcopy(subject_identity),
+            "causal_decision_at": deepcopy(request.get("decision_cutoff")),
+            "trigger_mode": request.get("trigger_mode"),
+        }
+    )
+    return {
+        "evaluation_series_id": decision_support.get(
+            "decision_support_evaluation_series_id"
+        )
+        or stable_series_id,
+        "investigation_request": request_ref,
+        "subject_identity": deepcopy(subject_identity),
+        "causal_decision_at": deepcopy(request.get("decision_cutoff")),
+        "trigger_mode": request.get("trigger_mode"),
+        "trigger_mode_mapping": (
+            None if driver_state is None else driver_state.get("trigger_mode")
+        ),
+        "subject_verdict": deepcopy(content.get("subject_verdict")),
+        "population_verdict": deepcopy(reference.get("evidence_verdict")),
+        "subject_driver_state": deepcopy(driver_state),
+        "operational_snapshot": deepcopy(decision_support.get("case_constraint_snapshot")),
+        "governed_records": deepcopy(content.get("decision_support_registry")),
+        "assumptions": deepcopy(
+            decision_support.get("decision_support_value_inputs")
+            or decision_support.get("assumptions")
+        ),
+        "policy_versions": {
+            "decision_support_policy": {
+                "identifier": "decision-support-policy",
+                "version": "1",
+            },
+            "boundary_schema": decision_support.get("schema_version"),
+        },
+        "available_at": deepcopy(
+            decision_support.get("available_at")
+            or reference.get("validated_at")
+            or request.get("observation_cutoff")
+        ),
+        "decision_support": deepcopy(dict(decision_support)),
     }
 
 
@@ -886,12 +960,150 @@ class GovernanceMixin:
                         "reference dataset does not match the Investigation Request"
                     )
 
+                subject = _mapping(request.get("subject")) or {}
+                subject_identity = next(
+                    (
+                        subject.get(key)
+                        for key in ("order_line_id", "preview_subject_digest")
+                        if isinstance(subject.get(key), str) and subject.get(key)
+                    ),
+                    None,
+                )
+                series_id = evaluation_series_id_for(
+                    {
+                        "investigation_request": {
+                            "record_id": request.get("investigation_request_id"),
+                            "content_hash": request.get("content_hash"),
+                        },
+                        "subject_identity": subject_identity,
+                        "causal_decision_at": deepcopy(request.get("decision_cutoff")),
+                        "trigger_mode": request.get("trigger_mode"),
+                    }
+                )
                 content = _snapshot_content(
                     connection=connection,
                     workspace_id=workspace_id,
                     request=request,
                     reference=reference_projection,
+                    evaluation_series_id=series_id,
                 )
+                decision_support = _mapping(content.get("decision_support"))
+                if decision_support is not None:
+                    identity_binding = _decision_support_identity_binding(
+                        request=request,
+                        reference=reference_projection,
+                        content=content,
+                    )
+                    head = self._head_row_locked(
+                        connection,
+                        workspace_id,
+                        str(identity_binding["evaluation_series_id"]),
+                    )
+                    expected_head = (
+                        None if head is None else str(head["head_occurrence_id"])
+                    )
+                    expected_head_digest = (
+                        None if head is None else str(head["head_digest"])
+                    )
+                    expected_head_result_hash = (
+                        None if head is None else str(head["head_result_hash"])
+                    )
+                    if (
+                        decision_support.get("permission", {}).get(
+                            "decision_support_evaluation_permitted"
+                        )
+                        is True
+                        and decision_support.get("decision_support_evaluation_id")
+                    ):
+                        publication = self._publish_decision_support_evaluation_locked(
+                            connection,
+                            workspace_id,
+                            idempotency_key=f"{idempotency_key}:evaluation",
+                            evaluation=decision_support,
+                            identity_binding=identity_binding,
+                            expected_head_occurrence_id=expected_head,
+                            expected_head_digest=expected_head_digest,
+                            expected_head_result_hash=expected_head_result_hash,
+                            now=current_time,
+                        )
+                        published_decision_support = publication.result_projection
+                        lifecycle = self._series_read_model_locked(
+                            connection,
+                            workspace_id=workspace_id,
+                            evaluation_series_id=str(identity_binding["evaluation_series_id"]),
+                        )
+                        if lifecycle is None:
+                            raise DecisionSupportEvaluationUnavailable
+                        published_decision_support["evaluation_lifecycle"] = lifecycle
+                        published_decision_support.pop("content_hash", None)
+                        published_decision_support["content_hash"] = _sha256(
+                            published_decision_support
+                        )
+                        content["decision_support"] = published_decision_support
+                    elif (
+                        decision_support.get("outcome") == "NOT_PERMITTED"
+                        and head is not None
+                        and str(head["head_kind"]) == "EVALUATION"
+                    ):
+                        permission_provenance = decision_support.get(
+                            "permission_provenance"
+                        )
+                        superseding_verdicts = permission_invalidation_verdict_bindings(
+                            permission_provenance
+                        )
+                        if superseding_verdicts is None:
+                            raise DecisionSupportEvaluationUnavailable(
+                                "permission invalidation requires exact superseding verdict bindings"
+                            )
+                        authoritative_invalidation = next(
+                            (
+                                binding
+                                for binding in superseding_verdicts.values()
+                                if binding is not None
+                            ),
+                            None,
+                        )
+                        predecessor_head = self._validated_head_read_model(
+                            connection,
+                            head,
+                        )
+                        invalidated_artifact = _mapping(
+                            predecessor_head.get("head_record_ref_and_hash")
+                        )
+                        if invalidated_artifact is None or authoritative_invalidation is None:
+                            raise DecisionSupportEvaluationUnavailable(
+                                "permission invalidation artifact bindings are unavailable"
+                            )
+                        invalidation = self._invalidate_decision_support_evaluation_locked(
+                            connection,
+                            workspace_id,
+                            idempotency_key=f"{idempotency_key}:permission-invalidation",
+                            evaluation_series_id=str(identity_binding["evaluation_series_id"]),
+                            expected_head_occurrence_id=str(head["head_occurrence_id"]),
+                            expected_head_digest=str(head["head_digest"]),
+                            expected_head_result_hash=str(head["head_result_hash"]),
+                            invalidation_kind="PERMISSION_INVALIDATION",
+                            invalidated_artifact_ref_and_hash=invalidated_artifact,
+                            authoritative_invalidation_ref_and_hash=authoritative_invalidation,
+                            reason_code="DECISION_SUPPORT_VERDICT_PERMISSION_DOWNGRADED",
+                            permission_provenance=permission_provenance,
+                            now=current_time,
+                        )
+                        decision_support["decision_support_evaluation_series_id"] = str(
+                            identity_binding["evaluation_series_id"]
+                        )
+                        decision_support["decision_support_invalidation"] = deepcopy(
+                            invalidation.invalidation["decision_support_invalidation"]
+                        )
+                        decision_support["evaluation_lifecycle"] = (
+                            self._series_read_model_locked(
+                                connection,
+                                workspace_id=workspace_id,
+                                evaluation_series_id=str(identity_binding["evaluation_series_id"]),
+                            )
+                        )
+                        decision_support.pop("content_hash", None)
+                        decision_support["content_hash"] = _sha256(decision_support)
                 content_hash = _sha256(content)
                 content["content_hash"] = content_hash
                 mutation = self._record_mutation_locked(

@@ -16,6 +16,7 @@ from .canonical import canonical_json as _canonical_json
 from .canonical import field as _canonical_field
 from .canonical import sha256 as _sha256
 from .governance import GovernanceMixin, ensure_governance_schema
+from .decision_support_heads import DecisionSupportEvaluationMixin
 from .operations import DurableOperationsMixin, ensure_operation_schema
 from .risk import ReactiveInvestigationMixin, ensure_risk_schema
 
@@ -2423,6 +2424,7 @@ class LineageStore(
     DurableOperationsMixin,
     ReactiveInvestigationMixin,
     GovernanceMixin,
+    DecisionSupportEvaluationMixin,
     AuditStore,
 ):
     """The single SQLite writer for audit events and immutable intake records."""

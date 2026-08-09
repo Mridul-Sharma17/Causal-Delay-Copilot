@@ -800,6 +800,8 @@ def evaluate_decision_support(
     release_candidate_id: str | None = None,
     runtime_fingerprint_digest: str | None = None,
     synthetic_conformance: Mapping[str, Any] | None = None,
+    evaluation_occurrence_id: str | None = None,
+    evaluation_series_id: str | None = None,
 ) -> dict[str, Any]:
     """Project the shipped Decision Support boundary without authorizing action."""
 
@@ -950,12 +952,10 @@ def evaluate_decision_support(
                     "Continue with evidence-only review; no driver-linked option is "
                     "available from an inactive driver."
                 ),
-                "decision_support_evaluation_id": _stable_id(
-                    "dse", evaluation_identity
-                ),
-                "decision_support_evaluation_series_id": _stable_id(
-                    "dses", evaluation_identity
-                ),
+                "decision_support_evaluation_id": evaluation_occurrence_id
+                or _stable_id("dse", evaluation_identity),
+                "decision_support_evaluation_series_id": evaluation_series_id
+                or _stable_id("dses", evaluation_identity),
                 "decision_support_driver_state_digest": _sha256(driver_state),
                 "options": _inactive_options(reason),
                 "suppression_reasons": [
@@ -1076,12 +1076,10 @@ def evaluate_decision_support(
                 "Use the inspectable evidence and governed-record states; do not treat "
                 "this shipped data as an approved action path."
             ),
-            "decision_support_evaluation_id": _stable_id(
-                "dse", evaluation_identity
-            ),
-            "decision_support_evaluation_series_id": _stable_id(
-                "dses", evaluation_identity
-            ),
+            "decision_support_evaluation_id": evaluation_occurrence_id
+            or _stable_id("dse", evaluation_identity),
+            "decision_support_evaluation_series_id": evaluation_series_id
+            or _stable_id("dses", evaluation_identity),
             "decision_support_driver_state_digest": _sha256(driver_state),
             "decision_support_input_digest": _sha256(
                 {

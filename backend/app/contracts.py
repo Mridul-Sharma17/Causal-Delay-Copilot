@@ -90,6 +90,8 @@ class AuditOccurrenceViewResponse(BaseModel):
         "REACTIVE_INGRESS",
         "PROACTIVE_INGRESS",
         "DECISION_BRIEF_SNAPSHOT",
+        "DECISION_SUPPORT_EVALUATION",
+        "DECISION_SUPPORT_INVALIDATION",
         "ANALYSIS_RUN_DELIVERY",
         "REFRESH_INVESTIGATION_SNAPSHOT",
     ]
@@ -131,6 +133,14 @@ class AuditOccurrenceViewResponse(BaseModel):
         "OUTCOME_TEMPORALLY_INVALID",
         "CANCELLED_BEFORE_MILESTONE",
         "DECISION_BRIEF_PUBLISHED",
+        "FAILED",
+        "NOT_PERMITTED",
+        "NO_ELIGIBLE_OPTION",
+        "TRADEOFF_REQUIRES_MANAGER_CHOICE",
+        "RECOMMENDATION_AVAILABLE",
+        "PERMISSION_INVALIDATION",
+        "EVIDENCE_INTEGRITY_INVALIDATION",
+        "ADVICE_CURRENTNESS_INVALIDATION",
         "FRESH_ANALYSIS_REQUESTED",
         "FRESH_REPRODUCTION_REQUESTED",
         "REFRESH_ANALYSIS_REQUESTED",
@@ -190,6 +200,56 @@ class DecisionBriefResponse(BaseModel):
 
     result: Literal["CREATED", "IDEMPOTENT_REPLAY"]
     snapshot: DecisionBriefSnapshotResponse
+
+
+class DecisionSupportReferenceAndHash(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reference: str = Field(min_length=1, max_length=512)
+    content_hash: str = Field(min_length=1, max_length=128)
+
+
+class DecisionSupportInvalidationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    idempotency_key: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+    )
+    expected_head_occurrence_id: str = Field(min_length=1, max_length=128)
+    expected_head_digest: str = Field(min_length=1, max_length=128)
+    expected_head_result_hash: str = Field(min_length=1, max_length=128)
+    invalidation_kind: Literal[
+        "PERMISSION_INVALIDATION",
+        "EVIDENCE_INTEGRITY_INVALIDATION",
+        "ADVICE_CURRENTNESS_INVALIDATION",
+    ]
+    invalidated_artifact_ref_and_hash: DecisionSupportReferenceAndHash
+    authoritative_invalidation_ref_and_hash: DecisionSupportReferenceAndHash
+    reason_code: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+    )
+
+
+class DecisionSupportEvaluationSeriesResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    schema_version: Literal["decision-support-evaluation-read-model.v1"]
+    evaluation_series_id: str
+    identity_binding: dict[str, Any]
+    head: dict[str, Any]
+    history: list[dict[str, Any]]
+
+
+class DecisionSupportInvalidationResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    result: Literal["CREATED", "IDEMPOTENT_REPLAY"]
+    invalidation: dict[str, Any]
+    head: dict[str, Any]
 
 
 class ReplayResponse(BaseModel):

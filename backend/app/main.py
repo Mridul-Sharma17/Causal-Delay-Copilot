@@ -23,6 +23,9 @@ from .contracts import (
     DecisionBriefRequest,
     DecisionBriefResponse,
     DecisionBriefSnapshotResponse,
+    DecisionSupportEvaluationSeriesResponse,
+    DecisionSupportInvalidationRequest,
+    DecisionSupportInvalidationResponse,
     DemoWorkspaceResponse,
     DatasetVersionListResponse,
     ErrorResponse,
@@ -68,6 +71,12 @@ from .analysis_runs import (
 from .governance import (
     DecisionBriefUnavailable,
     InvestigationRequestUnavailable,
+)
+from .decision_support_heads import (
+    DecisionSupportEvaluationConflict,
+    DecisionSupportEvaluationSeriesUnavailable,
+    DecisionSupportEvaluationUnavailable,
+    DecisionSupportHeadRaceLost,
 )
 from .ingestion import (
     DatasetVersionUnavailable,
@@ -425,6 +434,50 @@ def create_app(
             503,
             "CORE_STORE_UNAVAILABLE",
             "RESTORE_CORE_STATE_AND_RETRY",
+        )
+
+    @app.exception_handler(DecisionSupportHeadRaceLost)
+    async def handle_decision_support_head_race(
+        _: Request,
+        __: DecisionSupportHeadRaceLost,
+    ) -> JSONResponse:
+        return _error_response(
+            409,
+            SafeErrorCode.DECISION_SUPPORT_HEAD_RACE.value,
+            "READ_THE_CURRENT_DECISION_SUPPORT_HEAD_AND_RETRY",
+        )
+
+    @app.exception_handler(DecisionSupportEvaluationConflict)
+    async def handle_decision_support_conflict(
+        _: Request,
+        __: DecisionSupportEvaluationConflict,
+    ) -> JSONResponse:
+        return _error_response(
+            409,
+            SafeErrorCode.DECISION_SUPPORT_EVALUATION_CONFLICT.value,
+            "USE_A_NEW_DECISION_SUPPORT_IDEMPOTENCY_KEY",
+        )
+
+    @app.exception_handler(DecisionSupportEvaluationSeriesUnavailable)
+    async def handle_decision_support_series_unavailable(
+        _: Request,
+        __: DecisionSupportEvaluationSeriesUnavailable,
+    ) -> JSONResponse:
+        return _error_response(
+            404,
+            SafeErrorCode.DECISION_SUPPORT_SERIES_UNAVAILABLE.value,
+            "CHECK_THE_DECISION_SUPPORT_EVALUATION_SERIES_AND_RETRY",
+        )
+
+    @app.exception_handler(DecisionSupportEvaluationUnavailable)
+    async def handle_decision_support_unavailable(
+        _: Request,
+        __: DecisionSupportEvaluationUnavailable,
+    ) -> JSONResponse:
+        return _error_response(
+            503,
+            SafeErrorCode.DECISION_SUPPORT_EVALUATION_UNAVAILABLE.value,
+            "RESTORE_DECISION_SUPPORT_STATE_AND_RETRY",
         )
 
     @app.exception_handler(DecisionBriefUnavailable)
@@ -1063,6 +1116,67 @@ def create_app(
         response = DecisionBriefSnapshotResponse.model_validate(snapshot)
         return attach_workspace_cookie(
             JSONResponse(status_code=200, content=response.model_dump(mode="json")),
+            resolution,
+        )
+
+    @app.get(
+        "/api/decision-support/evaluation-series/{evaluation_series_id}",
+        response_model=DecisionSupportEvaluationSeriesResponse,
+    )
+    async def get_decision_support_evaluation_series(
+        request: Request,
+        evaluation_series_id: str,
+    ) -> JSONResponse:
+        resolution = resolve_workspace(request)
+        series = core_store.get_decision_support_evaluation_series(
+            resolution.snapshot.workspace_id,
+            evaluation_series_id,
+        )
+        if series is None:
+            return attach_workspace_cookie(workspace_resource_unavailable(), resolution)
+        response = DecisionSupportEvaluationSeriesResponse.model_validate(series)
+        return attach_workspace_cookie(
+            JSONResponse(status_code=200, content=response.model_dump(mode="json")),
+            resolution,
+        )
+
+    @app.post(
+        "/api/decision-support/evaluation-series/{evaluation_series_id}/invalidations",
+        response_model=DecisionSupportInvalidationResponse,
+        status_code=201,
+    )
+    async def invalidate_decision_support_evaluation(
+        request_context: Request,
+        evaluation_series_id: str,
+        request: DecisionSupportInvalidationRequest,
+    ) -> JSONResponse:
+        resolution = resolve_workspace(request_context)
+        stored = core_store.invalidate_decision_support_evaluation(
+            resolution.snapshot.workspace_id,
+            idempotency_key=request.idempotency_key,
+            evaluation_series_id=evaluation_series_id,
+            expected_head_occurrence_id=request.expected_head_occurrence_id,
+            expected_head_digest=request.expected_head_digest,
+            expected_head_result_hash=request.expected_head_result_hash,
+            invalidation_kind=request.invalidation_kind,
+            invalidated_artifact_ref_and_hash=(
+                request.invalidated_artifact_ref_and_hash.model_dump()
+            ),
+            authoritative_invalidation_ref_and_hash=(
+                request.authoritative_invalidation_ref_and_hash.model_dump()
+            ),
+            reason_code=request.reason_code,
+        )
+        response = DecisionSupportInvalidationResponse(
+            result=stored.result,
+            invalidation=stored.invalidation,
+            head=stored.head,
+        )
+        return attach_workspace_cookie(
+            JSONResponse(
+                status_code=200 if stored.result == "IDEMPOTENT_REPLAY" else 201,
+                content=response.model_dump(mode="json"),
+            ),
             resolution,
         )
 

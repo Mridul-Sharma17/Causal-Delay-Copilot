@@ -815,6 +815,18 @@ describe("Decision Support publication states", () => {
         runner_up: null,
       },
       tradeoff: null,
+      evaluation_lifecycle: {
+        schema_version: "decision-support-evaluation-read-model.v1",
+        evaluation_series_id: "series-1",
+        head: {
+          head_kind: "PERMISSION_INVALIDATION",
+          advice_state: "invalidated",
+        },
+        history: [
+          { record_type: "evaluation", record_state: "invalidated" },
+          { record_type: "advice", record_state: "non-head" },
+        ],
+      },
     } as DecisionSupportBoundary;
 
     render(
@@ -827,6 +839,8 @@ describe("Decision Support publication states", () => {
     expect(screen.getByText("Recommendation available")).toBeInTheDocument();
     expect(screen.getByText("NOT_RECORDED")).toBeInTheDocument();
     expect(screen.getByText("PROTECTED_PRODUCTION_SLOT")).toBeInTheDocument();
+    expect(screen.getByText("PERMISSION_INVALIDATION")).toBeInTheDocument();
+    expect(screen.getByText("invalidated")).toBeInTheDocument();
 
     cleanup();
 

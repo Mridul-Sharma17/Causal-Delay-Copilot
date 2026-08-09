@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from copy import deepcopy
 from pathlib import Path
 import sqlite3
 from types import SimpleNamespace
@@ -9,6 +10,7 @@ from fastapi.testclient import TestClient
 import pytest
 
 import backend.app.governance as governance
+from backend.app.canonical import sha256 as _sha256
 from backend.app.diagnostics import evaluate_primary_interval
 from backend.app.main import create_app
 from backend.app.settings import Settings
@@ -217,3 +219,259 @@ def test_decision_brief_snapshot_is_immutable_and_replay_does_not_read_current_r
     assert replay.json()["status"] == "REPLAYED"
     assert replay.json()["snapshot"] == snapshot
     assert replay.json()["requested_event_seq"] == replay_event_seq
+
+
+def test_decision_brief_publishes_successors_and_permission_invalidation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with TestClient(create_app(Settings(database_path=tmp_path / "core.sqlite3"))) as client:
+        imported = client.post(
+            "/api/ingestion-runs",
+            json={
+                "idempotency_key": "governance-heads-import",
+                "dataset_key": "semi-synthetic-hero",
+                "mapping_manifest_id": "semi-synthetic-hero.mapping.v1",
+            },
+        )
+        dataset_version_id = imported.json()["dataset_version_id"]
+        ingress = client.post(
+            "/api/investigations/reactive/fixtures",
+            json={
+                "dataset_version_id": dataset_version_id,
+                "fixture_id": "hero-reactive-risk-v1",
+            },
+        )
+        request_id = ingress.json()["attempt"]["investigation_request_id"]
+        workspace_id = client.get("/api/workspace").json()["workspace_id"]
+        stored_request = client.app.state.audit_store.get_investigation_request(
+            workspace_id, request_id
+        )
+        assert stored_request is not None
+        subject_identity = stored_request["subject"]["order_line_id"]
+        reference = _reference()
+        reference.dataset_version_id = dataset_version_id
+        client.app.state.reference_store.read_model = lambda *args, **kwargs: reference
+
+        original_evaluator = governance.evaluate_decision_support
+        seed_subject_verdict = {
+            "scope": "subject",
+            "verdict_code": "SUPPORTED_UNDER_ASSUMPTIONS",
+            "decision_support_role_permitted": True,
+            "decision_support_evaluation_permitted": True,
+        }
+        seed_subject_verdict["content_hash"] = _sha256(seed_subject_verdict)
+        seed_population_verdict = {
+            "scope": "population",
+            "decision_support_role_permitted": True,
+            "decision_support_evaluation_permitted": True,
+        }
+        seed_population_verdict["content_hash"] = _sha256(seed_population_verdict)
+        denied_subject_verdict = {
+            "scope": "subject",
+            "verdict_code": "INSUFFICIENT",
+            "decision_support_role_permitted": False,
+            "decision_support_evaluation_permitted": False,
+            "primary_trigger_code": "SUBJECT_OVERLAP_INSUFFICIENT",
+        }
+        denied_subject_verdict["content_hash"] = _sha256(denied_subject_verdict)
+        denied_population_verdict = {
+            "scope": "population",
+            "decision_support_role_permitted": False,
+            "decision_support_evaluation_permitted": False,
+            "primary_trigger_code": "POPULATION_EVIDENCE_UNAVAILABLE",
+        }
+        denied_population_verdict["content_hash"] = _sha256(denied_population_verdict)
+        seed_result = original_evaluator(
+            investigation_request={
+                "investigation_request_id": "seed-investigation",
+                "trigger_mode": "reactive",
+                "subject": {"order_line_id": "seed-line"},
+                "causal_engine_input": {
+                    "supplier_load_exposure": {
+                        "primary": {"high_load_exposure": True}
+                    }
+                },
+            },
+            subject_applicability={
+                "state": "applicable",
+                "subject_identity": "seed-line",
+                "reason": "Subject support is sufficient.",
+                "next_step": "Inspect the separately governed action boundary.",
+            },
+            subject_verdict=seed_subject_verdict,
+            population_verdict=seed_population_verdict,
+            intended_role="semi_synthetic_hero",
+            release_candidate_id="local-default",
+            runtime_fingerprint_digest="sha256:" + "e" * 64,
+        )
+        assert seed_result["decision_support_evaluation_id"] is not None
+
+        def permitted_decision_support(**kwargs: object) -> dict[str, object]:
+            result = deepcopy(seed_result)
+            result["decision_support_evaluation_id"] = "calculated-evaluation-id"
+            result["decision_support_evaluation_series_id"] = kwargs[
+                "evaluation_series_id"
+            ]
+            driver_state = result["subject_driver_state"]
+            assert isinstance(driver_state, dict)
+            driver_state["subject_identity"] = subject_identity
+            driver_state["dataset_version_id"] = dataset_version_id
+            driver_state["causal_decision_at"] = stored_request["decision_cutoff"]
+            return result
+
+        def denied_decision_support(**kwargs: object) -> dict[str, object]:
+            result = permitted_decision_support(**kwargs)
+            permission_provenance = result["permission_provenance"]
+            assert isinstance(permission_provenance, dict)
+            permission_provenance = deepcopy(permission_provenance)
+            permission_provenance["subject_verdict_ref_and_hash"] = {
+                "scope": "subject",
+                "reference": denied_subject_verdict["content_hash"],
+                "content_hash": denied_subject_verdict["content_hash"],
+            }
+            permission_provenance["population_verdict_ref_and_hash"] = {
+                "scope": "population",
+                "reference": denied_population_verdict["content_hash"],
+                "content_hash": denied_population_verdict["content_hash"],
+            }
+            result.update(
+                {
+                    "outcome": "NOT_PERMITTED",
+                    "state": "not_permitted",
+                    "primary_reason_code": "SUBJECT_OVERLAP_INSUFFICIENT",
+                    "reason": "Subject support is insufficient.",
+                    "next_step": "Supply the frozen subject support.",
+                    "permission": {
+                        "decision_support_evaluation_permitted": False,
+                        "denial_reason_code": "SUBJECT_OVERLAP_INSUFFICIENT",
+                        "reason": "Subject support is insufficient.",
+                        "next_step": "Supply the frozen subject support.",
+                    },
+                    "decision_support_evaluation_id": None,
+                    "decision_support_evaluation_series_id": None,
+                    "permission_provenance": permission_provenance,
+                    "decision_support_permission_digest": _sha256(
+                        permission_provenance
+                    ),
+                    "options": [],
+                    "suppression_reasons": [
+                        {
+                            "code": "SUBJECT_OVERLAP_INSUFFICIENT",
+                            "category": "PERMISSION",
+                            "priority": 100,
+                            "reason": "Subject support is insufficient.",
+                        }
+                    ],
+                    "action_recommendation": None,
+                    "tradeoff": None,
+                    "consumed_inputs": ["permission_envelope"],
+                }
+            )
+            return result
+
+        def applicable_subject(**_: object):
+            return (
+                {
+                    "state": "applicable",
+                    "subject_identity": subject_identity,
+                    "reason": "Subject support is sufficient.",
+                    "next_step": "Inspect the separately governed action boundary.",
+                },
+                {
+                    "scope": "subject",
+                    "verdict_code": "SUPPORTED_UNDER_ASSUMPTIONS",
+                    "decision_support_role_permitted": True,
+                    "decision_support_evaluation_permitted": True,
+                },
+                {
+                    "language": "Subject support is sufficient.",
+                    "next_step": "Inspect the separately governed action boundary.",
+                },
+            )
+
+        monkeypatch.setattr(governance, "_subject_applicability", applicable_subject)
+        monkeypatch.setattr(
+            governance, "evaluate_decision_support", permitted_decision_support
+        )
+        first_response = client.post(
+            f"/api/investigations/{request_id}/decision-brief",
+            json={
+                "idempotency_key": "brief-heads-1",
+                "reference_id": "ordinary-demo",
+            },
+        )
+        assert first_response.status_code == 201, first_response.text
+        first_snapshot = first_response.json()["snapshot"]
+        first_lifecycle = first_snapshot["decision_support"]["evaluation_lifecycle"]
+        assert first_lifecycle["head"]["head_kind"] == "EVALUATION"
+        assert first_lifecycle["head"]["advice_state"] == "current"
+
+        second_response = client.post(
+            f"/api/investigations/{request_id}/decision-brief",
+            json={
+                "idempotency_key": "brief-heads-2",
+                "reference_id": "ordinary-demo",
+            },
+        )
+        assert second_response.status_code == 201
+        second_lifecycle = second_response.json()["snapshot"]["decision_support"][
+            "evaluation_lifecycle"
+        ]
+        assert second_lifecycle["head"]["head_kind"] == "EVALUATION"
+        assert sorted(
+            item["record_state"]
+            for item in second_lifecycle["history"]
+            if item["record_type"] == "evaluation"
+        ) == ["current", "superseded"]
+
+        def denied_subject(**_: object):
+            return (
+                {
+                    "state": "abstained",
+                    "subject_identity": subject_identity,
+                    "reason_code": "SUBJECT_OVERLAP_INSUFFICIENT",
+                    "reason": "Subject support is insufficient.",
+                    "next_step": "Supply the frozen subject support.",
+                },
+                {
+                    "scope": "subject",
+                    "verdict_code": "INSUFFICIENT",
+                    "decision_support_role_permitted": False,
+                    "decision_support_evaluation_permitted": False,
+                    "primary_trigger_code": "SUBJECT_OVERLAP_INSUFFICIENT",
+                },
+                None,
+            )
+
+        monkeypatch.setattr(governance, "_subject_applicability", denied_subject)
+        monkeypatch.setattr(
+            governance, "evaluate_decision_support", denied_decision_support
+        )
+        invalidated_response = client.post(
+            f"/api/investigations/{request_id}/decision-brief",
+            json={
+                "idempotency_key": "brief-heads-3",
+                "reference_id": "ordinary-demo",
+            },
+        )
+        assert invalidated_response.status_code == 201
+        invalidated_lifecycle = invalidated_response.json()["snapshot"][
+            "decision_support"
+        ]["evaluation_lifecycle"]
+        assert invalidated_lifecycle["head"]["head_kind"] == "PERMISSION_INVALIDATION"
+        assert invalidated_lifecycle["head"]["advice_state"] == "invalidated"
+        invalidation_details = invalidated_response.json()["snapshot"][
+            "decision_support"
+        ]["decision_support_invalidation"]
+        assert invalidation_details["invalidated_artifact_ref_and_hash"] == (
+            second_lifecycle["head"]["head_record_ref_and_hash"]
+        )
+        assert invalidation_details["superseding_verdict_ref_and_hash"][
+            "subject_verdict_ref_and_hash"
+        ]["content_hash"] == denied_subject_verdict["content_hash"]
+        assert all(
+            item["record_state"] != "current"
+            for item in invalidated_lifecycle["history"]
+            if item["record_type"] == "evaluation"
+        )

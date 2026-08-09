@@ -106,6 +106,7 @@ export type DecisionSupportBoundary = Record<string, unknown> & {
   };
   subject_driver_state: Record<string, unknown> | null;
   decision_support_evaluation_id: string | null;
+  evaluation_lifecycle?: Record<string, unknown>;
   options: DecisionSupportOption[];
   evidence_tags: DecisionSupportEvidenceTags;
   suppression_reasons: DecisionSupportSuppressionReason[];
@@ -1236,6 +1237,8 @@ function parseDecisionSupportBoundary(value: unknown): DecisionSupportBoundary {
     (value.subject_driver_state !== null && !isRecord(value.subject_driver_state)) ||
     (value.decision_support_evaluation_id !== null &&
       typeof value.decision_support_evaluation_id !== "string") ||
+    (value.evaluation_lifecycle !== undefined &&
+      !isRecord(value.evaluation_lifecycle)) ||
     !Array.isArray(value.options) ||
     typeof value.action_effect_evidence !== "string" ||
     (value.action_recommendation !== null && !isRecord(value.action_recommendation)) ||
@@ -1295,6 +1298,10 @@ function parseDecisionSupportBoundary(value: unknown): DecisionSupportBoundary {
       value.decision_support_evaluation_id === null
         ? null
         : (value.decision_support_evaluation_id as string),
+    evaluation_lifecycle:
+      value.evaluation_lifecycle === undefined
+        ? undefined
+        : value.evaluation_lifecycle,
     options,
     evidence_tags: parseDecisionSupportTags(value.evidence_tags),
     suppression_reasons: parseDecisionSupportReasons(value.suppression_reasons),

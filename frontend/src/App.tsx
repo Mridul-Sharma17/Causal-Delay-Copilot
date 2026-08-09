@@ -785,6 +785,29 @@ export function DecisionSupportActionsStage({
       : [];
   const isMonitoringFallback =
     recommendationSelectionBasis === "MONITORING_FALLBACK_NO_POSITIVE_ACTIVE_OPTION";
+  const evaluationLifecycle = boundary.evaluation_lifecycle;
+  const lifecycleHead =
+    evaluationLifecycle !== undefined &&
+    typeof evaluationLifecycle.head === "object" &&
+    evaluationLifecycle.head !== null
+      ? (evaluationLifecycle.head as Record<string, unknown>)
+      : null;
+  const lifecycleHistory =
+    evaluationLifecycle !== undefined && Array.isArray(evaluationLifecycle.history)
+      ? evaluationLifecycle.history
+          .map(asRecord)
+          .filter((item): item is Record<string, unknown> => item !== null)
+      : [];
+  const lifecycleStates = lifecycleHistory.reduce<Record<string, number>>(
+    (counts, item) => {
+      const state = item.record_state;
+      if (typeof state === "string") {
+        counts[state] = (counts[state] ?? 0) + 1;
+      }
+      return counts;
+    },
+    {},
+  );
 
   return (
     <section className="actions-stage" aria-labelledby="actions-stage-heading">
@@ -834,6 +857,24 @@ export function DecisionSupportActionsStage({
           </dd>
         </div>
       </dl>
+
+      {evaluationLifecycle !== undefined && (
+        <div className="action-publication evaluation-lifecycle" role="status">
+          <strong>Evaluation lifecycle</strong>
+          <span>
+            Series: <code>{formatValue(evaluationLifecycle.evaluation_series_id)}</code>
+          </span>
+          <span>
+            Authoritative head: <code>{formatValue(lifecycleHead?.head_kind ?? "Unavailable")}</code>
+          </span>
+          <span>
+            Advice state: <code>{formatValue(lifecycleHead?.advice_state ?? "Unavailable")}</code>
+          </span>
+          <span>
+            Historical/currentness records: <code>{formatValue(lifecycleStates)}</code>
+          </span>
+        </div>
+      )}
 
       {actionRecommendation !== null && (
         <div className="action-publication" role="status">
