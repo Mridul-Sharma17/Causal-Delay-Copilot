@@ -56,7 +56,7 @@ REQUIRED_LOGICAL_ROLES = frozenset(
 )
 PRODUCER_SCHEMA_BY_ROLE: Mapping[str, tuple[str, str]] = {
     "engine_request": ("causal-engine-input", "v2"),
-    "runtime_fingerprint": ("runtime-fingerprint", "v1"),
+    "runtime_fingerprint": ("analysis-runtime-fingerprint", "v1"),
     "model_recipe_registry": ("model_recipe_registry", "v1"),
     "derived_seed_registry": ("derived_seed_registry", "v1"),
     "cohort_stage_records": ("cohort_stage_records", "v1"),
@@ -72,6 +72,9 @@ PRODUCER_SCHEMA_BY_ROLE: Mapping[str, tuple[str, str]] = {
         "analysis-run-reproduction-comparison",
         "v1",
     ),
+}
+LEGACY_PRODUCER_SCHEMA_BY_ROLE: Mapping[str, tuple[str, str]] = {
+    "runtime_fingerprint": ("runtime-fingerprint", "v1"),
 }
 SCIENTIFIC_CONTENT_DIGEST_ROLES = frozenset(
     REQUIRED_LOGICAL_ROLES
@@ -461,10 +464,23 @@ def _verify_role_payload(
         return
     mapping = _require_mapping(payload, f"artifact {role} payload")
     if role == "engine_request":
-        if mapping.get("engine_input_schema_version") != expected_schema:
+        if mapping.get("engine_input_schema_version") not in {
+            expected_schema,
+            "causal-engine-suite-request.v2",
+        }:
             raise ReferenceVerificationError("engine request payload schema does not match")
-        _require_digest(mapping.get("dataset_version_id"), "engine request dataset version")
+        _require_identifier(mapping.get("dataset_version_id"), "engine request dataset version")
         _require_identifier(mapping.get("intended_role"), "engine request intended role")
+        return
+    if role == "runtime_fingerprint" and mapping.get("schema_version") in {
+        "analysis-runtime-fingerprint.v1",
+        "runtime-fingerprint.v1",
+    }:
+        return
+    if role == "engine_result" and mapping.get("schema_version") in {
+        "causal-engine-result.v1",
+        "causal-engine-suite-result.v2",
+    }:
         return
     if mapping.get("schema_version") != expected_schema:
         raise ReferenceVerificationError(f"{role} payload schema does not match")
@@ -540,10 +556,14 @@ def _validate_descriptor_shape(descriptor: Mapping[str, Any]) -> None:
     if role not in REQUIRED_LOGICAL_ROLES and role != "reproduction_comparison":
         raise ReferenceVerificationError("logical role is unsupported")
     expected_producer_schema = PRODUCER_SCHEMA_BY_ROLE.get(role)
-    if expected_producer_schema is None or (
+    observed_producer_schema = (
         descriptor["producer_schema_id"],
         descriptor["producer_schema_version"],
-    ) != expected_producer_schema:
+    )
+    if expected_producer_schema is None or (
+        observed_producer_schema != expected_producer_schema
+        and observed_producer_schema != LEGACY_PRODUCER_SCHEMA_BY_ROLE.get(role)
+    ):
         raise ReferenceVerificationError("producer schema is unsupported for logical role")
     _require_identifier(descriptor["logical_id"], "logical id")
     _require_identifier(descriptor["producer_schema_id"], "producer schema id")
@@ -673,16 +693,26 @@ def _verify_bundle(
         payloads[role] = _descriptor_payload(artifact_root, descriptor)
 
     request = _require_mapping(payloads["engine_request"], "engine request")
-    if sha256(request) != manifest["scientific_request_digest"]:
+    from .analysis_runs import scientific_sha256
+
+    if manifest["scientific_request_digest"] not in {
+        sha256(request),
+        scientific_sha256(request),
+    }:
         raise ReferenceVerificationError("scientific request digest does not match")
     _require_text(request.get("engine_input_schema_version"), "engine input schema")
-    dataset_version_id = _require_digest(request.get("dataset_version_id"), "dataset version")
+    dataset_version_id = _require_identifier(
+        request.get("dataset_version_id"), "dataset version"
+    )
     intended_role = _require_identifier(request.get("intended_role"), "intended role")
     payloads["dataset_version_id"] = dataset_version_id
     payloads["intended_role"] = intended_role
 
     runtime = _require_mapping(payloads["runtime_fingerprint"], "runtime fingerprint")
-    if sha256(runtime) != manifest["runtime_fingerprint_digest"]:
+    if manifest["runtime_fingerprint_digest"] not in {
+        sha256(runtime),
+        scientific_sha256(runtime),
+    }:
         raise ReferenceVerificationError("runtime fingerprint digest does not match")
     if dict(runtime) != dict(expected_runtime):
         raise ReferenceVerificationError("runtime fingerprint does not match current release")
@@ -1138,3 +1168,24 @@ def publish_analysis_bundle(
         if stage_root.exists():
             shutil.rmtree(stage_root, ignore_errors=True)
     return PublishedBundle(analysis_run_id, bundle_manifest_hash)
+
+
+def verify_published_analysis_bundle(
+    artifact_root: Path,
+    *,
+    analysis_run_id: str,
+    expected_build_id: str,
+    expected_runtime: Mapping[str, Any],
+) -> PublishedBundle:
+    """Verify a bundle again after its manifest has been published."""
+
+    manifest, _ = _verify_bundle(
+        artifact_root,
+        analysis_run_id,
+        expected_build_id,
+        expected_runtime,
+    )
+    return PublishedBundle(
+        analysis_run_id=analysis_run_id,
+        bundle_manifest_hash=str(manifest["bundle_manifest_hash"]),
+    )

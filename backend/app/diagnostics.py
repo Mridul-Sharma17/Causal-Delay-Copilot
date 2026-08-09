@@ -1681,6 +1681,11 @@ def evaluate_validity_diagnostics(
     from .refuters import run_refuter_battery as _run_refuter_battery
     from .refuters import evaluate_negative_control as _evaluate_negative_control
 
+    core_kwargs = dict(core_kwargs)
+    canonical_slippage_duration_basis = core_kwargs.pop(
+        "canonical_slippage_duration_basis", None
+    )
+    effect_result_ref = core_kwargs.pop("effect_result_ref", None)
     core_results = evaluate_core_diagnostics(**core_kwargs)
     upstream_trigger: str | None = None
     for diagnostic in core_results:
@@ -1777,6 +1782,8 @@ def evaluate_validity_diagnostics(
         bundle_manifest_hash=core_kwargs.get("bundle_manifest_hash"),
         evidence_refs=core_kwargs.get("evidence_refs", ()),
         input_refs=core_kwargs.get("input_refs", ()),
+        canonical_slippage_duration_basis=canonical_slippage_duration_basis,
+        effect_result_ref=effect_result_ref,
     )
     return complete["diagnostics"]
 

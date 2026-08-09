@@ -130,6 +130,14 @@ export type AnalysisRunStatus = {
   fold_descriptor: Record<string, unknown>;
   fresh_run_detail: Record<string, unknown> | null;
   primary_result: Record<string, unknown> | null;
+  bundle_manifest_hash: string | null;
+  diagnostics: DiagnosticResult[];
+  diagnostic_summary: DiagnosticSummary | null;
+  robustness_grade: RobustnessGrade | null;
+  evidence_verdict: EvidenceVerdict | null;
+  rendered_verdict: RenderedEvidenceVerdict | null;
+  subject_verdict: EvidenceVerdict | null;
+  rendered_subject_verdict: RenderedEvidenceVerdict | null;
 };
 
 export type DurableOperation = {
@@ -835,10 +843,45 @@ function parseAnalysisRunStatus(value: unknown): AnalysisRunStatus {
       !isRecord(value.fresh_run_detail)) ||
     (value.primary_result !== undefined &&
       value.primary_result !== null &&
-      !isRecord(value.primary_result))
+      !isRecord(value.primary_result)) ||
+    (value.bundle_manifest_hash !== undefined &&
+      value.bundle_manifest_hash !== null &&
+      typeof value.bundle_manifest_hash !== "string")
   ) {
     throw new Error("invalid analysis run response");
   }
+  const diagnostics =
+    value.diagnostics === undefined
+      ? []
+      : !Array.isArray(value.diagnostics)
+        ? (() => {
+            throw new Error("invalid analysis run response");
+          })()
+        : value.diagnostics.map(parseDiagnosticRecord);
+  const diagnosticSummary =
+    value.diagnostic_summary === undefined || value.diagnostic_summary === null
+      ? null
+      : parseDiagnosticSummary(value.diagnostic_summary);
+  const robustnessGrade =
+    value.robustness_grade === undefined || value.robustness_grade === null
+      ? null
+      : parseRobustnessGrade(value.robustness_grade);
+  const evidenceVerdict =
+    value.evidence_verdict === undefined || value.evidence_verdict === null
+      ? null
+      : parseEvidenceVerdict(value.evidence_verdict);
+  const renderedVerdict =
+    value.rendered_verdict === undefined || value.rendered_verdict === null
+      ? null
+      : parseRenderedEvidenceVerdict(value.rendered_verdict);
+  const subjectVerdict =
+    value.subject_verdict === undefined || value.subject_verdict === null
+      ? null
+      : parseEvidenceVerdict(value.subject_verdict);
+  const renderedSubjectVerdict =
+    value.rendered_subject_verdict === undefined || value.rendered_subject_verdict === null
+      ? null
+      : parseRenderedEvidenceVerdict(value.rendered_subject_verdict);
   return {
     schema_version: "analysis-run-status.v1",
     analysis_run_id: value.analysis_run_id,
@@ -871,6 +914,17 @@ function parseAnalysisRunStatus(value: unknown): AnalysisRunStatus {
       value.primary_result === undefined || value.primary_result === null
         ? null
         : value.primary_result,
+    bundle_manifest_hash:
+      value.bundle_manifest_hash === undefined || value.bundle_manifest_hash === null
+        ? null
+        : value.bundle_manifest_hash,
+    diagnostics,
+    diagnostic_summary: diagnosticSummary,
+    robustness_grade: robustnessGrade,
+    evidence_verdict: evidenceVerdict,
+    rendered_verdict: renderedVerdict,
+    subject_verdict: subjectVerdict,
+    rendered_subject_verdict: renderedSubjectVerdict,
   };
 }
 

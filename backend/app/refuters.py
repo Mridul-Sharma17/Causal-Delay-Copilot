@@ -148,6 +148,7 @@ class ExactEstimatorAdapter:
     cluster: str = EXACT_ESTIMATOR_CLUSTER
     inference: str = EXACT_ESTIMATOR_INFERENCE
     second_overlap_trim: bool = EXACT_ESTIMATOR_SECOND_OVERLAP_TRIM
+    support_state: str = "configured"
 
     def estimate(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
         return self.estimate_fn(request)
@@ -1327,6 +1328,38 @@ def run_refuter_battery(
                 )
                 for refuter_id in REFUTER_DIAGNOSTIC_IDS
             ],
+            refuter_adapter_id=refuter_adapter_id,
+            refuter_adapter_version=refuter_adapter_version,
+        )
+    if getattr(estimator_adapter, "support_state", "configured") == "unsupported":
+        diagnostics = [
+            _refuter_result(
+                refuter_id,
+                status="UNSUPPORTED",
+                threshold=_refuter_threshold(refuter_id),
+                observed=_refuter_observed(
+                    valid_count=0,
+                    unsupported_count=REFUTER_SIMULATION_COUNT,
+                    failed_count=0,
+                ),
+                result={
+                    "support_failure": {
+                        "state": "unsupported",
+                        "invariant": "registered-exact-refuter-adapter-not-configured",
+                    }
+                },
+                reason_code=_refuter_code(refuter_id, "UNSUPPORTED"),
+                reason="The fresh-run exact refuter adapter is not configured, so no refuter simulation was executed.",
+                trigger_codes=[_refuter_code(refuter_id, "UNSUPPORTED")],
+                analysis_run_id=analysis_run_id,
+                bundle_manifest_hash=bundle_manifest_hash,
+                evidence_refs=evidence_refs,
+                input_refs=input_refs,
+            )
+            for refuter_id in REFUTER_DIAGNOSTIC_IDS
+        ]
+        return _battery_without_seed_context(
+            diagnostics,
             refuter_adapter_id=refuter_adapter_id,
             refuter_adapter_version=refuter_adapter_version,
         )

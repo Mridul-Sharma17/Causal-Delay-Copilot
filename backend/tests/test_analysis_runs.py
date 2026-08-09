@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import json
 import re
 from pathlib import Path
 import time
@@ -319,11 +320,88 @@ def test_validation_only_worker_ends_in_typed_abstention_without_an_estimate(
     assert terminal["analysis_run"]["status"] == "ABSTAINED"
     assert terminal["analysis_run"]["scientific_outcome"] == "abstained"
     assert terminal["analysis_run"]["estimator_executed"] is False
+    assert terminal["analysis_run"]["lifecycle"] == "sealed"
+    assert terminal["analysis_run"]["verification_state"] == "machine_verified"
+    assert terminal["analysis_run"]["availability_state"] == "available"
+    assert terminal["analysis_run"]["bundle_manifest_hash"].startswith("sha256:")
+    assert len(terminal["analysis_run"]["diagnostics"]) == 14
+    assert terminal["analysis_run"]["diagnostic_summary"]["diagnostic_count"] == 14
+    assert terminal["analysis_run"]["robustness_grade"]["grade"] == "UNAVAILABLE"
+    assert terminal["analysis_run"]["evidence_verdict"]["verdict_code"] == "INSUFFICIENT"
+    assert terminal["analysis_run"]["primary_result"] is None
     detail = terminal["analysis_run"]["fresh_run_detail"]
     assert detail["schema_version"] == "analysis-run-safe-detail.v1"
     assert detail["execution_state"] == "complete"
     assert detail["component_failures"] == []
     assert "lineage:dataset-1" not in str(detail)
+
+
+def test_corrupt_fresh_bundle_is_suppressed_from_the_current_read_model(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    with _client(state_root, start_operation_runner=True) as client:
+        response = client.post(
+            "/api/operations",
+            json={
+                "idempotency_key": "fresh-analysis-corrupt-bundle-test",
+                "operation_kind": "FRESH_ANALYSIS",
+                "memory_required_bytes": 1024,
+                "request": {"suite_request": _suite_request()},
+            },
+        )
+        operation_id = response.json()["operation"]["operation_id"]
+        terminal = response.json()["operation"]
+        for _ in range(100):
+            terminal = client.get(f"/api/operations/{operation_id}").json()
+            if terminal["state"] in {
+                "SUCCEEDED",
+                "FAILED",
+                "CANCELLED",
+                "TIMED_OUT",
+                "INTERRUPTED",
+                "REJECTED",
+            }:
+                break
+            time.sleep(0.05)
+
+        assert terminal["state"] == "SUCCEEDED"
+        analysis_run_id = terminal["analysis_run"]["analysis_run_id"]
+        manifest_path = (
+            state_root
+            / "artifacts"
+            / "runs"
+            / analysis_run_id
+            / "manifest.json"
+        )
+        result_path = (
+            state_root
+            / "artifacts"
+            / "runs"
+            / operation_id
+            / "analysis-run-result.json"
+        )
+        original_result = result_path.read_text(encoding="utf-8")
+        tampered_result = json.loads(original_result)
+        tampered_result["diagnostics"][0]["reason"] = "tampered"
+        result_path.write_text(
+            json.dumps(tampered_result, ensure_ascii=False, sort_keys=True),
+            encoding="utf-8",
+        )
+        tampered_read_back = client.get(f"/api/analysis-runs/{analysis_run_id}")
+        assert tampered_read_back.json()["availability_state"] == "suppressed"
+        result_path.write_text(original_result, encoding="utf-8")
+        manifest_path.unlink()
+        read_back = client.get(f"/api/analysis-runs/{analysis_run_id}")
+
+    assert read_back.status_code == 200
+    assert read_back.json()["status"] == "FAILED"
+    assert read_back.json()["lifecycle"] == "failed"
+    assert read_back.json()["verification_state"] == "invalid"
+    assert read_back.json()["availability_state"] == "suppressed"
+    assert read_back.json()["reason_code"] == "RUN_RESULT_UNAVAILABLE"
+    assert read_back.json()["primary_result"] is None
+    assert read_back.json()["diagnostics"] == []
 
 
 def _released_propensity_rows(request: dict[str, object]) -> list[dict[str, object]]:
@@ -1019,7 +1097,7 @@ def test_primary_estimator_fails_closed_on_tampered_external_prediction_identity
     assert "unknown-row" not in str(result["safe_detail"])
 
 
-def test_fresh_worker_publishes_provisional_primary_result_without_permission(
+def test_fresh_worker_publishes_sealed_estimated_result_with_verdict(
     tmp_path: Path,
 ) -> None:
     request = _released_supported_primary_request()
@@ -1053,18 +1131,19 @@ def test_fresh_worker_publishes_provisional_primary_result_without_permission(
     assert analysis_run["status"] == "ESTIMATED"
     assert analysis_run["scientific_outcome"] == "estimated"
     assert analysis_run["estimator_executed"] is True
-    assert analysis_run["primary_result"]["schema_version"] == "fresh-primary-result.v1"
-    assert analysis_run["primary_result"]["state"] == "provisional"
+    assert analysis_run["primary_result"]["schema_version"] == "fresh-primary-result.v2"
+    assert analysis_run["primary_result"]["state"] == "sealed"
+    assert analysis_run["bundle_manifest_hash"].startswith("sha256:")
+    assert len(analysis_run["diagnostics"]) == 14
+    assert analysis_run["evidence_verdict"]["verdict_code"] == "ASSOCIATION_ONLY"
     public_result = analysis_run["primary_result"]
-    assert len(public_result["primary_atte"]["repeat_results"]) == 2
-    assert set(public_result["comparison_results"]) == {
-        "naive_mean_difference",
-        "covariate_ols",
-        "normalized_ipw_atte",
-        "supplier_fe_ols",
-    }
-    assert analysis_run["primary_result"]["permission"] == {
-        "evidence_verdict": False,
+    assert public_result["primary_atte"] is not None
+    assert public_result["context_ate"] is None
+    assert public_result["comparison_results"] == {}
+    assert public_result["permission"] == {
+        "evidence_verdict": True,
         "action_permission": False,
-        "state": "provisional_run_output_only",
+        "state": "sealed_machine_verified",
+        "claim_scope": analysis_run["evidence_verdict"]["permitted_claim_scope"],
+        "effect_display": "ADJUSTED_ASSOCIATION",
     }

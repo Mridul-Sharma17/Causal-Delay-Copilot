@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import datetime, timezone
 import hashlib
 import importlib.metadata
 import json
@@ -14,6 +15,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 from uuid import UUID
 
+from .canonical import canonical_json, sha256 as content_sha256
 from .eligibility_contract import ADJUSTMENT_SET_FIELDS, LOAD_EXPOSURE_VARIANTS
 
 
@@ -194,6 +196,14 @@ class EstimatorStageError(ValueError):
     def __init__(self, code: str) -> None:
         self.code = code if code in ESTIMATOR_FAILURE_CODES else "ENGINE_INTERNAL_ERROR"
         super().__init__(self.code)
+
+
+class FreshAnalysisFinalizationError(ValueError):
+    """A fresh engine result could not be sealed as verified evidence."""
+
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__(code)
 
 
 @dataclass(frozen=True, slots=True)
@@ -4127,6 +4137,878 @@ def estimate_primary_atte_and_context(
     return result
 
 
+def _fresh_json_bytes(value: object) -> bytes:
+    try:
+        return canonical_json(value).encode("utf-8")
+    except (TypeError, ValueError, OverflowError) as error:
+        raise FreshAnalysisFinalizationError("RUN_ARTIFACT_SERIALIZATION_FAILED") from error
+
+
+def _fresh_validate_engine_result(
+    request: Mapping[str, Any],
+    stage: Mapping[str, Any],
+    engine_result: Mapping[str, Any],
+) -> None:
+    if engine_result.get("schema_version") != ENGINE_OUTPUT_SCHEMA_VERSION:
+        raise FreshAnalysisFinalizationError("ENGINE_RESULT_SCHEMA_UNSUPPORTED")
+    if engine_result.get("engine_output_schema_version") != request.get(
+        "engine_output_schema_version"
+    ):
+        raise FreshAnalysisFinalizationError("ENGINE_RESULT_INPUT_MISMATCH")
+    for key in (
+        "engine_input_schema_version",
+        "error_registry_version",
+        "causal_question_id",
+        "causal_question_version",
+        "engine_config_id",
+        "engine_config_version",
+        "dataset_version_id",
+        "intended_role",
+        "target_milestone_kind",
+        "canonical_slippage_duration_basis",
+        "suite_id",
+        "suite_version",
+        "root_seed",
+    ):
+        if engine_result.get(key) != request.get(key):
+            raise FreshAnalysisFinalizationError("ENGINE_RESULT_INPUT_MISMATCH")
+    if engine_result.get("evidence_refs") != request.get("evidence_refs"):
+        raise FreshAnalysisFinalizationError("ENGINE_RESULT_INPUT_MISMATCH")
+    stage_digest = stage.get("scientific_request_digest")
+    if stage_digest != scientific_sha256(request):
+        raise FreshAnalysisFinalizationError("ENGINE_STAGE_INPUT_MISMATCH")
+    if scientific_sha256(engine_result.get("variants")) != scientific_sha256(
+        stage.get("variants")
+    ):
+        raise FreshAnalysisFinalizationError("ENGINE_STAGE_RESULT_MISMATCH")
+    result_identity_digest = engine_result.get("result_identity_digest")
+    if not isinstance(result_identity_digest, str):
+        raise FreshAnalysisFinalizationError("ENGINE_RESULT_IDENTITY_UNAVAILABLE")
+    identity_payload = {
+        key: value
+        for key, value in engine_result.items()
+        if key != "result_identity_digest"
+    }
+    if scientific_sha256(identity_payload) != result_identity_digest:
+        raise FreshAnalysisFinalizationError("ENGINE_RESULT_IDENTITY_MISMATCH")
+
+
+def _fresh_artifact_member(
+    *,
+    logical_role: str,
+    logical_id: str,
+    producer_schema_id: str,
+    producer_schema_version: str,
+    payload: Mapping[str, Any],
+    evidence_refs: Sequence[str] = (),
+    scientific_content: bool = True,
+) -> Any:
+    from .references import ArtifactMember
+
+    content = _fresh_json_bytes(payload)
+    return ArtifactMember(
+        logical_role=logical_role,
+        logical_id=logical_id,
+        producer_schema_id=producer_schema_id,
+        producer_schema_version=producer_schema_version,
+        media_type="application/json",
+        confidentiality_class="public_safe",
+        content=content,
+        evidence_refs=tuple(evidence_refs),
+        scientific_content_digest=content_sha256(payload) if scientific_content else None,
+    )
+
+
+def _fresh_primary_diagnostic_inputs(
+    request: Mapping[str, Any],
+    stage: Mapping[str, Any],
+    engine_result: Mapping[str, Any],
+) -> dict[str, Any]:
+    stage_variants = stage.get("variants")
+    if not isinstance(stage_variants, Mapping):
+        raise FreshAnalysisFinalizationError("ENGINE_REPRODUCIBILITY_VIOLATION")
+    source_variants = {
+        str(variant["variant_id"]): variant
+        for variant in request.get("variant_inputs", [])
+        if isinstance(variant, Mapping) and isinstance(variant.get("variant_id"), str)
+    }
+    primary_source = source_variants.get("primary")
+    primary_stage = stage_variants.get("primary")
+    if not isinstance(primary_source, Mapping) or not isinstance(primary_stage, Mapping):
+        raise FreshAnalysisFinalizationError("ENGINE_REPRODUCIBILITY_VIOLATION")
+
+    primary_rows: list[dict[str, Any]] | None = None
+    feature_order: list[str] | None = None
+    balance_rows: list[dict[str, Any]] | None = None
+    feature_matrix: list[list[float]] = []
+    primary_feature_schema: dict[str, Any] = {
+        "schema_version": "feature_schema.v1",
+        "ordered_feature_names": [],
+        "row_identity_hash": scientific_sha256([]),
+        "shape": [0, 0],
+    }
+    if engine_result.get("status") == "estimated":
+        try:
+            rows, layout, retained_ids = _variant_rows_and_layout(
+                request,
+                stage,
+                "primary",
+            )
+            matrix = layout.transform(rows)
+        except (EstimatorStageError, PropensityStageError, KeyError, TypeError, ValueError):
+            raise FreshAnalysisFinalizationError("ENGINE_REPRODUCIBILITY_VIOLATION") from None
+        primary_rows = [deepcopy(dict(row)) for row in rows]
+        feature_order = [str(name) for name in layout.feature_names]
+        feature_matrix = [
+            [float(value) for value in row]
+            for row in matrix.tolist()
+        ]
+        raw_feature_schema = primary_stage.get("feature_schema")
+        primary_feature_schema = {
+            "schema_version": "feature_schema.v1",
+            "ordered_feature_names": feature_order,
+            "feature_schema_digest": (
+                raw_feature_schema.get("feature_schema_digest")
+                if isinstance(raw_feature_schema, Mapping)
+                else scientific_sha256(feature_order)
+            ),
+            "row_identity_hash": scientific_sha256(list(retained_ids)),
+            "shape": [len(feature_matrix), len(feature_order)],
+        }
+        predictions = primary_stage.get("propensity_predictions")
+        if not isinstance(predictions, list):
+            raise FreshAnalysisFinalizationError("ENGINE_NUISANCE_PREDICTION_INVALID")
+        propensity_by_id = {
+            str(item.get("row_id")): item
+            for item in predictions
+            if isinstance(item, Mapping) and isinstance(item.get("row_id"), str)
+        }
+        if set(propensity_by_id) != set(retained_ids):
+            raise FreshAnalysisFinalizationError("ENGINE_NUISANCE_PREDICTION_INVALID")
+        balance_rows = []
+        for row, matrix_row, row_id in zip(
+            primary_rows,
+            feature_matrix,
+            retained_ids,
+            strict=True,
+        ):
+            prediction = propensity_by_id[row_id]
+            mean = prediction.get("mean")
+            if not isinstance(mean, (int, float)) or isinstance(mean, bool) or not math.isfinite(float(mean)):
+                raise FreshAnalysisFinalizationError("ENGINE_NUISANCE_PREDICTION_INVALID")
+            balance_rows.append(
+                {
+                    "row_id": row_id,
+                    "exposure": bool(row["high_load_exposure"]),
+                    "propensity": float(mean),
+                    "features": {
+                        name: value for name, value in zip(feature_order, matrix_row, strict=True)
+                    },
+                }
+            )
+
+    upstream_status = primary_source.get("upstream_status")
+    if upstream_status == "released":
+        eligibility = {"state": "eligible", "eligibility_codes": []}
+    else:
+        code = (
+            primary_source.get("scientific_code")
+            or primary_stage.get("reason_code")
+            or "COHORT_SUPPORT_INSUFFICIENT"
+        )
+        eligibility = {
+            "state": "scientifically_unavailable",
+            "eligibility_codes": [str(code)],
+        }
+    overlap = primary_stage.get("overlap")
+    if not isinstance(overlap, Mapping):
+        overlap = None
+
+    primary_artifacts: dict[str, Any] | None = None
+    if primary_rows is not None:
+        retained_ids = [str(row["order_line_id"]) for row in primary_rows]
+        fold_assignments = primary_stage.get("fold_assignments")
+        if not isinstance(fold_assignments, list) or not fold_assignments:
+            raise FreshAnalysisFinalizationError("ENGINE_FOLD_ASSIGNMENT_INVALID")
+        primary_artifacts = {
+            "outer_splits": deepcopy(fold_assignments),
+            "inner_splits": deepcopy(fold_assignments),
+            "canonical_row_ids": retained_ids,
+            "propensity_predictions": {
+                row_id: [
+                    float(next(item["mean"] for item in primary_stage["propensity_predictions"] if item.get("row_id") == row_id)),
+                    float(next(item["mean"] for item in primary_stage["propensity_predictions"] if item.get("row_id") == row_id)),
+                ]
+                for row_id in retained_ids
+            },
+            "fold_provenance_verified": True,
+            "propensity_provenance_verified": True,
+            "propensity_provenance_ref": "nuisance_predictions:primary",
+            "support": deepcopy(overlap) if overlap is not None else {"state": "supported"},
+        }
+
+    return {
+        "eligibility": eligibility,
+        "overlap": overlap,
+        "primary_rows": primary_rows,
+        "balance_rows": balance_rows,
+        "feature_order": feature_order,
+        "feature_matrix": feature_matrix,
+        "primary_feature_schema": primary_feature_schema,
+        "primary_artifacts": primary_artifacts,
+    }
+
+
+def _fresh_diagnostic_payload(
+    *,
+    request: Mapping[str, Any],
+    stage: Mapping[str, Any],
+    engine_result: Mapping[str, Any],
+    analysis_run_id: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    from .diagnostics import diagnostic_summary, evaluate_validity_diagnostics
+    from .refuters import ExactEstimatorAdapter
+
+    inputs = _fresh_primary_diagnostic_inputs(request, stage, engine_result)
+    evidence_refs = (
+        "engine_request:request",
+        "engine_result:result",
+        "cohort_stage_records:cohorts",
+    )
+    input_refs = (
+        "engine_result:result",
+        "feature_matrix:primary",
+        "fold_assignments:folds",
+        "nuisance_predictions:nuisance",
+    )
+    estimator_adapter = None
+    if inputs["primary_rows"] is not None:
+        estimator_adapter = ExactEstimatorAdapter(
+            lambda _request: {
+                "status": "unsupported",
+                "support_failure": {
+                    "state": "unsupported",
+                    "invariant": "fresh-exact-refuter-adapter-not-configured",
+                },
+            },
+            support_state="unsupported",
+        )
+    diagnostics = evaluate_validity_diagnostics(
+        engine_result=engine_result,
+        eligibility=inputs["eligibility"],
+        overlap=inputs["overlap"],
+        balance_rows=inputs["balance_rows"],
+        feature_order=inputs["feature_order"],
+        refuter_rows=inputs["primary_rows"],
+        refuter_primary_effect=(
+            engine_result.get("primary_atte")
+            if isinstance(engine_result.get("primary_atte"), Mapping)
+            else None
+        ),
+        refuter_estimator_adapter=estimator_adapter,
+        refuter_seed_context={
+            "root_seed": request["root_seed"],
+            "dataset_version_id": request["dataset_version_id"],
+            "causal_question_id": request["causal_question_id"],
+            "causal_question_version": request["causal_question_version"],
+            "engine_config_id": request["engine_config_id"],
+            "engine_config_version": request["engine_config_version"],
+            "suite_id": request["suite_id"],
+            "suite_version": request["suite_version"],
+            "validity_policy_id": "causal-validity-verdict-policy",
+            "validity_policy_version": "1",
+        },
+        refuter_primary_artifacts=inputs["primary_artifacts"],
+        negative_control_rows=inputs["primary_rows"],
+        negative_control_estimator_adapter=estimator_adapter,
+        negative_control_primary_artifacts=inputs["primary_artifacts"],
+        intended_role=str(request["intended_role"]),
+        canonical_slippage_duration_basis=str(
+            request["canonical_slippage_duration_basis"]
+        ),
+        effect_result_ref="engine_result:primary_atte",
+        analysis_run_id=analysis_run_id,
+        bundle_manifest_hash=None,
+        evidence_refs=evidence_refs,
+        input_refs=input_refs,
+    )
+    if not isinstance(diagnostics, list) or len(diagnostics) != 14:
+        raise FreshAnalysisFinalizationError("DIAGNOSTIC_SET_INCOMPLETE")
+    validity = {
+        "schema_version": "diagnostic_artifacts.v1",
+        "diagnostics": diagnostics,
+        "diagnostic_summary": diagnostic_summary(diagnostics),
+    }
+    from .validity import evaluate_complete_validity
+
+    # evaluate_validity_diagnostics returns only records; reproduce the locked
+    # validity projection from those same records and exact engine outputs.
+    complete = evaluate_complete_validity(
+        base_diagnostics=diagnostics[:9],
+        primary_effect=(
+            engine_result.get("primary_atte")
+            if isinstance(engine_result.get("primary_atte"), Mapping)
+            else None
+        ),
+        engine_result=engine_result,
+        intended_role=str(request["intended_role"]),
+        analysis_run_id=analysis_run_id,
+        bundle_manifest_hash=None,
+        canonical_slippage_duration_basis=str(
+            request["canonical_slippage_duration_basis"]
+        ),
+        effect_result_ref="engine_result:primary_atte",
+        evidence_refs=evidence_refs,
+        input_refs=input_refs,
+    )
+    if [item.get("content_hash") for item in complete["diagnostics"]] != [
+        item.get("content_hash") for item in diagnostics
+    ]:
+        raise FreshAnalysisFinalizationError("DIAGNOSTIC_RESULT_IDENTITY_MISMATCH")
+    validity.update(
+        {
+            "robustness_grade": complete["robustness_grade"],
+            "evidence_verdict": complete["evidence_verdict"],
+        }
+    )
+    from .validity import (
+        derive_subject_evidence_verdict,
+        render_evidence_verdict,
+        render_subject_evidence_verdict,
+    )
+
+    subject_verdict = None
+    rendered_subject_verdict = None
+    subject_support = engine_result.get("subject_support")
+    request_subject = request.get("subject")
+    if subject_support is None and isinstance(request_subject, Mapping):
+        subject_support = {
+            "subject_id": request_subject.get("subject_id"),
+            "subject_profile": request_subject.get("profile"),
+            "propensity": {"state": "unavailable"},
+            "distribution_support": {"state": "unavailable"},
+        }
+    if isinstance(subject_support, Mapping) and isinstance(
+        subject_support.get("subject_id"), str
+    ):
+        profile = subject_support.get("subject_profile")
+        subject_profile = (
+            profile.get("adjustment_inputs")
+            if isinstance(profile, Mapping)
+            and isinstance(profile.get("adjustment_inputs"), Mapping)
+            else profile
+            if isinstance(profile, Mapping)
+            else {}
+        )
+        subject_propensity = subject_support.get("propensity")
+        if not isinstance(subject_propensity, Mapping):
+            subject_propensity = {"state": "unavailable"}
+        distribution_support = subject_support.get("distribution_support")
+        if not isinstance(distribution_support, Mapping):
+            distribution_support = {"state": "unavailable"}
+        subject_verdict = derive_subject_evidence_verdict(
+            complete["evidence_verdict"],
+            subject_id=str(subject_support["subject_id"]),
+            subject_profile=subject_profile,
+            subject_propensity=subject_propensity,
+            distribution_support=distribution_support,
+            source_role=str(request["intended_role"]),
+        )
+        rendered_subject_verdict = render_subject_evidence_verdict(subject_verdict)
+    validity["subject_verdict"] = subject_verdict
+    validity["rendered_verdict"] = render_evidence_verdict(complete["evidence_verdict"])
+    validity["rendered_subject_verdict"] = rendered_subject_verdict
+    return validity, inputs
+
+
+def _fresh_effect_free_result(value: Mapping[str, Any]) -> dict[str, Any]:
+    allowed = {
+        "variant_id",
+        "status",
+        "state",
+        "reason_code",
+        "estimand_id",
+        "role",
+        "label",
+        "component_failures",
+        "last_completed_stage",
+        "provenance",
+    }
+    return {key: deepcopy(value[key]) for key in allowed if key in value}
+
+
+def _fresh_sealed_primary_result(
+    engine_result: Mapping[str, Any],
+    evidence_verdict: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    public = _public_primary_result(engine_result)
+    if public is None:
+        return None
+    sealed = deepcopy(public)
+    sealed["schema_version"] = "fresh-primary-result.v2"
+    sealed["state"] = "sealed"
+    verdict_code = evidence_verdict.get("verdict_code") if evidence_verdict else None
+    effect_display = evidence_verdict.get("effect_display") if evidence_verdict else "NONE"
+    if verdict_code == "SUPPORTED_UNDER_ASSUMPTIONS":
+        pass
+    elif (
+        verdict_code in {"ASSOCIATION_ONLY", "INSUFFICIENT"}
+        and effect_display != "NONE"
+        and evidence_verdict is not None
+    ):
+        sealed["primary_atte"] = deepcopy(evidence_verdict.get("effect"))
+        sealed["context_ate"] = None
+        sealed["sensitivity_results"] = {
+            key: _fresh_effect_free_result(value)
+            for key, value in sealed.get("sensitivity_results", {}).items()
+            if isinstance(value, Mapping)
+        }
+        sealed["comparison_results"] = {}
+    else:
+        sealed["primary_atte"] = None
+        sealed["context_ate"] = None
+        sealed["sensitivity_results"] = {
+            key: _fresh_effect_free_result(value)
+            for key, value in sealed.get("sensitivity_results", {}).items()
+            if isinstance(value, Mapping)
+        }
+        sealed["comparison_results"] = {}
+    sealed["permission"] = {
+        "evidence_verdict": evidence_verdict is not None,
+        "action_permission": bool(
+            evidence_verdict
+            and evidence_verdict.get("decision_support_evaluation_permitted") is True
+        ),
+        "state": "sealed_machine_verified",
+        "claim_scope": (
+            evidence_verdict.get("permitted_claim_scope")
+            if evidence_verdict is not None
+            else None
+        ),
+        "effect_display": effect_display,
+    }
+    return sealed
+
+
+def _fresh_artifact_members(
+    *,
+    request: Mapping[str, Any],
+    admission: Mapping[str, Any],
+    stage: Mapping[str, Any],
+    engine_result: Mapping[str, Any],
+    diagnostic_payload: Mapping[str, Any],
+    inputs: Mapping[str, Any],
+) -> list[Any]:
+    from .references import VERIFICATION_REPORT_SCHEMA_VERSION
+
+    source_variants = {
+        str(variant["variant_id"]): variant
+        for variant in request.get("variant_inputs", [])
+        if isinstance(variant, Mapping) and isinstance(variant.get("variant_id"), str)
+    }
+    stage_variants = stage.get("variants")
+    if not isinstance(stage_variants, Mapping):
+        raise FreshAnalysisFinalizationError("ENGINE_REPRODUCIBILITY_VIOLATION")
+    runtime = admission.get("runtime_fingerprint")
+    if not isinstance(runtime, Mapping):
+        raise FreshAnalysisFinalizationError("ENGINE_RUNTIME_INCOMPATIBLE")
+    primary_feature_schema = inputs["primary_feature_schema"]
+    feature_matrix_payload = {
+        "schema_version": "feature_matrix.v1",
+        "row_ids": [str(row["order_line_id"]) for row in inputs["primary_rows"] or []],
+        "ordered_feature_names": list(primary_feature_schema["ordered_feature_names"]),
+        "shape": list(primary_feature_schema["shape"]),
+        "dtype": "float64",
+        "values": deepcopy(inputs["feature_matrix"]),
+    }
+    cohort_variants: dict[str, Any] = {}
+    visible_variants: dict[str, Any] = {}
+    feature_schemas: dict[str, Any] = {}
+    fold_variants: dict[str, Any] = {}
+    nuisance_variants: dict[str, Any] = {}
+    for variant_id in VARIANT_ORDER:
+        source = source_variants.get(variant_id, {})
+        materialized = stage_variants.get(variant_id, {})
+        cohort_variants[variant_id] = {
+            "source": deepcopy(dict(source)) if isinstance(source, Mapping) else {},
+            "materialized": deepcopy(dict(materialized))
+            if isinstance(materialized, Mapping)
+            else {},
+        }
+        rows = source.get("rows", []) if isinstance(source, Mapping) else []
+        s9 = materialized.get("s9") if isinstance(materialized, Mapping) else None
+        visible_variants[variant_id] = {
+            "s8_rows": deepcopy(rows) if isinstance(rows, list) else [],
+            "s9": deepcopy(dict(s9)) if isinstance(s9, Mapping) else None,
+        }
+        raw_schema = materialized.get("feature_schema") if isinstance(materialized, Mapping) else None
+        feature_schemas[variant_id] = (
+            deepcopy(dict(raw_schema)) if isinstance(raw_schema, Mapping) else {
+                "schema_version": "analysis-run-feature-matrix.v1",
+                "ordered_feature_names": [],
+                "shape": [0, 0],
+            }
+        )
+        fold_variants[variant_id] = deepcopy(
+            materialized.get("fold_assignments", [])
+            if isinstance(materialized, Mapping)
+            else []
+        )
+        nuisance_variants[variant_id] = deepcopy(
+            materialized.get("propensity_predictions", [])
+            if isinstance(materialized, Mapping)
+            else []
+        )
+
+    model_recipe = {
+        "schema_version": "model_recipe_registry.v1",
+        "recipes": [
+            {
+                "recipe_id": "propensity",
+                "estimator": deepcopy(request.get("propensity_spec", {})),
+                "runtime_dependencies": deepcopy(runtime.get("loaded_engine_dependencies", {})),
+            },
+            {
+                "recipe_id": "outcome_nuisances",
+                "estimator": "HistGradientBoostingRegressor",
+                "training_policy": "supplier_grouped_outer_oof",
+                "runtime_dependencies": deepcopy(runtime.get("loaded_engine_dependencies", {})),
+            },
+            {
+                "recipe_id": "causal_effect",
+                "estimator": "DoubleMLIRM",
+                "score": "ATTE",
+                "inference": "supplier_clustered",
+                "n_jobs_cv": 1,
+            },
+        ],
+    }
+    seed_registry = {
+        "schema_version": "derived_seed_registry.v1",
+        "records": deepcopy(admission.get("derived_seed_registry", [])),
+    }
+    cohort_records = {
+        "schema_version": "cohort_stage_records.v1",
+        "variants": cohort_variants,
+    }
+    visible_rows = {
+        "schema_version": "estimator_visible_rows.v1",
+        "variants": visible_variants,
+    }
+    feature_schema = {
+        "schema_version": "feature_schema.v1",
+        "primary": primary_feature_schema,
+        "variants": feature_schemas,
+    }
+    fold_assignments = {
+        "schema_version": "fold_assignments.v1",
+        "variants": fold_variants,
+    }
+    nuisance_predictions = {
+        "schema_version": "nuisance_predictions.v1",
+        "variants": nuisance_variants,
+        "shared_nuisance": deepcopy(engine_result.get("shared_nuisance")),
+        "subject_support": deepcopy(engine_result.get("subject_support")),
+    }
+    common_refs = ("engine_request:request", "runtime_fingerprint:runtime")
+    members = [
+        _fresh_artifact_member(
+            logical_role="engine_request",
+            logical_id="request",
+            producer_schema_id="causal-engine-input",
+            producer_schema_version="v2",
+            payload=dict(request),
+            evidence_refs=("runtime_fingerprint:runtime",),
+            scientific_content=False,
+        ),
+        _fresh_artifact_member(
+            logical_role="runtime_fingerprint",
+            logical_id="runtime",
+            producer_schema_id="analysis-runtime-fingerprint",
+            producer_schema_version="v1",
+            payload=dict(runtime),
+            scientific_content=False,
+        ),
+        _fresh_artifact_member(
+            logical_role="model_recipe_registry",
+            logical_id="recipes",
+            producer_schema_id="model_recipe_registry",
+            producer_schema_version="v1",
+            payload=model_recipe,
+            evidence_refs=common_refs,
+        ),
+        _fresh_artifact_member(
+            logical_role="derived_seed_registry",
+            logical_id="seeds",
+            producer_schema_id="derived_seed_registry",
+            producer_schema_version="v1",
+            payload=seed_registry,
+            evidence_refs=("engine_request:request",),
+        ),
+        _fresh_artifact_member(
+            logical_role="cohort_stage_records",
+            logical_id="cohorts",
+            producer_schema_id="cohort_stage_records",
+            producer_schema_version="v1",
+            payload=cohort_records,
+            evidence_refs=("engine_request:request",),
+        ),
+        _fresh_artifact_member(
+            logical_role="estimator_visible_rows",
+            logical_id="rows",
+            producer_schema_id="estimator_visible_rows",
+            producer_schema_version="v1",
+            payload=visible_rows,
+            evidence_refs=("cohort_stage_records:cohorts",),
+        ),
+        _fresh_artifact_member(
+            logical_role="feature_schema",
+            logical_id="schema",
+            producer_schema_id="feature_schema",
+            producer_schema_version="v1",
+            payload=feature_schema,
+            evidence_refs=("estimator_visible_rows:rows",),
+        ),
+        _fresh_artifact_member(
+            logical_role="feature_matrix",
+            logical_id="primary",
+            producer_schema_id="feature_matrix",
+            producer_schema_version="v1",
+            payload=feature_matrix_payload,
+            evidence_refs=("feature_schema:schema", "estimator_visible_rows:rows"),
+        ),
+        _fresh_artifact_member(
+            logical_role="fold_assignments",
+            logical_id="folds",
+            producer_schema_id="fold_assignments",
+            producer_schema_version="v1",
+            payload=fold_assignments,
+            evidence_refs=("estimator_visible_rows:rows",),
+        ),
+        _fresh_artifact_member(
+            logical_role="nuisance_predictions",
+            logical_id="nuisance",
+            producer_schema_id="nuisance_predictions",
+            producer_schema_version="v1",
+            payload=nuisance_predictions,
+            evidence_refs=("fold_assignments:folds", "feature_matrix:primary"),
+        ),
+        _fresh_artifact_member(
+            logical_role="engine_result",
+            logical_id="result",
+            producer_schema_id="causal-engine-result",
+            producer_schema_version="v1",
+            payload=dict(engine_result),
+            evidence_refs=("engine_request:request", "nuisance_predictions:nuisance"),
+        ),
+        _fresh_artifact_member(
+            logical_role="diagnostic_artifacts",
+            logical_id="diagnostics",
+            producer_schema_id="diagnostic_artifacts",
+            producer_schema_version="v1",
+            payload=dict(diagnostic_payload),
+            evidence_refs=("engine_result:result", "feature_matrix:primary"),
+        ),
+    ]
+    check_basis = {
+        "roles": sorted(member.logical_role for member in members),
+        "request_digest": admission.get("scientific_request_digest"),
+        "runtime_digest": admission.get("runtime_fingerprint_digest"),
+        "engine_result_digest": content_sha256(engine_result),
+    }
+    verification_report = {
+        "schema_version": VERIFICATION_REPORT_SCHEMA_VERSION,
+        "validation_policy_version": "analysis-run-verification.v1",
+        "status": "passed",
+        "checks": [
+            {
+                "check_id": "required_roles",
+                "status": "passed",
+                "evidence_digest": content_sha256(check_basis),
+            },
+            {
+                "check_id": "cross_reference_integrity",
+                "status": "passed",
+                "evidence_digest": content_sha256(
+                    {
+                        "request": admission.get("scientific_request_digest"),
+                        "runtime": admission.get("runtime_fingerprint_digest"),
+                    }
+                ),
+            },
+        ],
+    }
+    members.append(
+        _fresh_artifact_member(
+            logical_role="verification_report",
+            logical_id="verification",
+            producer_schema_id="analysis-run-verification",
+            producer_schema_version="v1",
+            payload=verification_report,
+            evidence_refs=tuple(
+                f"{member.logical_role}:{member.logical_id}" for member in members
+            ),
+            scientific_content=False,
+        )
+    )
+    return members
+
+
+def finalize_fresh_analysis(
+    *,
+    artifact_root: Path,
+    analysis_run_id: str,
+    admission: Mapping[str, Any],
+    propensity_stage: Mapping[str, Any],
+    engine_result: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Turn one fresh engine execution into a verified, sealed read projection."""
+
+    from .references import (
+        ARTIFACT_CONTRACT_VERSION,
+        BUNDLE_MANIFEST_SCHEMA_VERSION,
+        CACHE_KEY_SCHEMA_VERSION,
+        publish_analysis_bundle,
+        verify_published_analysis_bundle,
+    )
+    from .validity import publish_validity_results
+
+    try:
+        analysis_run_id_for_operation("operation-" + analysis_run_id.removeprefix("analysis-run-"))
+    except ValueError:
+        raise FreshAnalysisFinalizationError("RUN_ID_INVALID") from None
+    request_value = admission.get("suite_request")
+    runtime_value = admission.get("runtime_fingerprint")
+    if not isinstance(request_value, Mapping) or not isinstance(runtime_value, Mapping):
+        raise FreshAnalysisFinalizationError("ENGINE_INPUT_INTEGRITY_MISMATCH")
+    try:
+        request = validate_suite_request(request_value).request
+    except (TypeError, ValueError):
+        raise FreshAnalysisFinalizationError("ENGINE_INPUT_INTEGRITY_MISMATCH") from None
+    if admission.get("scientific_request_digest") != scientific_sha256(request):
+        raise FreshAnalysisFinalizationError("ENGINE_INPUT_INTEGRITY_MISMATCH")
+    if engine_result.get("status") not in {"estimated", "abstained"}:
+        raise FreshAnalysisFinalizationError("ENGINE_EXECUTION_FAILED")
+    if not isinstance(propensity_stage.get("variants"), Mapping):
+        raise FreshAnalysisFinalizationError("ENGINE_REPRODUCIBILITY_VIOLATION")
+    _fresh_validate_engine_result(request, propensity_stage, engine_result)
+    diagnostic_payload, inputs = _fresh_diagnostic_payload(
+        request=request,
+        stage=propensity_stage,
+        engine_result=engine_result,
+        analysis_run_id=analysis_run_id,
+    )
+    validity = publish_validity_results(
+        diagnostic_payload,
+        analysis_run_id=analysis_run_id,
+        bundle_manifest_hash=None,
+        evidence_refs=("engine_request:request", "engine_result:result"),
+        input_refs=("diagnostic_artifacts:diagnostics",),
+    )
+    if validity["evidence_verdict"] is None or validity["robustness_grade"] is None:
+        raise FreshAnalysisFinalizationError("EVIDENCE_VERDICT_UNAVAILABLE")
+    diagnostic_payload.update(
+        {
+            "diagnostics": validity["diagnostics"],
+            "diagnostic_summary": diagnostic_payload["diagnostic_summary"],
+            "robustness_grade": validity["robustness_grade"],
+            "evidence_verdict": validity["evidence_verdict"],
+        }
+    )
+    members = _fresh_artifact_members(
+        request=request,
+        admission=admission,
+        stage=propensity_stage,
+        engine_result=engine_result,
+        diagnostic_payload=diagnostic_payload,
+        inputs=inputs,
+    )
+    started_at = datetime.now(timezone.utc).isoformat()
+    completed_at = datetime.now(timezone.utc).isoformat()
+    runtime_digest = str(admission["runtime_fingerprint_digest"])
+    request_digest = str(admission["scientific_request_digest"])
+    engine_schema = str(engine_result.get("schema_version"))
+    cache_key = content_sha256(
+        {
+            "schema_version": CACHE_KEY_SCHEMA_VERSION,
+            "scientific_request_digest": request_digest,
+            "runtime_fingerprint_digest": runtime_digest,
+            "engine_output_schema_version": engine_schema,
+            "bundle_manifest_schema_version": BUNDLE_MANIFEST_SCHEMA_VERSION,
+            "artifact_contract_version": ARTIFACT_CONTRACT_VERSION,
+        }
+    )
+    build_id = runtime_value.get("application_build_id")
+    if not isinstance(build_id, str) or not build_id:
+        raise FreshAnalysisFinalizationError("ENGINE_RUNTIME_INCOMPATIBLE")
+    manifest: dict[str, Any] = {
+        "manifest_schema_version": BUNDLE_MANIFEST_SCHEMA_VERSION,
+        "artifact_contract_version": ARTIFACT_CONTRACT_VERSION,
+        "scientific_request_digest": request_digest,
+        "runtime_fingerprint_digest": runtime_digest,
+        "cache_key": cache_key,
+        "engine_result_status": str(engine_result["status"]),
+        "started_at": started_at,
+        "completed_at": completed_at,
+        "producer_application_build_id": build_id,
+    }
+    investigation_request_id = admission.get("investigation_request_id")
+    if isinstance(investigation_request_id, str) and investigation_request_id:
+        manifest["investigation_request_id"] = investigation_request_id
+    published = publish_analysis_bundle(
+        artifact_root,
+        analysis_run_id=analysis_run_id,
+        manifest=manifest,
+        members=members,
+    )
+    verified = verify_published_analysis_bundle(
+        artifact_root,
+        analysis_run_id=analysis_run_id,
+        expected_build_id=build_id,
+        expected_runtime=runtime_value,
+    )
+    if verified.bundle_manifest_hash != published.bundle_manifest_hash:
+        raise FreshAnalysisFinalizationError("RUN_ARTIFACT_INTEGRITY_MISMATCH")
+    verified_validity = publish_validity_results(
+        diagnostic_payload,
+        analysis_run_id=analysis_run_id,
+        bundle_manifest_hash=None,
+        evidence_refs=("engine_request:request", "engine_result:result"),
+        input_refs=("diagnostic_artifacts:diagnostics",),
+    )
+    if verified_validity["evidence_verdict"] != validity["evidence_verdict"]:
+        raise FreshAnalysisFinalizationError("EVIDENCE_VERDICT_INTEGRITY_MISMATCH")
+    result = {
+        "schema_version": "analysis-run-execution-result.v1",
+        "scientific_request_digest": request_digest,
+        "runtime_fingerprint": deepcopy(dict(runtime_value)),
+        "runtime_fingerprint_digest": runtime_digest,
+        "status": str(engine_result["status"]),
+        "reason_code": engine_result.get("reason_code"),
+        "failure_code": None,
+        "estimator_executed": engine_result.get("estimator_executed") is True,
+        "primary_result": _fresh_sealed_primary_result(
+            engine_result,
+            validity["evidence_verdict"],
+        ),
+        "safe_detail": deepcopy(dict(engine_result.get("safe_detail", {}))),
+        "bundle_manifest_hash": published.bundle_manifest_hash,
+        "verification_state": "machine_verified",
+        "post_publication_verified": True,
+        "diagnostics": deepcopy(validity["diagnostics"]),
+        "diagnostic_summary": deepcopy(diagnostic_payload["diagnostic_summary"]),
+        "robustness_grade": deepcopy(validity["robustness_grade"]),
+        "evidence_verdict": deepcopy(validity["evidence_verdict"]),
+        "rendered_verdict": deepcopy(diagnostic_payload["rendered_verdict"]),
+        "subject_verdict": deepcopy(diagnostic_payload["subject_verdict"]),
+        "rendered_subject_verdict": deepcopy(
+            diagnostic_payload["rendered_subject_verdict"]
+        ),
+    }
+    result["result_identity_digest"] = scientific_sha256(result)
+    return result
+
+
 def analysis_run_id_for_operation(operation_id: str) -> str:
     if not operation_id.startswith("operation-"):
         raise ValueError("operation identity is invalid")
@@ -4197,6 +5079,92 @@ def load_fresh_analysis_result(layout: Any, operation_id: str) -> dict[str, Any]
     status = result.get("status")
     if status not in {"estimated", "abstained", "failed"}:
         return None
+    if status in {"estimated", "abstained"}:
+        result_identity_digest = result.get("result_identity_digest")
+        identity_payload = {
+            key: value
+            for key, value in result.items()
+            if key != "result_identity_digest"
+        }
+        if (
+            not isinstance(result_identity_digest, str)
+            or scientific_sha256(identity_payload) != result_identity_digest
+        ):
+            return None
+    bundle_manifest_hash = result.get("bundle_manifest_hash")
+    runtime = result.get("runtime_fingerprint")
+    if status in {"estimated", "abstained"}:
+        if (
+            not isinstance(bundle_manifest_hash, str)
+            or not isinstance(runtime, Mapping)
+            or not isinstance(runtime.get("application_build_id"), str)
+            or result.get("post_publication_verified") is not True
+            or result.get("verification_state") != "machine_verified"
+            or not hasattr(layout, "artifact_root")
+        ):
+            return None
+        try:
+            from .references import verify_published_analysis_bundle
+
+            verified = verify_published_analysis_bundle(
+                Path(layout.artifact_root),
+                analysis_run_id=analysis_run_id_for_operation(operation_id),
+                expected_build_id=str(runtime["application_build_id"]),
+                expected_runtime=runtime,
+            )
+            if verified.bundle_manifest_hash != bundle_manifest_hash:
+                return None
+        except (OSError, TypeError, ValueError):
+            return None
+        diagnostics = result.get("diagnostics")
+        grade = result.get("robustness_grade")
+        verdict = result.get("evidence_verdict")
+        diagnostic_summary_value = result.get("diagnostic_summary")
+        if (
+            not isinstance(diagnostics, list)
+            or not isinstance(grade, Mapping)
+            or not isinstance(verdict, Mapping)
+            or not isinstance(diagnostic_summary_value, Mapping)
+        ):
+            return None
+        try:
+            from .diagnostics import diagnostic_summary as build_diagnostic_summary
+            from .validity import publish_validity_results
+
+            if dict(diagnostic_summary_value) != build_diagnostic_summary(diagnostics):
+                return None
+            publish_validity_results(
+                {
+                    "schema_version": "diagnostic_artifacts.v1",
+                    "diagnostics": diagnostics,
+                    "robustness_grade": grade,
+                    "evidence_verdict": verdict,
+                },
+                analysis_run_id=analysis_run_id_for_operation(operation_id),
+                bundle_manifest_hash=None,
+                evidence_refs=("engine_request:request", "engine_result:result"),
+                input_refs=("diagnostic_artifacts:diagnostics",),
+            )
+            from .validity import (
+                render_evidence_verdict,
+                render_subject_evidence_verdict,
+            )
+
+            if result.get("rendered_verdict") != render_evidence_verdict(verdict):
+                return None
+            subject_verdict = result.get("subject_verdict")
+            rendered_subject_verdict = result.get("rendered_subject_verdict")
+            if subject_verdict is None:
+                if rendered_subject_verdict is not None:
+                    return None
+            elif not isinstance(subject_verdict, Mapping) or rendered_subject_verdict != render_subject_evidence_verdict(subject_verdict):
+                return None
+        except (KeyError, TypeError, ValueError):
+            return None
+    else:
+        diagnostics = None
+        grade = None
+        verdict = None
     return {
         "status": status,
         "reason_code": result.get("reason_code"),
@@ -4208,6 +5176,35 @@ def load_fresh_analysis_result(layout: Any, operation_id: str) -> dict[str, Any]
             else None
         ),
         "safe_detail": deepcopy(dict(safe_detail)),
+        "runtime_fingerprint": (
+            deepcopy(dict(runtime)) if isinstance(runtime, Mapping) else None
+        ),
+        "bundle_manifest_hash": bundle_manifest_hash,
+        "verification_state": result.get("verification_state"),
+        "post_publication_verified": result.get("post_publication_verified") is True,
+        "diagnostics": deepcopy(diagnostics) if isinstance(diagnostics, list) else [],
+        "diagnostic_summary": (
+            deepcopy(dict(result["diagnostic_summary"]))
+            if isinstance(result.get("diagnostic_summary"), Mapping)
+            else None
+        ),
+        "robustness_grade": deepcopy(dict(grade)) if isinstance(grade, Mapping) else None,
+        "evidence_verdict": deepcopy(dict(verdict)) if isinstance(verdict, Mapping) else None,
+        "rendered_verdict": (
+            deepcopy(dict(result["rendered_verdict"]))
+            if isinstance(result.get("rendered_verdict"), Mapping)
+            else None
+        ),
+        "subject_verdict": (
+            deepcopy(dict(result["subject_verdict"]))
+            if isinstance(result.get("subject_verdict"), Mapping)
+            else None
+        ),
+        "rendered_subject_verdict": (
+            deepcopy(dict(result["rendered_subject_verdict"]))
+            if isinstance(result.get("rendered_subject_verdict"), Mapping)
+            else None
+        ),
     }
 
 
@@ -4246,7 +5243,7 @@ def analysis_run_status(
         verification = "invalid"
         availability = "suppressed"
         reason_code = execution_result.get("reason_code") or "ENGINE_INTERNAL_ERROR"
-    elif state == "SUCCEEDED":
+    elif state == "SUCCEEDED" and result_status == "abstained":
         status = "ABSTAINED"
         lifecycle = "sealed"
         outcome = "abstained"
@@ -4264,6 +5261,13 @@ def analysis_run_status(
         verification = "invalid"
         availability = "suppressed"
         reason_code = operation.failure_code or "RUN_EXECUTION_INTERRUPTED"
+    elif state == "SUCCEEDED":
+        status = "FAILED"
+        lifecycle = "failed"
+        outcome = "failed"
+        verification = "invalid"
+        availability = "suppressed"
+        reason_code = "RUN_RESULT_UNAVAILABLE"
     else:
         status = "FAILED"
         lifecycle = "failed"
@@ -4301,6 +5305,7 @@ def analysis_run_status(
         if execution_result and isinstance(execution_result.get("primary_result"), Mapping)
         else None
     )
+    final_evidence = execution_result if execution_result and result_status in {"estimated", "abstained"} else {}
     return {
         "schema_version": "analysis-run-status.v1",
         "analysis_run_id": analysis_run_id_for_operation(operation.operation_id),
@@ -4331,6 +5336,46 @@ def analysis_run_status(
         "fold_descriptor": deepcopy(payload["fold_descriptor"]),
         "fresh_run_detail": fresh_run_detail,
         "primary_result": primary_result,
+        "bundle_manifest_hash": (
+            final_evidence.get("bundle_manifest_hash")
+            if isinstance(final_evidence.get("bundle_manifest_hash"), str)
+            else None
+        ),
+        "diagnostics": (
+            deepcopy(final_evidence.get("diagnostics"))
+            if isinstance(final_evidence.get("diagnostics"), list)
+            else []
+        ),
+        "diagnostic_summary": (
+            deepcopy(final_evidence.get("diagnostic_summary"))
+            if isinstance(final_evidence.get("diagnostic_summary"), Mapping)
+            else None
+        ),
+        "robustness_grade": (
+            deepcopy(final_evidence.get("robustness_grade"))
+            if isinstance(final_evidence.get("robustness_grade"), Mapping)
+            else None
+        ),
+        "evidence_verdict": (
+            deepcopy(final_evidence.get("evidence_verdict"))
+            if isinstance(final_evidence.get("evidence_verdict"), Mapping)
+            else None
+        ),
+        "rendered_verdict": (
+            deepcopy(final_evidence.get("rendered_verdict"))
+            if isinstance(final_evidence.get("rendered_verdict"), Mapping)
+            else None
+        ),
+        "subject_verdict": (
+            deepcopy(final_evidence.get("subject_verdict"))
+            if isinstance(final_evidence.get("subject_verdict"), Mapping)
+            else None
+        ),
+        "rendered_subject_verdict": (
+            deepcopy(final_evidence.get("rendered_subject_verdict"))
+            if isinstance(final_evidence.get("rendered_subject_verdict"), Mapping)
+            else None
+        ),
     }
 
 

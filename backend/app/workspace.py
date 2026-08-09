@@ -984,7 +984,8 @@ class WorkspaceStore:
                 ).fetchone()
                 if (
                     operation is None
-                    or str(operation["operation_kind"]) != "FRESH_RUN"
+                    or str(operation["operation_kind"])
+                    not in {"FRESH_RUN", "FRESH_ANALYSIS"}
                     or str(operation["status"]) != "TERMINAL"
                 ):
                     raise WorkspaceRequestError(

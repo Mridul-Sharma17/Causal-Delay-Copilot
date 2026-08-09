@@ -354,7 +354,17 @@ class DurableOperationsMixin:
                     connection.commit()
                     return OperationReceipt(operation=operation, replayed=True)
 
-                self._active_row_locked(workspace_id, current_time)
+                workspace_row = self._active_row_locked(workspace_id, current_time)
+                if (
+                    operation_kind == "FRESH_ANALYSIS"
+                    and int(workspace_row["terminal_fresh_bundle_count"])
+                    >= self._quotas.max_workspace_terminal_fresh_bundles
+                ):
+                    raise WorkspaceRequestError(
+                        SafeErrorCode.DEMO_WORKSPACE_FRESH_BUNDLE_LIMIT_REACHED,
+                        "START_A_NEW_DEMO_WORKSPACE",
+                        429,
+                    )
                 free_disk, available_memory, resource_warnings = _resource_snapshot(
                     state_root,
                     self._quotas,
@@ -1048,6 +1058,7 @@ class OperationRunner:
             "backend.app.operation_worker",
             operation.operation_kind,
             str(temporary_root),
+            str(self._layout.artifact_root),
         ]
 
     def _run_loop(self) -> None:
@@ -1139,6 +1150,7 @@ class OperationRunner:
                     expected_state="RUNNING",
                 )
                 if completed is not None and completed.state == "SUCCEEDED":
+                    self._record_terminal_fresh_bundle(operation)
                     return
                 terminal_state = "CANCELLED"
             reason_code = (
@@ -1210,6 +1222,36 @@ class OperationRunner:
         if destination.exists():
             raise OSError("operation result already exists")
         os.replace(temporary_root, destination)
+
+    def _record_terminal_fresh_bundle(self, operation: DurableOperation) -> None:
+        if operation.operation_kind != "FRESH_ANALYSIS":
+            return
+        recorder = getattr(self._store, "record_terminal_fresh_bundle", None)
+        if not callable(recorder):
+            return
+        result_path = self._layout.run_root / operation.operation_id / "analysis-run-result.json"
+        try:
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, TypeError, ValueError):
+            return
+        if not isinstance(result, Mapping):
+            return
+        status = result.get("status")
+        bundle_manifest_hash = result.get("bundle_manifest_hash")
+        if status not in {"estimated", "abstained"} or not isinstance(
+            bundle_manifest_hash, str
+        ):
+            return
+        analysis_run_id = "analysis-run-" + operation.operation_id.removeprefix(
+            "operation-"
+        )
+        recorder(
+            operation.workspace_id,
+            result_id=analysis_run_id,
+            operation_id=operation.operation_id,
+            result_ref=bundle_manifest_hash,
+            idempotency_key=f"terminal-fresh-bundle:{operation.operation_id}",
+        )
 
     @staticmethod
     def _terminate(process: subprocess.Popen[bytes]) -> None:

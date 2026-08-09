@@ -5,17 +5,19 @@ from pathlib import Path
 import sys
 
 from .analysis_runs import (
+    analysis_run_id_for_operation,
     estimate_primary_atte_and_context,
+    finalize_fresh_analysis,
     materialize_propensity_and_s9,
-    _public_primary_result,
 )
 
 
 def main() -> int:
-    if len(sys.argv) != 3:
+    if len(sys.argv) not in {3, 4}:
         return 64
     operation_kind = sys.argv[1]
     temporary_root = Path(sys.argv[2])
+    artifact_root = Path(sys.argv[3]) if len(sys.argv) == 4 else None
     if operation_kind == "FRESH_ANALYSIS":
         request_path = temporary_root / "analysis-run-request.json"
         if not request_path.is_file():
@@ -30,20 +32,19 @@ def main() -> int:
                 request["suite_request"],
                 stage_result,
             )
-            result = {
-                "schema_version": "analysis-run-execution-result.v1",
-                "scientific_request_digest": request["scientific_request_digest"],
-                "status": engine_result["status"],
-                "reason_code": engine_result["reason_code"],
-                "failure_code": (
-                    engine_result["reason_code"]
-                    if engine_result["status"] == "failed"
-                    else None
+            if artifact_root is None:
+                return 78
+            result = finalize_fresh_analysis(
+                artifact_root=artifact_root,
+                analysis_run_id=analysis_run_id_for_operation(
+                    temporary_root.name
+                    if temporary_root.name.startswith("operation-")
+                    else "operation-" + temporary_root.name
                 ),
-                "estimator_executed": engine_result["estimator_executed"],
-                "primary_result": _public_primary_result(engine_result),
-                "safe_detail": engine_result["safe_detail"],
-            }
+                admission=request,
+                propensity_stage=stage_result,
+                engine_result=engine_result,
+            )
         except Exception:
             result = {
                 "schema_version": "analysis-run-execution-result.v1",

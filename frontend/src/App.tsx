@@ -634,9 +634,23 @@ function DecisionBriefPanel({
 function FreshRunDetailPanel({
   detail,
   primaryResult,
+  diagnostics,
+  diagnosticSummary,
+  evidenceVerdict,
+  robustnessGrade,
+  renderedVerdict,
+  subjectVerdict,
+  renderedSubjectVerdict,
 }: {
   detail: Record<string, unknown> | null | undefined;
   primaryResult: Record<string, unknown> | null | undefined;
+  diagnostics: DiagnosticResult[];
+  diagnosticSummary: DiagnosticSummary | null;
+  evidenceVerdict: EvidenceVerdict | null;
+  robustnessGrade: RobustnessGrade | null;
+  renderedVerdict: RenderedEvidenceVerdict | null;
+  subjectVerdict: EvidenceVerdict | null;
+  renderedSubjectVerdict: RenderedEvidenceVerdict | null;
 }) {
   if (
     (detail === null || detail === undefined) &&
@@ -754,12 +768,24 @@ function FreshRunDetailPanel({
           )}
         </section>
       )}
+      <EvidenceVerdictPanel
+        verdict={evidenceVerdict}
+        grade={robustnessGrade}
+        rendered={renderedVerdict}
+      />
+      {diagnosticSummary !== null && (
+        <EvidenceDiagnostics diagnostics={diagnostics} summary={diagnosticSummary} />
+      )}
+      <EvidenceVerdictPanel
+        verdict={subjectVerdict}
+        grade={null}
+        rendered={renderedSubjectVerdict}
+      />
       {primaryResult !== null && primaryResult !== undefined && (
-        <section className="operation-detail" aria-label="Provisional fresh-run result">
-          <p className="eyebrow">Provisional fresh-run result</p>
+        <section className="operation-detail" aria-label="Sealed fresh-run result">
+          <p className="eyebrow">Sealed fresh-run result</p>
           <p className="supporting-copy">
-            This is provisional run output only. It grants no Evidence Verdict and no action
-            permission.
+            Effect fields below are the exact projection permitted by the sealed Evidence Verdict.
           </p>
           <dl className="risk-facts">
             <div>
@@ -782,7 +808,12 @@ function FreshRunDetailPanel({
             </div>
             <div>
               <dt>Permission state</dt>
-              <dd>Provisional only · verdict and action unavailable</dd>
+              <dd>
+                {String(
+                  (primaryResult.permission as Record<string, unknown> | undefined)
+                    ?.effect_display ?? "No effect exposed",
+                )}
+              </dd>
             </div>
           </dl>
         </section>
@@ -1443,9 +1474,9 @@ function App() {
                       <>
                         <p className="supporting-copy" role="status">
                           {freshOperation.analysis_run?.status === "ESTIMATED"
-                            ? "Fresh request completed with provisional primary ATTE and contextual ATE. No Evidence Verdict or action permission was granted."
+                            ? "Fresh request completed with a machine-verified sealed evidence bundle. The Evidence Verdict controls claim scope and effect exposure."
                             : freshOperation.analysis_run?.status === "ABSTAINED"
-                            ? `Fresh request validated and abstained before estimator execution. ${freshOperation.analysis_run.reason_code ?? "No scientific result was published."}`
+                            ? `Fresh request validated and abstained before estimator execution; the sealed run exposes no effect. ${freshOperation.analysis_run.reason_code ?? "No scientific result was published."}`
                             : freshOperation.analysis_run?.status === "FAILED"
                               ? `Fresh request failed safely. ${freshOperation.analysis_run.failure_code ?? "No result was published."}`
                               : freshOperation.state === "SUCCEEDED"
@@ -1455,6 +1486,25 @@ function App() {
                         <FreshRunDetailPanel
                           detail={freshOperation.analysis_run?.fresh_run_detail}
                           primaryResult={freshOperation.analysis_run?.primary_result}
+                          diagnostics={freshOperation.analysis_run?.diagnostics ?? []}
+                          diagnosticSummary={
+                            freshOperation.analysis_run?.diagnostic_summary ?? null
+                          }
+                          evidenceVerdict={
+                            freshOperation.analysis_run?.evidence_verdict ?? null
+                          }
+                          robustnessGrade={
+                            freshOperation.analysis_run?.robustness_grade ?? null
+                          }
+                          renderedVerdict={
+                            freshOperation.analysis_run?.rendered_verdict ?? null
+                          }
+                          subjectVerdict={
+                            freshOperation.analysis_run?.subject_verdict ?? null
+                          }
+                          renderedSubjectVerdict={
+                            freshOperation.analysis_run?.rendered_subject_verdict ?? null
+                          }
                         />
                       </>
                     )}

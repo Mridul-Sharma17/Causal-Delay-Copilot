@@ -741,6 +741,14 @@ class AnalysisRunStatusResponse(BaseModel):
     fold_descriptor: dict[str, Any]
     fresh_run_detail: dict[str, Any]
     primary_result: dict[str, Any] | None = None
+    bundle_manifest_hash: str | None = None
+    diagnostics: list[dict[str, Any]] = Field(default_factory=list)
+    diagnostic_summary: dict[str, Any] | None = None
+    robustness_grade: dict[str, Any] | None = None
+    evidence_verdict: dict[str, Any] | None = None
+    rendered_verdict: dict[str, str] | None = None
+    subject_verdict: dict[str, Any] | None = None
+    rendered_subject_verdict: dict[str, str] | None = None
 
 
 class OperationResponse(BaseModel):

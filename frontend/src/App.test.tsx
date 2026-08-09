@@ -822,9 +822,17 @@ describe("Core health journey", () => {
                 feature_descriptor: {},
                 fold_descriptor: {},
                 fresh_run_detail: {},
+                bundle_manifest_hash: "sha256:fresh-bundle",
+                diagnostics: referenceDeliveryResponse.diagnostics,
+                diagnostic_summary: referenceDeliveryResponse.diagnostic_summary,
+                robustness_grade: referenceDeliveryResponse.robustness_grade,
+                evidence_verdict: referenceDeliveryResponse.evidence_verdict,
+                rendered_verdict: referenceDeliveryResponse.rendered_verdict,
+                subject_verdict: null,
+                rendered_subject_verdict: null,
                 primary_result: {
-                  schema_version: "fresh-primary-result.v1",
-                  state: "provisional",
+                  schema_version: "fresh-primary-result.v2",
+                  state: "sealed",
                   primary_atte: {
                     estimate: 1.5,
                     ci_lower: 0.4,
@@ -873,9 +881,11 @@ describe("Core health journey", () => {
                     },
                   },
                   permission: {
-                    evidence_verdict: false,
-                    action_permission: false,
-                    state: "provisional_run_output_only",
+                    evidence_verdict: true,
+                    action_permission: true,
+                    state: "sealed_machine_verified",
+                    claim_scope: "population_and_subject",
+                    effect_display: "CAUSAL_ESTIMATE",
                   },
                 },
               },
@@ -946,11 +956,13 @@ describe("Core health journey", () => {
     expect(screen.getAllByText(/No slippage estimate is displayed/)).toHaveLength(2);
     fireEvent.click(screen.getByRole("button", { name: "Request fresh analysis" }));
     expect(
-      await screen.findByText(/Fresh request completed with provisional primary ATTE/),
+      await screen.findByText(
+        /Fresh request completed with a machine-verified sealed evidence bundle/,
+      ),
     ).toBeInTheDocument();
-    expect(await screen.findByText("Provisional fresh-run result")).toBeInTheDocument();
+    expect(await screen.findByText("Sealed fresh-run result")).toBeInTheDocument();
     expect(screen.getByText("Primary ATTE")).toBeInTheDocument();
-    expect(screen.getByText("Provisional only · verdict and action unavailable")).toBeInTheDocument();
+    expect(screen.getByText("CAUSAL_ESTIMATE")).toBeInTheDocument();
     expect(await screen.findByText("Subordinate sensitivity evidence")).toBeInTheDocument();
     expect(screen.getByText("Stricter threshold")).toBeInTheDocument();
     expect(screen.getByText("nearest-rank-percentile-0.75.v1")).toBeInTheDocument();
