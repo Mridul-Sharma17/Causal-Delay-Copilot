@@ -6,7 +6,7 @@ import math
 import re
 from typing import Any, Mapping
 
-from .canonical import canonical_json, sha256
+from .canonical import canonical_json, safe_sha256, sha256
 
 
 DRAFT_CONTEXT_SCHEMA_IDENTIFIER = "draft-context"
@@ -19,6 +19,9 @@ DRAFT_TEMPLATE_IDENTIFIER = "deterministic-zero-llm-draft"
 DRAFT_TEMPLATE_VERSION = "1"
 CURRENT_ADVICE_RENDER_RESULT_SCHEMA_IDENTIFIER = "current-advice-render-result"
 CURRENT_ADVICE_RENDER_RESULT_SCHEMA_VERSION = "1"
+GEMINI_DRAFT_RESPONSE_CHECK_SCHEMA_IDENTIFIER = "gemini-draft-response-check"
+GEMINI_DRAFT_RESPONSE_CHECK_SCHEMA_VERSION = "1"
+GEMINI_CHECKED_SOURCE = "GEMINI_CHECKED"
 
 _ALLOWED_SELECTION_BASES = frozenset(
     {
@@ -125,6 +128,33 @@ _NUMBER_TOKEN_PATTERN = re.compile(r"(?<![A-Za-z_])[+-]?(?:\d+(?:\.\d+)?)(?![A-Z
 _WORD_TOKEN_PATTERN = re.compile(r"\b[A-Za-z][A-Za-z0-9_-]{2,}\b")
 _ENTITY_TOKEN_PATTERN = re.compile(r"\b[A-Z][A-Z0-9_-]{2,}\b")
 _HASH_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
+_GEMINI_RESPONSE_FIELDS = ("opening", "connectiveBody", "closing")
+_GEMINI_ALLOWED_ENTITY_TOKENS = frozenset({"MANAGER_NAME", "APPROVED_RECIPIENT"})
+_GEMINI_TEMPLATE_MARKERS = (
+    "subject:",
+    "to:",
+    "recorded facts:",
+    "evidence tags:",
+    "dates:",
+    "allow-listed numeric tokens:",
+)
+_GEMINI_BLOCKED_ACTION_PATTERN = re.compile(
+    r"\b(?:send|approve|approval|authorize|authorization|execute|reroute|expedite|switch)\b",
+    re.IGNORECASE,
+)
+_GEMINI_STRONG_CAUSAL_PHRASES = (
+    "proves the cause",
+    "proves causation",
+    "causes the delay",
+    "caused by",
+    "cause of the delay",
+    "guarantees recovery",
+    "guarantees that",
+    "will recover",
+    "establishes the individual cause",
+    "the effect of this action",
+    "the action will recover",
+)
 
 
 class DraftContextUnavailable(ValueError):
@@ -1112,6 +1142,12 @@ def _validate_context(context: object) -> dict[str, Any]:
     return record
 
 
+def validate_draft_context(context: object) -> dict[str, Any]:
+    """Validate and return the only DraftContext shape allowed at provider egress."""
+
+    return _validate_context(context)
+
+
 def build_draft_context(current_advice: object) -> dict[str, Any]:
     """Create one immutable, sanitized DraftContext from proven current advice."""
 
@@ -1155,7 +1191,11 @@ def _render_body(context: Mapping[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _artifact_payload(context: Mapping[str, Any]) -> dict[str, Any]:
+def _artifact_payload(
+    context: Mapping[str, Any],
+    *,
+    drafting_provenance: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     body = _render_body(context)
     artifact: dict[str, Any] = {
         "schema_identifier": DRAFTED_ARTEFACT_SCHEMA_IDENTIFIER,
@@ -1182,10 +1222,15 @@ def _artifact_payload(context: Mapping[str, Any]) -> dict[str, Any]:
         "authorization_state": "NOT_AUTHORIZED",
         "provenance": deepcopy(context["provenance"]),
     }
+    if drafting_provenance is not None:
+        artifact["provenance"]["drafting"] = deepcopy(dict(drafting_provenance))
     artifact_key = sha256(
         {
             "draft_context_ref_and_hash": artifact["draft_context_ref_and_hash"],
             "recommendation_ref_and_hash": artifact["recommendation_ref_and_hash"],
+            "source": artifact["source"],
+            "provider_sections": artifact.get("provider_sections"),
+            "drafting": artifact["provenance"].get("drafting"),
             "body": body,
         }
     )
@@ -1195,11 +1240,18 @@ def _artifact_payload(context: Mapping[str, Any]) -> dict[str, Any]:
     return artifact
 
 
-def render_deterministic_draft(context: object) -> dict[str, Any]:
+def render_deterministic_draft(
+    context: object,
+    *,
+    drafting_provenance: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """Render the DraftContext without a provider or free-form generated text."""
 
     validated_context = _validate_context(context)
-    return _artifact_payload(validated_context)
+    return _artifact_payload(
+        validated_context,
+        drafting_provenance=drafting_provenance,
+    )
 
 
 def _add_failure(failures: list[str], code: str) -> None:
@@ -1213,6 +1265,219 @@ def _privacy_failure_codes(value: object) -> list[str]:
     if any(pattern.search(serialized) for pattern in _BLOCKED_TEXT_PATTERNS):
         codes.append("UNSAFE_PRIVATE_CONTENT")
     return codes
+
+
+def _gemini_forbidden_facts(context: Mapping[str, Any]) -> list[str]:
+    phrases: set[str] = set()
+    action = _mapping(context.get("action"))
+    if action is not None:
+        for field in ("option_code", "label"):
+            value = action.get(field)
+            if isinstance(value, str) and len(value) >= 3:
+                phrases.add(value)
+    for fact in context.get("facts", []):
+        fact_mapping = _mapping(fact)
+        if fact_mapping is not None:
+            for value in _string_values(fact_mapping.get("value")):
+                if len(value) >= 3:
+                    phrases.add(value)
+    evidence_tags = _mapping(context.get("evidence_tags"))
+    if evidence_tags is not None:
+        for value in _string_values(evidence_tags):
+            if len(value) >= 3:
+                phrases.add(value)
+    return sorted(phrases, key=lambda value: (-len(value), value.casefold()))
+
+
+def check_gemini_draft_response(
+    context: object,
+    response: object,
+) -> dict[str, Any]:
+    """Check provider prose without allowing it to become evidence or authority."""
+
+    failures: list[str] = []
+    checks: dict[str, str] = {}
+    try:
+        validated_context = _validate_context(context)
+        checks["context_schema"] = "PASS"
+        checks["context_integrity"] = "PASS"
+    except DraftContextUnavailable:
+        checks["context_schema"] = "FAIL"
+        checks["context_integrity"] = "FAIL"
+        _add_failure(failures, "INVALID_DRAFT_CONTEXT")
+        return {
+            "schema_identifier": GEMINI_DRAFT_RESPONSE_CHECK_SCHEMA_IDENTIFIER,
+            "schema_version": GEMINI_DRAFT_RESPONSE_CHECK_SCHEMA_VERSION,
+            "state": "FAIL",
+            "failure_codes": failures,
+            "checks": checks,
+        }
+
+    try:
+        response_identity = safe_sha256(response)
+    except (TypeError, ValueError, OverflowError):
+        response_identity = sha256({"response_type": type(response).__name__})
+    mapped = _mapping(response)
+    normalized: dict[str, str] = {}
+    if mapped is None or set(mapped) != set(_GEMINI_RESPONSE_FIELDS):
+        _add_failure(failures, "PROVIDER_RESPONSE_SCHEMA_INVALID")
+    else:
+        for field in _GEMINI_RESPONSE_FIELDS:
+            value = mapped.get(field)
+            if not isinstance(value, str) or not value.strip() or len(value) > 4096:
+                _add_failure(failures, "PROVIDER_RESPONSE_SCHEMA_INVALID")
+                continue
+            try:
+                normalized[field] = _safe_text(value, f"provider.{field}")
+            except DraftContextUnavailable:
+                _add_failure(failures, "PROVIDER_UNSAFE_PRIVATE_CONTENT")
+
+    checks["response_schema"] = (
+        "FAIL"
+        if "PROVIDER_RESPONSE_SCHEMA_INVALID" in failures
+        else "PASS"
+    )
+    serialized = canonical_json(normalized)
+    if any(pattern.search(serialized) for pattern in _BLOCKED_TEXT_PATTERNS):
+        _add_failure(failures, "PROVIDER_UNSAFE_PRIVATE_CONTENT")
+    checks["privacy_redaction"] = (
+        "FAIL"
+        if "PROVIDER_UNSAFE_PRIVATE_CONTENT" in failures
+        else "PASS"
+    )
+
+    text = "\n".join(normalized.values())
+    if _numeric_tokens(normalized):
+        _add_failure(failures, "PROVIDER_UNAUTHORIZED_NUMERIC_TOKEN")
+    checks["numbers"] = (
+        "FAIL" if "PROVIDER_UNAUTHORIZED_NUMERIC_TOKEN" in failures else "PASS"
+    )
+    if _date_tokens(normalized):
+        _add_failure(failures, "PROVIDER_UNAUTHORIZED_DATE_TOKEN")
+    checks["dates"] = (
+        "FAIL" if "PROVIDER_UNAUTHORIZED_DATE_TOKEN" in failures else "PASS"
+    )
+
+    entity_tokens = set(_ENTITY_TOKEN_PATTERN.findall(text))
+    unauthorized_entities = sorted(
+        token
+        for token in entity_tokens
+        if token not in _GEMINI_ALLOWED_ENTITY_TOKENS
+    )
+    if unauthorized_entities:
+        _add_failure(failures, "PROVIDER_UNAUTHORIZED_ENTITY")
+    checks["entities"] = (
+        "FAIL" if "PROVIDER_UNAUTHORIZED_ENTITY" in failures else "PASS"
+    )
+
+    folded_text = text.casefold()
+    if any(
+        phrase.casefold() in folded_text for phrase in _gemini_forbidden_facts(validated_context)
+    ):
+        _add_failure(failures, "PROVIDER_FORBIDDEN_FACT")
+    checks["facts"] = "FAIL" if "PROVIDER_FORBIDDEN_FACT" in failures else "PASS"
+
+    if _GEMINI_BLOCKED_ACTION_PATTERN.search(text):
+        _add_failure(failures, "PROVIDER_BLOCKED_ACTION")
+    checks["blocked_actions"] = (
+        "FAIL" if "PROVIDER_BLOCKED_ACTION" in failures else "PASS"
+    )
+
+    if any(marker in folded_text for marker in _GEMINI_TEMPLATE_MARKERS):
+        _add_failure(failures, "PROVIDER_TEMPLATE_INTEGRITY_FAILED")
+    checks["template_integrity"] = (
+        "FAIL"
+        if "PROVIDER_TEMPLATE_INTEGRITY_FAILED" in failures
+        else "PASS"
+    )
+
+    if any(phrase in folded_text for phrase in _GEMINI_STRONG_CAUSAL_PHRASES):
+        _add_failure(failures, "PROVIDER_CAUSAL_LANGUAGE_TOO_STRONG")
+    checks["causal_language"] = (
+        "FAIL"
+        if "PROVIDER_CAUSAL_LANGUAGE_TOO_STRONG" in failures
+        else "PASS"
+    )
+
+    return {
+        "schema_identifier": GEMINI_DRAFT_RESPONSE_CHECK_SCHEMA_IDENTIFIER,
+        "schema_version": GEMINI_DRAFT_RESPONSE_CHECK_SCHEMA_VERSION,
+        "state": "FAIL" if failures else "PASS",
+        "failure_codes": failures,
+        "checks": checks,
+        "response_identity": response_identity,
+        "allow_list_digest": sha256(validated_context["allow_list"]),
+    }
+
+
+def render_checked_gemini_draft(
+    context: object,
+    response: object,
+    *,
+    drafting_provenance: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Compose checked provider prose around deterministic evidence sections."""
+
+    validated_context = _validate_context(context)
+    provider_check = check_gemini_draft_response(validated_context, response)
+    if provider_check["state"] != "PASS":
+        raise DraftContextUnavailable("Gemini draft response failed its checker")
+    provider_response = {
+        field: str(_mapping(response)[field])  # type: ignore[index]
+        for field in _GEMINI_RESPONSE_FIELDS
+    }
+    deterministic_artifact = _artifact_payload(validated_context)
+    deterministic_sections = deterministic_artifact["deterministic_sections"]
+    body = "\n".join(
+        [
+            f"Subject: {validated_context['subject']}",
+            f"To: {validated_context['recipient']}",
+            "",
+            provider_response["opening"],
+            "",
+            provider_response["connectiveBody"],
+            "",
+            deterministic_sections["connective_body"],
+            "",
+            provider_response["closing"],
+        ]
+    )
+    artifact: dict[str, Any] = {
+        "schema_identifier": DRAFTED_ARTEFACT_SCHEMA_IDENTIFIER,
+        "schema_version": DRAFTED_ARTEFACT_SCHEMA_VERSION,
+        "state": "UNSENT_PREVIEW",
+        "source": GEMINI_CHECKED_SOURCE,
+        "draft_context_ref_and_hash": {
+            "reference": validated_context["occurrence_id"],
+            "content_hash": validated_context["content_hash"],
+        },
+        "recommendation_ref_and_hash": deepcopy(
+            validated_context["provenance"]["action_recommendation"]
+        ),
+        "subject": validated_context["subject"],
+        "recipient": validated_context["recipient"],
+        "body": body,
+        "deterministic_sections": deepcopy(deterministic_sections),
+        "provider_sections": provider_response,
+        "authorization_state": "NOT_AUTHORIZED",
+        "provenance": deepcopy(validated_context["provenance"]),
+    }
+    if drafting_provenance is not None:
+        artifact["provenance"]["drafting"] = deepcopy(dict(drafting_provenance))
+    artifact_key = sha256(
+        {
+            "draft_context_ref_and_hash": artifact["draft_context_ref_and_hash"],
+            "recommendation_ref_and_hash": artifact["recommendation_ref_and_hash"],
+            "source": artifact["source"],
+            "provider_sections": provider_response,
+            "drafting": artifact["provenance"].get("drafting"),
+            "body": body,
+        }
+    )
+    artifact["drafted_artefact_key"] = artifact_key
+    artifact["occurrence_id"] = f"drafted-artefact:{artifact_key}"
+    artifact["content_hash"] = _hash_without_content_hash(artifact)
+    return artifact
 
 
 def check_deterministic_draft(

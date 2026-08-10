@@ -20,6 +20,8 @@ from .settings import QuotaPolicy
 DEMO_WORKSPACE_COOKIE_NAME = "core_demo_workspace"
 DEMO_WORKSPACE_CAPABILITY_BYTES = 32
 DEMO_WORKSPACE_SCHEMA_VERSION = "demo-workspace.v1"
+GEMINI_DRAFT_MUTATION_KIND = "GEMINI_DRAFT_OPERATION"
+GEMINI_ATTEMPT_MUTATION_KIND = "GEMINI_DRAFT_ATTEMPT"
 
 DEMO_WORKSPACES_TABLE = """
     CREATE TABLE IF NOT EXISTS demo_workspaces (
@@ -587,6 +589,47 @@ class WorkspaceStore:
                 429,
             )
 
+        if mutation_kind == GEMINI_DRAFT_MUTATION_KIND:
+            draft_cutoff = _timestamp(current_time - timedelta(hours=1))
+            workspace_drafts = int(
+                connection.execute(
+                    """
+                    SELECT COUNT(*) FROM demo_workspace_mutations
+                    WHERE workspace_id = ?
+                      AND mutation_kind = ?
+                      AND occurred_at >= ?
+                    """,
+                    (workspace_id, GEMINI_DRAFT_MUTATION_KIND, draft_cutoff),
+                ).fetchone()[0]
+            )
+            if (
+                workspace_drafts
+                >= self._quotas.max_gemini_draft_operations_per_workspace_hour
+            ):
+                raise WorkspaceRequestError(
+                    SafeErrorCode.DEMO_WORKSPACE_RATE_LIMITED,
+                    "WAIT_AND_RETRY",
+                    429,
+                )
+
+        if mutation_kind == GEMINI_ATTEMPT_MUTATION_KIND:
+            attempt_cutoff = _timestamp(current_time - timedelta(days=1))
+            global_attempts = int(
+                connection.execute(
+                    """
+                    SELECT COUNT(*) FROM demo_workspace_mutations
+                    WHERE mutation_kind = ? AND occurred_at >= ?
+                    """,
+                    (GEMINI_ATTEMPT_MUTATION_KIND, attempt_cutoff),
+                ).fetchone()[0]
+            )
+            if global_attempts >= self._quotas.max_gemini_attempts_per_24h:
+                raise WorkspaceRequestError(
+                    SafeErrorCode.DEMO_WORKSPACE_RATE_LIMITED,
+                    "WAIT_AND_RETRY",
+                    429,
+                )
+
         terminal_count = int(row["terminal_fresh_bundle_count"])
         if (
             terminal_fresh_bundle
@@ -660,6 +703,42 @@ class WorkspaceStore:
             except Exception:
                 connection.rollback()
                 raise
+
+    def admit_gemini_draft_operation(
+        self,
+        workspace_id: str,
+        *,
+        idempotency_key: str,
+        content_hash: str,
+        now: datetime | None = None,
+    ) -> MutationReceipt:
+        """Reserve one provider-backed draft operation within its workspace quota."""
+
+        return self.record_mutation(
+            workspace_id,
+            idempotency_key=idempotency_key,
+            mutation_kind=GEMINI_DRAFT_MUTATION_KIND,
+            content_hash=content_hash,
+            now=now,
+        )
+
+    def record_gemini_attempt(
+        self,
+        workspace_id: str,
+        *,
+        idempotency_key: str,
+        content_hash: str,
+        now: datetime | None = None,
+    ) -> MutationReceipt:
+        """Record one provider attempt under the rolling global attempt quota."""
+
+        return self.record_mutation(
+            workspace_id,
+            idempotency_key=idempotency_key,
+            mutation_kind=GEMINI_ATTEMPT_MUTATION_KIND,
+            content_hash=content_hash,
+            now=now,
+        )
 
     def record_terminal_fresh_bundle(
         self,

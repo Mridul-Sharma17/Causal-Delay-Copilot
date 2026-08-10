@@ -95,7 +95,8 @@ from .decision_support_currentness import (
     DecisionSupportCurrentnessOperationMismatch,
     DecisionSupportCurrentnessUnavailable,
 )
-from .draft_context import DraftContextUnavailable, prepare_draft_from_current_advice
+from .draft_context import DraftContextUnavailable
+from .gemini_drafting import GeminiDraftingService, GeminiResponseProvider
 from .monitoring import MonitoringContractError, monitoring_observation_key_for
 from .ingestion import (
     DatasetVersionUnavailable,
@@ -332,6 +333,7 @@ def create_app(
     settings: Settings | None = None,
     *,
     start_operation_runner: bool = True,
+    gemini_provider: GeminiResponseProvider | None = None,
 ) -> FastAPI:
     resolved_settings = settings or Settings()
     state_root = StateRoot(resolved_settings)
@@ -375,6 +377,11 @@ def create_app(
     app.state.settings = resolved_settings
     app.state.audit_store = core_store
     app.state.reference_store = reference_store
+    app.state.gemini_drafting = GeminiDraftingService(
+        resolved_settings,
+        core_store,
+        provider=gemini_provider,
+    )
     app.state.operation_runner = None
 
     @app.exception_handler(RequestValidationError)
@@ -759,7 +766,7 @@ def create_app(
                 state="unavailable",
                 code="CORE_STORE_UNAVAILABLE",
             )
-        if resolved_settings.gemini_enabled:
+        if resolved_settings.gemini_configured:
             return HealthProbe(state="ready", code="CORE_READY")
         return HealthProbe(
             state="degraded",
@@ -1501,7 +1508,10 @@ def create_app(
             "consuming_result": stored.consuming_result,
             "head": stored.head,
         }
-        prepared = prepare_draft_from_current_advice(current_advice)
+        prepared = await app.state.gemini_drafting.prepare(
+            current_advice,
+            workspace_id=resolution.snapshot.workspace_id,
+        )
         response = DraftContextPreviewResponse(
             schema_identifier="deterministic-draft-preview",
             schema_version="1",
@@ -1510,6 +1520,7 @@ def create_app(
             draft_context=prepared["draft_context"],
             artifact=prepared["artifact"],
             checker=prepared["checker"],
+            drafting=prepared["drafting"],
         )
         return attach_workspace_cookie(
             JSONResponse(status_code=200, content=response.model_dump(mode="json")),

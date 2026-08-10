@@ -819,12 +819,28 @@ export function DraftContextPreviewPanel({
     typeof preview.currentness.currentness_outcome === "string"
       ? preview.currentness.currentness_outcome
       : "UNAVAILABLE";
+  const drafting = asRecord(preview.drafting);
+  const draftingSource =
+    typeof drafting?.source === "string" ? drafting.source : preview.artifact.source;
+  const fallback = asRecord(drafting?.fallback);
   return (
     <div className="draft-preview action-publication" role="status">
-      <strong>Deterministic unsent draft preview</strong>
+      <strong>
+        {draftingSource === "GEMINI_CHECKED"
+          ? "Checked Gemini unsent draft preview"
+          : "Deterministic unsent draft preview"}
+      </strong>
       <span>
         State: <code>{preview.artifact.state}</code> · source: <code>{preview.artifact.source}</code>
       </span>
+      <span>
+        Drafting path: <code>{draftingSource}</code> · cache: <code>{formatValue(drafting?.cache ?? "DISABLED")}</code>
+      </span>
+      {fallback?.used === true && (
+        <span>
+          Fallback: <code>{formatValue(fallback.reason_code ?? "UNAVAILABLE")}</code>
+        </span>
+      )}
       <span>
         Checker: <code>{preview.checker.state}</code> · currentness: <code>{currentness}</code>
       </span>
@@ -833,7 +849,9 @@ export function DraftContextPreviewPanel({
       </span>
       <pre className="draft-preview-body">{preview.artifact.body}</pre>
       <details>
-        <summary>Inspect complete deterministic provenance</summary>
+        <summary>
+          Inspect complete {draftingSource === "GEMINI_CHECKED" ? "drafting" : "deterministic"} provenance
+        </summary>
         <span>
           Action recommendation: <code>{formatValue(recommendationBinding)}</code>
         </span>

@@ -372,6 +372,7 @@ class DraftContextPreviewResponse(BaseModel):
     draft_context: dict[str, Any]
     artifact: dict[str, Any]
     checker: dict[str, Any]
+    drafting: dict[str, Any] = Field(default_factory=dict)
 
 
 class DecisionSupportMonitoringObservationRequest(BaseModel):

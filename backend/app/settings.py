@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from .errors import CoreSafeError, SafeErrorCode
@@ -16,6 +16,28 @@ class DeliveryProfile(StrEnum):
     HOSTED = "HOSTED"
     LOCAL_DEVELOPMENT = "LOCAL_DEVELOPMENT"
     LOCAL_FALLBACK = "LOCAL_FALLBACK"
+
+
+class GeminiDraftingPolicy(BaseModel):
+    """The immutable provider boundary for optional checked drafting."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    model: Literal["gemini-3.6-flash"] = "gemini-3.6-flash"
+    temperature: Literal[0.0] = 0.0
+    max_output_tokens: Literal[256] = 256
+    timeout_seconds: Literal[15.0] = 15.0
+    max_retries: Literal[1] = 1
+    max_global_calls: Literal[1] = 1
+    response_fields: tuple[
+        Literal["opening"],
+        Literal["connectiveBody"],
+        Literal["closing"],
+    ] = (
+        "opening",
+        "connectiveBody",
+        "closing",
+    )
 
 
 class QuotaPolicy(BaseModel):
@@ -37,6 +59,12 @@ class QuotaPolicy(BaseModel):
     memory_headroom_fraction: float = Field(default=0.25, ge=0, le=1)
     disk_warning_bytes: int = Field(default=1024 * 1024 * 1024, ge=1)
     disk_block_bytes: int = Field(default=512 * 1024 * 1024, ge=1)
+    max_gemini_draft_operations_per_workspace_hour: int = Field(
+        default=3,
+        ge=1,
+        le=3,
+    )
+    max_gemini_attempts_per_24h: int = Field(default=100, ge=1, le=100)
 
 
 class RuntimeFingerprint(BaseModel):
@@ -114,6 +142,8 @@ class Settings(BaseSettings):
     build_manifest_id: str | None = Field(default=None, min_length=1, max_length=128)
     quotas: QuotaPolicy = Field(default_factory=QuotaPolicy)
     gemini_enabled: bool = False
+    gemini_api_key: SecretStr | None = None
+    gemini_policy: GeminiDraftingPolicy = Field(default_factory=GeminiDraftingPolicy)
     spa_dist_dir: Path | None = None
 
     def __init__(self, **values: Any) -> None:
@@ -246,3 +276,9 @@ class Settings(BaseSettings):
     @property
     def quota_policy(self) -> QuotaPolicy:
         return self.quotas
+
+    @property
+    def gemini_configured(self) -> bool:
+        return self.gemini_enabled and self.gemini_api_key is not None and bool(
+            self.gemini_api_key.get_secret_value()
+        )

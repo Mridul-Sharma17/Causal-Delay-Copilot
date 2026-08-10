@@ -12,6 +12,7 @@ import type {
   DecisionSupportRegistryInspection,
   DraftContextPreview,
 } from "./contracts";
+import { parseDraftContextPreview } from "./contracts";
 
 const healthResponse = {
   service: "causal-delay-copilot",
@@ -841,6 +842,59 @@ describe("Deterministic DraftContext preview", () => {
     expect(screen.getByText(/Subject: Review request: Protected production slot/)).toBeInTheDocument();
     expect(screen.getByText(/This content is a preview only/)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /authorize|send|approve/i })).not.toBeInTheDocument();
+  });
+
+  test("shows the bounded provider path and fallback audit state", () => {
+    const preview = {
+      schema_identifier: "deterministic-draft-preview",
+      schema_version: "1",
+      state: "UNSENT_PREVIEW",
+      currentness: { currentness_outcome: "CURRENTNESS_PROVEN_AT_CHECK" },
+      draft_context: { provenance: {} },
+      drafting: {
+        source: "DETERMINISTIC_ZERO_LLM",
+        cache: "DISABLED",
+        fallback: { used: true, reason_code: "PROVIDER_FAILURE" },
+      },
+      artifact: {
+        state: "UNSENT_PREVIEW",
+        source: "DETERMINISTIC_ZERO_LLM",
+        body: "Subject: Review request",
+        provenance: {},
+      },
+      checker: { state: "PASS", failure_codes: [] },
+    } as unknown as DraftContextPreview;
+
+    render(<DraftContextPreviewPanel preview={preview} />);
+
+    expect(screen.getByText(/Drafting path:/)).toHaveTextContent("DETERMINISTIC_ZERO_LLM");
+    expect(screen.getByText(/Drafting path:/)).toHaveTextContent("DISABLED");
+    expect(screen.getByText(/Fallback:/)).toHaveTextContent("PROVIDER_FAILURE");
+  });
+
+  test("labels checked Gemini prose separately from the deterministic renderer", () => {
+    const preview = {
+      schema_identifier: "deterministic-draft-preview",
+      schema_version: "1",
+      state: "UNSENT_PREVIEW",
+      currentness: { currentness_outcome: "CURRENTNESS_PROVEN_AT_CHECK" },
+      draft_context: { provenance: {} },
+      drafting: { source: "GEMINI_CHECKED", cache: "DISABLED" },
+      artifact: {
+        state: "UNSENT_PREVIEW",
+        source: "GEMINI_CHECKED",
+        body: "Subject: Review request",
+        provenance: {},
+      },
+      checker: { state: "PASS", failure_codes: [] },
+    };
+
+    const parsed = parseDraftContextPreview(preview);
+    render(<DraftContextPreviewPanel preview={parsed} />);
+
+    expect(screen.getByText("Checked Gemini unsent draft preview")).toBeInTheDocument();
+    expect(screen.queryByText("Deterministic unsent draft preview")).not.toBeInTheDocument();
+    expect(screen.getByText(/Drafting path:/)).toHaveTextContent("GEMINI_CHECKED");
   });
 
   test("prepares the preview through the current-advice endpoint", async () => {

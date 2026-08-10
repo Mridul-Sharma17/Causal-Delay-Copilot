@@ -125,9 +125,10 @@ export type DraftContextPreview = Record<string, unknown> & {
   state: "UNSENT_PREVIEW";
   currentness: Record<string, unknown>;
   draft_context: Record<string, unknown>;
+  drafting?: Record<string, unknown>;
   artifact: Record<string, unknown> & {
     state: "UNSENT_PREVIEW";
-    source: "DETERMINISTIC_ZERO_LLM";
+    source: "DETERMINISTIC_ZERO_LLM" | "GEMINI_CHECKED";
     body: string;
   };
   checker: Record<string, unknown> & {
@@ -1680,7 +1681,8 @@ export function parseDraftContextPreview(value: unknown): DraftContextPreview {
     !isRecord(value.draft_context) ||
     !isRecord(value.artifact) ||
     value.artifact.state !== "UNSENT_PREVIEW" ||
-    value.artifact.source !== "DETERMINISTIC_ZERO_LLM" ||
+    (value.artifact.source !== "DETERMINISTIC_ZERO_LLM" &&
+      value.artifact.source !== "GEMINI_CHECKED") ||
     typeof value.artifact.body !== "string" ||
     !isRecord(value.checker) ||
     value.checker.state !== "PASS" ||
@@ -1699,7 +1701,10 @@ export function parseDraftContextPreview(value: unknown): DraftContextPreview {
     artifact: {
       ...value.artifact,
       state: "UNSENT_PREVIEW",
-      source: "DETERMINISTIC_ZERO_LLM",
+      source:
+        value.artifact.source === "GEMINI_CHECKED"
+          ? "GEMINI_CHECKED"
+          : "DETERMINISTIC_ZERO_LLM",
       body: value.artifact.body,
     },
     checker: {

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -9,11 +10,18 @@ from fastapi.testclient import TestClient
 from backend.app.canonical import sha256
 from backend.app.draft_context import (
     DraftContextUnavailable,
+    check_gemini_draft_response,
     check_deterministic_draft,
     prepare_draft_from_current_advice,
 )
+from backend.app.gemini_drafting import (
+    GEMINI_ENDPOINT,
+    GeminiDraftingService,
+    GeminiProvider,
+    GeminiProviderFailure,
+)
 from backend.app.main import create_app
-from backend.app.settings import Settings
+from backend.app.settings import QuotaPolicy, Settings
 
 
 def _hash_record(record: dict[str, object]) -> str:
@@ -358,7 +366,22 @@ def test_api_reproves_current_advice_before_returning_a_sanitized_preview(
     tmp_path,
     monkeypatch,
 ) -> None:
-    app = create_app(Settings(database_path=tmp_path / "core.sqlite3"))
+    class FakeProvider:
+        async def generate(self, context: dict[str, object]) -> object:
+            return {
+                "opening": "Hello,",
+                "connectiveBody": "Please review the request and confirm whether it can be accommodated.",
+                "closing": "Thank you,\n[MANAGER_NAME]",
+            }
+
+    app = create_app(
+        Settings(
+            database_path=tmp_path / "core.sqlite3",
+            gemini_enabled=True,
+            gemini_api_key="test-key",
+        ),
+        gemini_provider=FakeProvider(),
+    )
     stored_payload = _current_advice()
     stored_payload["consuming_result"] = None
 
@@ -407,4 +430,407 @@ def test_api_reproves_current_advice_before_returning_a_sanitized_preview(
     assert body["schema_identifier"] == "deterministic-draft-preview"
     assert body["state"] == "UNSENT_PREVIEW"
     assert body["checker"]["state"] == "PASS"
+    assert body["artifact"]["source"] == "GEMINI_CHECKED"
+    assert body["drafting"]["source"] == "GEMINI_CHECKED"
     assert "unsafe-internal-order-line-001" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_checked_gemini_draft_receives_only_sanitized_context_and_keeps_deterministic_slots(
+    tmp_path,
+) -> None:
+    class FakeProvider:
+        def __init__(self) -> None:
+            self.contexts: list[dict[str, object]] = []
+
+        async def generate(self, context: dict[str, object]) -> dict[str, str]:
+            self.contexts.append(deepcopy(context))
+            return {
+                "opening": "Hello,",
+                "connectiveBody": "Please review the request and confirm whether it can be accommodated.",
+                "closing": "Thank you,\n[MANAGER_NAME]",
+            }
+
+    settings = Settings(
+        database_path=tmp_path / "core.sqlite3",
+        gemini_enabled=True,
+        gemini_api_key="test-key",
+    )
+    app = create_app(settings)
+    provider = FakeProvider()
+
+    with TestClient(app) as client:
+        workspace = client.get("/api/workspace").json()
+        prepared = await GeminiDraftingService(
+            settings,
+            app.state.audit_store,
+            provider=provider,
+        ).prepare(
+            _current_advice(),
+            workspace_id=workspace["workspace_id"],
+        )
+
+    assert len(provider.contexts) == 1
+    assert provider.contexts[0] == prepared["draft_context"]
+    assert "unsafe-internal-order-line-001" not in str(provider.contexts[0])
+    assert prepared["artifact"]["source"] == "GEMINI_CHECKED"
+    assert prepared["drafting"]["source"] == "GEMINI_CHECKED"
+    assert prepared["checker"]["state"] == "PASS"
+    assert "Please review the request" in prepared["artifact"]["body"]
+    assert "250000" in prepared["artifact"]["body"]
+    assert "raw_response" not in str(prepared)
+
+
+@pytest.mark.parametrize(
+    ("response", "failure_code"),
+    [
+        (
+            {
+                "opening": "Hello,",
+                "connectiveBody": "The request concerns 9 items.",
+                "closing": "Thank you,",
+            },
+            "PROVIDER_UNAUTHORIZED_NUMERIC_TOKEN",
+        ),
+        (
+            {
+                "opening": "Hello,",
+                "connectiveBody": "Please review the request on 2026-08-09.",
+                "closing": "Thank you,",
+            },
+            "PROVIDER_UNAUTHORIZED_DATE_TOKEN",
+        ),
+        (
+            {
+                "opening": "Hello,",
+                "connectiveBody": "Please coordinate with ACME before replying.",
+                "closing": "Thank you,",
+            },
+            "PROVIDER_UNAUTHORIZED_ENTITY",
+        ),
+        (
+            {
+                "opening": "Hello,",
+                "connectiveBody": "Please send this automatically.",
+                "closing": "Thank you,",
+            },
+            "PROVIDER_BLOCKED_ACTION",
+        ),
+        (
+            {
+                "opening": "Hello,",
+                "connectiveBody": "Please include the secret supplied by the team.",
+                "closing": "Thank you,",
+            },
+            "PROVIDER_UNSAFE_PRIVATE_CONTENT",
+        ),
+        (
+            {
+                "opening": "Hello,",
+                "connectiveBody": "This proves the cause of the delay.",
+                "closing": "Thank you,",
+            },
+            "PROVIDER_CAUSAL_LANGUAGE_TOO_STRONG",
+        ),
+        (
+            {
+                "opening": "Hello,",
+                "connectiveBody": "Please review the Protected production slot request.",
+                "closing": "Thank you,",
+            },
+            "PROVIDER_FORBIDDEN_FACT",
+        ),
+    ],
+)
+def test_gemini_checker_rejects_unsafe_provider_prose(response, failure_code) -> None:
+    context = prepare_draft_from_current_advice(_current_advice())["draft_context"]
+
+    checked = check_gemini_draft_response(context, response)
+
+    assert checked["state"] == "FAIL"
+    assert failure_code in checked["failure_codes"]
+    assert "raw_response" not in str(checked)
+
+
+def test_gemini_checker_hashes_non_json_provider_input_without_raising() -> None:
+    class NonJsonValue:
+        pass
+
+    context = prepare_draft_from_current_advice(_current_advice())["draft_context"]
+    checked = check_gemini_draft_response(
+        context,
+        {
+            "opening": NonJsonValue(),
+            "connectiveBody": "Please review the request.",
+            "closing": "Thank you,",
+        },
+    )
+
+    assert checked["state"] == "FAIL"
+    assert "PROVIDER_RESPONSE_SCHEMA_INVALID" in checked["failure_codes"]
+    assert checked["response_identity"].startswith("sha256:")
+
+
+@pytest.mark.asyncio
+async def test_provider_checker_rejection_gets_one_fresh_retry_then_checked_preview(
+    tmp_path,
+) -> None:
+    class SequenceProvider:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.contexts: list[dict[str, object]] = []
+
+        async def generate(self, context: dict[str, object]) -> object:
+            self.calls += 1
+            self.contexts.append(deepcopy(context))
+            if self.calls == 1:
+                return {
+                    "opening": "Hello,",
+                    "connectiveBody": "This proves the cause of the delay.",
+                    "closing": "Thank you,",
+                }
+            return {
+                "opening": "Hello,",
+                "connectiveBody": "Please review the request and confirm whether it can be accommodated.",
+                "closing": "Thank you,\n[MANAGER_NAME]",
+            }
+
+    settings = Settings(
+        database_path=tmp_path / "core.sqlite3",
+        gemini_enabled=True,
+        gemini_api_key="test-key",
+    )
+    app = create_app(settings)
+    provider = SequenceProvider()
+    with TestClient(app) as client:
+        workspace = client.get("/api/workspace").json()
+        prepared = await GeminiDraftingService(
+            settings,
+            app.state.audit_store,
+            provider=provider,
+        ).prepare(
+            _current_advice(),
+            workspace_id=workspace["workspace_id"],
+        )
+
+    assert provider.calls == 2
+    assert prepared["artifact"]["source"] == "GEMINI_CHECKED"
+    assert prepared["drafting"]["source"] == "GEMINI_CHECKED"
+    assert [attempt["outcome"] for attempt in prepared["drafting"]["attempts"]] == [
+        "CHECKER_REJECTED",
+        "CHECKED",
+    ]
+    assert all(context == prepared["draft_context"] for context in provider.contexts)
+    assert all("raw_response" not in str(attempt) for attempt in prepared["drafting"]["attempts"])
+
+
+@pytest.mark.asyncio
+async def test_second_provider_failure_uses_deterministic_fallback_with_safe_identities(
+    tmp_path,
+) -> None:
+    class FailingProvider:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def generate(self, context: dict[str, object]) -> object:
+            self.calls += 1
+            raise GeminiProviderFailure("PROVIDER_TIMEOUT")
+
+    settings = Settings(
+        database_path=tmp_path / "core.sqlite3",
+        gemini_enabled=True,
+        gemini_api_key="test-key",
+    )
+    app = create_app(settings)
+    provider = FailingProvider()
+    with TestClient(app) as client:
+        workspace = client.get("/api/workspace").json()
+        prepared = await GeminiDraftingService(
+            settings,
+            app.state.audit_store,
+            provider=provider,
+        ).prepare(
+            _current_advice(),
+            workspace_id=workspace["workspace_id"],
+        )
+
+    assert provider.calls == 2
+    assert prepared["artifact"]["source"] == "DETERMINISTIC_ZERO_LLM"
+    assert prepared["drafting"]["source"] == "DETERMINISTIC_ZERO_LLM"
+    assert prepared["drafting"]["fallback"]["used"] is True
+    assert prepared["drafting"]["fallback"]["reason_code"] == "PROVIDER_FAILURE"
+    assert [attempt["outcome"] for attempt in prepared["drafting"]["attempts"]] == [
+        "PROVIDER_FAILURE",
+        "PROVIDER_FAILURE",
+    ]
+    assert "PROVIDER_TIMEOUT" in str(prepared["drafting"])
+    assert "test-key" not in str(prepared)
+    assert "raw_prompt" not in str(prepared)
+    assert "raw_response" not in str(prepared)
+
+
+@pytest.mark.asyncio
+async def test_invalid_current_advice_never_falls_back_to_a_provider_or_deterministic_draft(
+    tmp_path,
+) -> None:
+    class UnexpectedProvider:
+        async def generate(self, context: dict[str, object]) -> object:
+            raise AssertionError("invalid evidence must not reach the provider")
+
+    current_advice = _current_advice()
+    current_advice["currentness"]["currentness_outcome"] = "ADVICE_CURRENTNESS_INVALIDATION"
+    settings = Settings(
+        database_path=tmp_path / "core.sqlite3",
+        gemini_enabled=True,
+        gemini_api_key="test-key",
+    )
+    app = create_app(settings)
+    with TestClient(app) as client:
+        workspace = client.get("/api/workspace").json()
+        with pytest.raises(DraftContextUnavailable):
+            await GeminiDraftingService(
+                settings,
+                app.state.audit_store,
+                provider=UnexpectedProvider(),
+            ).prepare(
+                current_advice,
+                workspace_id=workspace["workspace_id"],
+            )
+
+
+@pytest.mark.asyncio
+async def test_gemini_workspace_admission_limits_drafts_without_cross_case_cache(
+    tmp_path,
+) -> None:
+    class CountingProvider:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def generate(self, context: dict[str, object]) -> object:
+            self.calls += 1
+            return {
+                "opening": "Hello,",
+                "connectiveBody": "Please review the request and confirm whether it can be accommodated.",
+                "closing": "Thank you,",
+            }
+
+    settings = Settings(
+        database_path=tmp_path / "core.sqlite3",
+        gemini_enabled=True,
+        gemini_api_key="test-key",
+        quotas=QuotaPolicy(max_gemini_draft_operations_per_workspace_hour=1),
+    )
+    app = create_app(settings)
+    provider = CountingProvider()
+    with TestClient(app) as client:
+        workspace = client.get("/api/workspace").json()
+        service = GeminiDraftingService(
+            settings,
+            app.state.audit_store,
+            provider=provider,
+        )
+        first = await service.prepare(
+            _current_advice(),
+            workspace_id=workspace["workspace_id"],
+        )
+        second = await service.prepare(
+            _current_advice(),
+            workspace_id=workspace["workspace_id"],
+        )
+
+    assert first["artifact"]["source"] == "GEMINI_CHECKED"
+    assert second["artifact"]["source"] == "DETERMINISTIC_ZERO_LLM"
+    assert second["drafting"]["fallback"]["reason_code"] == "GEMINI_DRAFT_QUOTA_REJECTED"
+    assert provider.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_gemini_httpx_request_is_fixed_typed_and_does_not_send_raw_advice(
+    monkeypatch,
+) -> None:
+    class FakeResponse:
+        status_code = 200
+
+        def json(self) -> dict[str, object]:
+            return {
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [
+                                {
+                                    "text": json.dumps(
+                                        {
+                                            "opening": "Hello,",
+                                            "connectiveBody": "Please review the request.",
+                                            "closing": "Thank you,",
+                                        }
+                                    )
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+
+    class FakeAsyncClient:
+        instances: list["FakeAsyncClient"] = []
+
+        def __init__(self, *, timeout: float) -> None:
+            self.timeout = timeout
+            self.calls: list[dict[str, object]] = []
+            self.__class__.instances.append(self)
+
+        async def __aenter__(self) -> "FakeAsyncClient":
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def post(self, url: str, *, headers: dict[str, str], json: object) -> FakeResponse:
+            self.calls.append({"url": url, "headers": headers, "json": json})
+            return FakeResponse()
+
+    monkeypatch.setattr("backend.app.gemini_drafting.httpx.AsyncClient", FakeAsyncClient)
+    settings = Settings(gemini_enabled=True, gemini_api_key="test-key")
+    context = prepare_draft_from_current_advice(_current_advice())["draft_context"]
+
+    response = await GeminiProvider(settings).generate(context)
+
+    request = FakeAsyncClient.instances[0].calls[0]
+    body = request["json"]
+    assert request["url"] == GEMINI_ENDPOINT
+    assert FakeAsyncClient.instances[0].timeout == 15.0
+    assert request["headers"]["x-goog-api-key"] == "test-key"
+    assert "test-key" not in json.dumps(body)
+    assert body["generationConfig"] == {
+        "temperature": 0.0,
+        "maxOutputTokens": 256,
+        "responseMimeType": "application/json",
+        "responseSchema": {
+            "type": "OBJECT",
+            "properties": {
+                "opening": {"type": "STRING"},
+                "connectiveBody": {"type": "STRING"},
+                "closing": {"type": "STRING"},
+            },
+            "required": ["opening", "connectiveBody", "closing"],
+        },
+    }
+    assert "tools" not in body
+    assert "history" not in body
+    assert "raw_rows" not in json.dumps(body)
+    assert response == {
+        "opening": "Hello,",
+        "connectiveBody": "Please review the request.",
+        "closing": "Thank you,",
+    }
+
+
+@pytest.mark.asyncio
+async def test_gemini_provider_rejects_unvalidated_context_before_egress() -> None:
+    settings = Settings(gemini_enabled=True, gemini_api_key="test-key")
+
+    with pytest.raises(DraftContextUnavailable):
+        await GeminiProvider(settings).generate(
+            {"raw_rows": [{"private_supplier_detail": "do-not-send"}]}
+        )
