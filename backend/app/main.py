@@ -27,6 +27,8 @@ from .contracts import (
     DecisionSupportCurrentAdviceRenderRequest,
     DecisionSupportCurrentnessRequest,
     DecisionSupportCurrentnessResponse,
+    DraftContextPreviewResponse,
+    DraftContextRequest,
     DecisionSupportMonitoringMatchRequest,
     DecisionSupportMonitoringObservationRequest,
     DecisionSupportMonitoringObservationResponse,
@@ -93,6 +95,7 @@ from .decision_support_currentness import (
     DecisionSupportCurrentnessOperationMismatch,
     DecisionSupportCurrentnessUnavailable,
 )
+from .draft_context import DraftContextUnavailable, prepare_draft_from_current_advice
 from .monitoring import MonitoringContractError, monitoring_observation_key_for
 from .ingestion import (
     DatasetVersionUnavailable,
@@ -494,6 +497,17 @@ def create_app(
             422,
             "CURRENTNESS_OPERATION_INVALID",
             "CORRECT_THE_HASH_BOUND_CURRENTNESS_ENVELOPE_AND_RETRY",
+        )
+
+    @app.exception_handler(DraftContextUnavailable)
+    async def handle_draft_context_unavailable(
+        _: Request,
+        __: DraftContextUnavailable,
+    ) -> JSONResponse:
+        return _error_response(
+            422,
+            "DRAFT_CONTEXT_UNAVAILABLE",
+            "RESTORE_A_CURRENT_APPROVED_ACTION_RECOMMENDATION_AND_RETRY",
         )
 
     @app.exception_handler(DecisionSupportEvaluationConflict)
@@ -1462,6 +1476,43 @@ def create_app(
                 status_code=200 if stored.result == "IDEMPOTENT_REPLAY" else 201,
                 content=response.model_dump(mode="json"),
             ),
+            resolution,
+        )
+
+    @app.post(
+        "/api/decision-support/draft-context",
+        response_model=DraftContextPreviewResponse,
+    )
+    async def prepare_decision_support_draft_context(
+        request_context: Request,
+        request: DraftContextRequest,
+    ) -> JSONResponse:
+        resolution = resolve_workspace(request_context)
+        stored = core_store.render_current_advice(
+            resolution.snapshot.workspace_id,
+            render_request=request.current_advice.model_dump(mode="json"),
+        )
+        current_advice = {
+            "result": stored.result,
+            "operation": stored.operation,
+            "currentness": stored.currentness,
+            "terminal_claim": stored.terminal_claim,
+            "render": stored.render,
+            "consuming_result": stored.consuming_result,
+            "head": stored.head,
+        }
+        prepared = prepare_draft_from_current_advice(current_advice)
+        response = DraftContextPreviewResponse(
+            schema_identifier="deterministic-draft-preview",
+            schema_version="1",
+            state="UNSENT_PREVIEW",
+            currentness=prepared["currentness"],
+            draft_context=prepared["draft_context"],
+            artifact=prepared["artifact"],
+            checker=prepared["checker"],
+        )
+        return attach_workspace_cookie(
+            JSONResponse(status_code=200, content=response.model_dump(mode="json")),
             resolution,
         )
 

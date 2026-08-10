@@ -119,6 +119,23 @@ export type DecisionSupportBoundary = Record<string, unknown> & {
   consumed_inputs: string[];
 };
 
+export type DraftContextPreview = Record<string, unknown> & {
+  schema_identifier: "deterministic-draft-preview";
+  schema_version: "1";
+  state: "UNSENT_PREVIEW";
+  currentness: Record<string, unknown>;
+  draft_context: Record<string, unknown>;
+  artifact: Record<string, unknown> & {
+    state: "UNSENT_PREVIEW";
+    source: "DETERMINISTIC_ZERO_LLM";
+    body: string;
+  };
+  checker: Record<string, unknown> & {
+    state: "PASS";
+    failure_codes: string[];
+  };
+};
+
 export type TradeoffSelectionReference = {
   reference: string;
   content_hash: string;
@@ -1650,6 +1667,47 @@ export function parseTradeoffSelectionAcceptanceResponse(
     ),
     head: parseOptionalTradeoffResponse(value.head, parseTradeoffSelectionHead),
   };
+}
+
+export function parseDraftContextPreview(value: unknown): DraftContextPreview {
+  if (
+    !isRecord(value) ||
+    Array.isArray(value) ||
+    value.schema_identifier !== "deterministic-draft-preview" ||
+    value.schema_version !== "1" ||
+    value.state !== "UNSENT_PREVIEW" ||
+    !isRecord(value.currentness) ||
+    !isRecord(value.draft_context) ||
+    !isRecord(value.artifact) ||
+    value.artifact.state !== "UNSENT_PREVIEW" ||
+    value.artifact.source !== "DETERMINISTIC_ZERO_LLM" ||
+    typeof value.artifact.body !== "string" ||
+    !isRecord(value.checker) ||
+    value.checker.state !== "PASS" ||
+    !Array.isArray(value.checker.failure_codes) ||
+    !value.checker.failure_codes.every((code) => typeof code === "string")
+  ) {
+    throw new Error("invalid deterministic draft preview");
+  }
+  return {
+    ...value,
+    schema_identifier: "deterministic-draft-preview",
+    schema_version: "1",
+    state: "UNSENT_PREVIEW",
+    currentness: value.currentness,
+    draft_context: value.draft_context,
+    artifact: {
+      ...value.artifact,
+      state: "UNSENT_PREVIEW",
+      source: "DETERMINISTIC_ZERO_LLM",
+      body: value.artifact.body,
+    },
+    checker: {
+      ...value.checker,
+      state: "PASS",
+      failure_codes: value.checker.failure_codes,
+    },
+  } as DraftContextPreview;
 }
 
 function isHealthCode(value: unknown): value is HealthCode {

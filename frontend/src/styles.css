@@ -304,6 +304,25 @@ code {
   background: #f4f4f4;
 }
 
+.draft-preview {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  background: #defbe6;
+  border-left: 4px solid #198038;
+}
+
+.draft-preview-body {
+  max-height: 28rem;
+  margin: 0;
+  padding: 16px;
+  overflow: auto;
+  white-space: pre-wrap;
+  background: #ffffff;
+  border: 1px solid #c6c6c6;
+  font: 0.875rem/1.5 "IBM Plex Mono", Consolas, monospace;
+}
+
 .action-evidence ul,
 .action-suppressions ol,
 .action-options ul,

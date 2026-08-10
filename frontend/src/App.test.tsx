@@ -4,11 +4,13 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import App, {
   DecisionSupportActionsStage,
   DecisionSupportProjectionDetails,
+  DraftContextPreviewPanel,
 } from "./App";
 import type {
   DecisionSupportBoundary,
   DecisionSupportOption,
   DecisionSupportRegistryInspection,
+  DraftContextPreview,
 } from "./contracts";
 
 const healthResponse = {
@@ -801,6 +803,136 @@ describe("Decision Support projection disclosure", () => {
     expect(screen.getByText(/EXPOSURE_TRANSLATION_ASSUMPTION/)).toBeInTheDocument();
     expect(screen.getByText("INTERVENTION_EFFECT_NOT_ESTIMATED")).toBeInTheDocument();
     expect(screen.getByText("EXAMPLE_UNAVAILABLE")).toBeInTheDocument();
+  });
+});
+
+describe("Deterministic DraftContext preview", () => {
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  test("shows a checked unsent draft and complete provenance without authorization controls", () => {
+    const preview = {
+      schema_identifier: "deterministic-draft-preview",
+      schema_version: "1",
+      state: "UNSENT_PREVIEW",
+      currentness: { currentness_outcome: "CURRENTNESS_PROVEN_AT_CHECK" },
+      draft_context: {
+        provenance: {
+          action_recommendation: {
+            reference: "action-recommendation:1",
+            content_hash: "sha256:" + "a".repeat(64),
+          },
+        },
+      },
+      artifact: {
+        state: "UNSENT_PREVIEW",
+        source: "DETERMINISTIC_ZERO_LLM",
+        body: "Subject: Review request: Protected production slot",
+        provenance: { currentness_check: "currentness-check:1" },
+      },
+      checker: { state: "PASS", failure_codes: [] },
+    } as unknown as DraftContextPreview;
+
+    render(<DraftContextPreviewPanel preview={preview} />);
+
+    expect(screen.getByText("Deterministic unsent draft preview")).toBeInTheDocument();
+    expect(screen.getByText(/Subject: Review request: Protected production slot/)).toBeInTheDocument();
+    expect(screen.getByText(/This content is a preview only/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /authorize|send|approve/i })).not.toBeInTheDocument();
+  });
+
+  test("prepares the preview through the current-advice endpoint", async () => {
+    const baseBoundary = decisionBriefSnapshotResponse.decision_support as unknown as DecisionSupportBoundary;
+    const recommendation = {
+      occurrence_id: "action-recommendation:recommendation-1",
+      content_hash: "sha256:recommendation",
+      selected_option_code: "PROTECTED_PRODUCTION_SLOT",
+      selected_option_version: "1",
+      selection_basis: "SOLE_ELIGIBLE_OPTION",
+      authorization: { state: "NOT_RECORDED" },
+      runner_up: null,
+      evaluation_published_at: "2026-08-09T10:02:00+00:00",
+    };
+    const evaluationLifecycle = {
+      schema_version: "decision-support-evaluation-read-model.v1",
+      evaluation_series_id: "series-1",
+      head: { head_kind: "EVALUATION", advice_state: "current" },
+      history: [
+        {
+          record_type: "evaluation",
+          record_state: "current",
+          evaluation_occurrence_id: "evaluation-1",
+          evaluation_digest: "sha256:evaluation",
+          terminal_result_ref_and_hash: {
+            reference: "decision-support-result:evaluation-1",
+            content_hash: "sha256:terminal",
+          },
+          evaluation_published_at: "2026-08-09T10:02:00+00:00",
+        },
+      ],
+    };
+    const recommendationBoundary = {
+      ...baseBoundary,
+      outcome: "RECOMMENDATION_AVAILABLE",
+      state: "recommendation_available",
+      decision_support_evaluation_id: "evaluation-1",
+      action_recommendation: recommendation,
+      tradeoff: null,
+      evaluation_lifecycle: evaluationLifecycle,
+    } as DecisionSupportBoundary;
+    const preview = {
+      schema_identifier: "deterministic-draft-preview",
+      schema_version: "1",
+      state: "UNSENT_PREVIEW",
+      currentness: { currentness_outcome: "CURRENTNESS_PROVEN_AT_CHECK" },
+      draft_context: { provenance: { action_recommendation: recommendation } },
+      artifact: {
+        state: "UNSENT_PREVIEW",
+        source: "DETERMINISTIC_ZERO_LLM",
+        body: "Subject: Review request: Protected production slot",
+        provenance: { currentness_check: "currentness-check:1" },
+      },
+      checker: { state: "PASS", failure_codes: [] },
+    };
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify(preview), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <DecisionSupportActionsStage
+        boundary={recommendationBoundary}
+        registryInspection={null}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Prepare deterministic unsent draft" }));
+    await waitFor(() =>
+      expect(screen.getByText("Deterministic unsent draft preview")).toBeInTheDocument(),
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe("/api/decision-support/draft-context");
+    const submitted = JSON.parse(String(init?.body)) as {
+      current_advice: Record<string, unknown>;
+    };
+    expect(submitted.current_advice).toMatchObject({
+      render_mode: "CURRENT_ADVICE",
+      evaluation_series_id: "series-1",
+      evaluation_occurrence_id: "evaluation-1",
+      advice_chain_kind: "IMMEDIATE_EVALUATION_RECOMMENDATION",
+      recommendation_ref_and_hash_or_null: {
+        reference: recommendation.occurrence_id,
+        content_hash: recommendation.content_hash,
+      },
+    });
+    expect(screen.queryByRole("button", { name: /authorize|send|approve/i })).not.toBeInTheDocument();
   });
 });
 

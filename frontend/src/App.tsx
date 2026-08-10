@@ -9,6 +9,7 @@ import {
   getWorkspace,
   acceptTradeoffSelection,
   createOperation,
+  prepareDraftContext,
   publishDecisionBrief,
   publishTradeoffSelection,
   pollOperation,
@@ -26,6 +27,7 @@ import {
   type DecisionSupportBoundary,
   type DecisionSupportOption,
   type DecisionSupportRegistryInspection,
+  type DraftContextPreview,
   type DiagnosticResult,
   type DiagnosticSummary,
   type DurableOperation,
@@ -348,6 +350,78 @@ function tradeoffCandidateReference(candidate: Record<string, unknown>): string 
     typeof evaluationOccurrenceId === "string"
     ? `candidate:${evaluationOccurrenceId}:${optionCode}:${optionVersion}`
     : null;
+}
+
+function referenceAndHash(value: unknown): Record<string, string> | null {
+  const record = asRecord(value);
+  return record !== null &&
+    typeof record.reference === "string" &&
+    record.reference.length > 0 &&
+    typeof record.content_hash === "string" &&
+    record.content_hash.length > 0
+    ? { reference: record.reference, content_hash: record.content_hash }
+    : null;
+}
+
+function currentAdviceRenderRequest(
+  evaluationSeriesId: string | null,
+  evaluationOccurrenceId: string | null,
+  evaluationDigest: string | null,
+  terminalBinding: Record<string, unknown> | null,
+  recommendation: Record<string, unknown> | null,
+  adviceChainKind: "IMMEDIATE_EVALUATION_RECOMMENDATION" | "ACCEPTED_TRADEOFF_SELECTION",
+  selectionClaim: Record<string, unknown> | null,
+  evaluationPublishedAt: unknown,
+): Record<string, unknown> | null {
+  const recommendationBinding = referenceAndHash(
+    recommendation === null
+      ? null
+      : {
+          reference: recommendation.occurrence_id,
+          content_hash: recommendation.content_hash,
+        },
+  );
+  const claimBinding =
+    selectionClaim === null
+      ? null
+      : referenceAndHash({
+          reference: `tradeoff-selection-claim:${String(selectionClaim.selection_claim_occurrence_id ?? "")}`,
+          content_hash: selectionClaim.content_hash,
+        });
+  const chainPublishedAt =
+    adviceChainKind === "ACCEPTED_TRADEOFF_SELECTION"
+      ? selectionClaim?.published_at
+      : evaluationPublishedAt;
+  if (
+    evaluationSeriesId === null ||
+    evaluationOccurrenceId === null ||
+    evaluationDigest === null ||
+    terminalBinding === null ||
+    referenceAndHash(terminalBinding) === null ||
+    recommendationBinding === null ||
+    (adviceChainKind === "ACCEPTED_TRADEOFF_SELECTION" && claimBinding === null) ||
+    (adviceChainKind === "IMMEDIATE_EVALUATION_RECOMMENDATION" && claimBinding !== null) ||
+    chainPublishedAt === null ||
+    chainPublishedAt === undefined
+  ) {
+    return null;
+  }
+  const now = new Date().toISOString();
+  return {
+    schema_identifier: "current-advice-render-request",
+    schema_version: "1",
+    render_mode: "CURRENT_ADVICE",
+    evaluation_series_id: evaluationSeriesId,
+    evaluation_occurrence_id: evaluationOccurrenceId,
+    evaluation_digest: evaluationDigest,
+    terminal_result_ref_and_hash: referenceAndHash(terminalBinding),
+    advice_chain_kind: adviceChainKind,
+    recommendation_ref_and_hash_or_null: recommendationBinding,
+    accepted_selection_claim_ref_and_hash_or_null: claimBinding,
+    advice_chain_published_at: chainPublishedAt,
+    requested_at: now,
+    available_at: now,
+  };
 }
 
 function clientOccurrenceId(prefix: string): string | null {
@@ -733,6 +807,42 @@ function decisionSupportStateLabel(state: DecisionSupportBoundary["state"]): str
   }
 }
 
+export function DraftContextPreviewPanel({
+  preview,
+}: {
+  preview: DraftContextPreview;
+}) {
+  const contextProvenance = asRecord(preview.draft_context.provenance);
+  const recommendationBinding =
+    contextProvenance === null ? null : referenceAndHash(contextProvenance.action_recommendation);
+  const currentness =
+    typeof preview.currentness.currentness_outcome === "string"
+      ? preview.currentness.currentness_outcome
+      : "UNAVAILABLE";
+  return (
+    <div className="draft-preview action-publication" role="status">
+      <strong>Deterministic unsent draft preview</strong>
+      <span>
+        State: <code>{preview.artifact.state}</code> · source: <code>{preview.artifact.source}</code>
+      </span>
+      <span>
+        Checker: <code>{preview.checker.state}</code> · currentness: <code>{currentness}</code>
+      </span>
+      <span>
+        This content is a preview only. It is not approval, authorization, sending, or execution.
+      </span>
+      <pre className="draft-preview-body">{preview.artifact.body}</pre>
+      <details>
+        <summary>Inspect complete deterministic provenance</summary>
+        <span>
+          Action recommendation: <code>{formatValue(recommendationBinding)}</code>
+        </span>
+        <code>{formatValue(preview.artifact.provenance)}</code>
+      </details>
+    </div>
+  );
+}
+
 export function DecisionSupportActionsStage({
   boundary,
   registryInspection,
@@ -747,6 +857,11 @@ export function DecisionSupportActionsStage({
     null,
   );
   const [tradeoffSelectionMessage, setTradeoffSelectionMessage] = useState<string | null>(null);
+  const [draftPreview, setDraftPreview] = useState<DraftContextPreview | null>(null);
+  const [draftPreviewState, setDraftPreviewState] = useState<
+    "idle" | "preparing" | "ready" | "unavailable"
+  >("idle");
+  const [draftPreviewMessage, setDraftPreviewMessage] = useState<string | null>(null);
   const registry: Record<string, unknown> = registryInspection ?? {};
   const releaseBinding =
     typeof registry.release_binding === "object" && registry.release_binding !== null
@@ -977,6 +1092,45 @@ export function DecisionSupportActionsStage({
   const tradeoffTerminalBinding =
     asRecord(lifecycleEvaluation?.terminal_result_ref_and_hash) ??
     asRecord(boundary.terminal_result_ref_and_hash);
+  const prepareDraftPreviewFor = async (
+    recommendation: Record<string, unknown> | null,
+    adviceChainKind: "IMMEDIATE_EVALUATION_RECOMMENDATION" | "ACCEPTED_TRADEOFF_SELECTION",
+    selectionClaim: Record<string, unknown> | null,
+  ) => {
+    const request = currentAdviceRenderRequest(
+      tradeoffEvaluationSeriesId,
+      tradeoffEvaluationOccurrenceId,
+      tradeoffEvaluationDigest,
+      tradeoffTerminalBinding,
+      recommendation,
+      adviceChainKind,
+      selectionClaim,
+      recommendation?.evaluation_published_at ??
+        lifecycleEvaluation?.evaluation_published_at ??
+        boundary.evaluation_published_at,
+    );
+    if (request === null) {
+      setDraftPreviewState("unavailable");
+      setDraftPreviewMessage(
+        "DraftContext is unavailable because the exact current-advice bindings are incomplete.",
+      );
+      return;
+    }
+    setDraftPreviewState("preparing");
+    setDraftPreviewMessage("Re-proving currentness and preparing the deterministic preview…");
+    try {
+      const prepared = await prepareDraftContext(request);
+      setDraftPreview(prepared);
+      setDraftPreviewState("ready");
+      setDraftPreviewMessage("Deterministic DraftContext passed its checker; preview remains unsent.");
+    } catch {
+      setDraftPreview(null);
+      setDraftPreviewState("unavailable");
+      setDraftPreviewMessage(
+        "DraftContext is unavailable or stale. No draft, authorization, or action was created.",
+      );
+    }
+  };
   const selectTradeoffCandidate = async (candidate: Record<string, unknown>) => {
     const candidateRef = tradeoffCandidateReference(candidate);
     const now = new Date().toISOString();
@@ -1072,6 +1226,15 @@ export function DecisionSupportActionsStage({
       setTradeoffSelectionMessage(
         `Candidate ${String(candidate.option_code)} was selected under a proven currentness claim. This records a choice only; it is not authorization and does not execute an action.`,
       );
+      const acceptedRecommendation = asRecord(accepted.action_recommendation);
+      const acceptedSelectionClaim = asRecord(accepted.selection_claim);
+      if (acceptedRecommendation !== null && acceptedSelectionClaim !== null) {
+        await prepareDraftPreviewFor(
+          acceptedRecommendation,
+          "ACCEPTED_TRADEOFF_SELECTION",
+          acceptedSelectionClaim,
+        );
+      }
     } catch {
       setTradeoffSelectionState("unavailable");
       setTradeoffSelectionMessage(
@@ -1168,8 +1331,30 @@ export function DecisionSupportActionsStage({
             </span>
           )}
           <span>This publication does not authorize or execute an action.</span>
+          <button
+            type="button"
+            onClick={() =>
+              void prepareDraftPreviewFor(
+                actionRecommendation,
+                "IMMEDIATE_EVALUATION_RECOMMENDATION",
+                null,
+              )
+            }
+            disabled={draftPreviewState === "preparing"}
+          >
+            {draftPreviewState === "preparing"
+              ? "Preparing deterministic preview…"
+              : "Prepare deterministic unsent draft"}
+          </button>
         </div>
       )}
+
+      {draftPreviewMessage !== null && (
+        <p className="supporting-copy" role="status">
+          {draftPreviewMessage}
+        </p>
+      )}
+      {draftPreview !== null && <DraftContextPreviewPanel preview={draftPreview} />}
 
       <div className="action-monitoring" role="status">
         <strong>Governed monitoring fallback</strong>

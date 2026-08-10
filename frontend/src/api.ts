@@ -1,6 +1,7 @@
 import {
   parseLineageSnapshot,
   parseDemoWorkspaceResponse,
+  parseDraftContextPreview,
   parseAuditOccurrenceResponse,
   parseDecisionBriefResponse,
   parseHealthResponse,
@@ -20,6 +21,7 @@ import {
   type DecisionBriefResponse,
   type DurableOperation,
   type DemoWorkspace,
+  type DraftContextPreview,
   type HealthResponse,
   type OperationMutationResponse,
   type LineageSnapshot,
@@ -138,6 +140,24 @@ export function acceptTradeoffSelection(
       body: JSON.stringify({ delivery_attempt: deliveryAttempt, selection }),
     },
     parseTradeoffSelectionAcceptanceResponse,
+  );
+}
+
+export function prepareDraftContext(
+  currentAdvice: Record<string, unknown>,
+): Promise<DraftContextPreview> {
+  return requestJson(
+    "/api/decision-support/draft-context",
+    {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        "content-type": "application/json",
+      },
+      credentials: "same-origin",
+      body: JSON.stringify({ current_advice: currentAdvice }),
+    },
+    parseDraftContextPreview,
   );
 }
 

@@ -356,6 +356,24 @@ class DecisionSupportCurrentnessResponse(BaseModel):
     head: dict[str, Any]
 
 
+class DraftContextRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    current_advice: DecisionSupportCurrentAdviceRenderRequest
+
+
+class DraftContextPreviewResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    schema_identifier: Literal["deterministic-draft-preview"]
+    schema_version: Literal["1"]
+    state: Literal["UNSENT_PREVIEW"]
+    currentness: dict[str, Any]
+    draft_context: dict[str, Any]
+    artifact: dict[str, Any]
+    checker: dict[str, Any]
+
+
 class DecisionSupportMonitoringObservationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
