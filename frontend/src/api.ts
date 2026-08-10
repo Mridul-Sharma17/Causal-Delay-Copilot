@@ -1,5 +1,6 @@
 import {
   parseLineageSnapshot,
+  parseManagerDecisionResponse,
   parseDemoWorkspaceResponse,
   parseDraftContextPreview,
   parseDraftMutationResponse,
@@ -24,6 +25,7 @@ import {
   type DemoWorkspace,
   type DraftContextPreview,
   type DraftMutationResponse,
+  type ManagerDecisionResponse,
   type HealthResponse,
   type OperationMutationResponse,
   type LineageSnapshot,
@@ -222,6 +224,30 @@ export function disposeDraft(
       body: JSON.stringify(request),
     },
     parseDraftMutationResponse,
+  );
+}
+
+export function recordManagerDecision(
+  draftId: string,
+  request: {
+    idempotency_key: string;
+    expected_head_ref_and_hash: { reference: string; content_hash: string };
+    manager_actor_ref: string;
+    disposition: "APPROVE" | "REJECT" | "INVESTIGATE_FURTHER";
+  },
+): Promise<ManagerDecisionResponse> {
+  return requestJson(
+    `/api/decision-support/drafts/${encodeURIComponent(draftId)}/decisions`,
+    {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        "content-type": "application/json",
+      },
+      credentials: "same-origin",
+      body: JSON.stringify(request),
+    },
+    parseManagerDecisionResponse,
   );
 }
 

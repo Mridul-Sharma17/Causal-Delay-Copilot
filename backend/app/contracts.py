@@ -58,6 +58,8 @@ class AuditOccurrenceRequest(BaseModel):
         "DECISION_SUPPORT_TRADEOFF_SELECTION_VALIDATION",
         "DECISION_SUPPORT_TRADEOFF_SELECTION_CLAIM",
         "GOVERNANCE_DRAFT_VERSION",
+        "GOVERNANCE_MANAGER_DECISION",
+        "MANAGER_DECISION_BRIEF_SNAPSHOT",
     ]
     outcome_code: Literal[
         "CORE_READY",
@@ -92,6 +94,8 @@ class AuditOccurrenceRequest(BaseModel):
         "DRAFT_APPROVAL_INTENT_RECORDED",
         "DRAFT_REJECTED",
         "DRAFT_INVESTIGATION_REQUESTED",
+        "MANAGER_DECISION_RECORDED",
+        "DECISION_BRIEF_PUBLISHED",
     ]
 
 
@@ -144,6 +148,8 @@ class AuditOccurrenceViewResponse(BaseModel):
         "ANALYSIS_RUN_DELIVERY",
         "REFRESH_INVESTIGATION_SNAPSHOT",
         "GOVERNANCE_DRAFT_VERSION",
+        "GOVERNANCE_MANAGER_DECISION",
+        "MANAGER_DECISION_BRIEF_SNAPSHOT",
     ]
     outcome_code: Literal[
         "CORE_READY",
@@ -222,6 +228,7 @@ class AuditOccurrenceViewResponse(BaseModel):
         "DRAFT_APPROVAL_INTENT_RECORDED",
         "DRAFT_REJECTED",
         "DRAFT_INVESTIGATION_REQUESTED",
+        "MANAGER_DECISION_RECORDED",
     ]
     created_at: datetime
     source_role_ceiling: SourceRoleCeilingResponse | None = None
@@ -465,6 +472,37 @@ class DraftDispositionRequest(BaseModel):
         if self.rejection_reason is not None and not self.rejection_reason.detail.strip():
             raise ValueError("rejection detail must contain text")
         return self
+
+
+class ManagerDecisionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    idempotency_key: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+    )
+    expected_head_ref_and_hash: DraftReferenceAndHash
+    manager_actor_ref: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+    )
+    disposition: Literal["APPROVE", "REJECT", "INVESTIGATE_FURTHER"]
+
+
+class ManagerDecisionResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    result: Literal["CREATED", "IDEMPOTENT_REPLAY", "CURRENTNESS_REFUSED"]
+    decision: dict[str, Any] | None
+    snapshot: dict[str, Any] | None
+    draft: dict[str, Any]
+    authorization_attempt: dict[str, Any] | None
+    authorization_currentness: dict[str, Any] | None
+    operation: dict[str, Any] | None
+    currentness: dict[str, Any] | None
+    terminal_claim: dict[str, Any] | None
 
 
 class DecisionSupportMonitoringObservationRequest(BaseModel):

@@ -175,6 +175,18 @@ export type DraftMutationResponse = {
   draft: DraftVersion;
 };
 
+export type ManagerDecisionResponse = Record<string, unknown> & {
+  result: "CREATED" | "IDEMPOTENT_REPLAY" | "CURRENTNESS_REFUSED";
+  decision: Record<string, unknown> | null;
+  snapshot: Record<string, unknown> | null;
+  draft: DraftVersion;
+  authorization_attempt: Record<string, unknown> | null;
+  authorization_currentness: Record<string, unknown> | null;
+  operation: Record<string, unknown> | null;
+  currentness: Record<string, unknown> | null;
+  terminal_claim: Record<string, unknown> | null;
+};
+
 export type TradeoffSelectionReference = {
   reference: string;
   content_hash: string;
@@ -1824,6 +1836,39 @@ export function parseDraftMutationResponse(value: unknown): DraftMutationRespons
     throw new Error("invalid draft mutation response");
   }
   return { draft: parseDraftVersion(value.draft) };
+}
+
+export function parseManagerDecisionResponse(value: unknown): ManagerDecisionResponse {
+  if (
+    !isRecord(value) ||
+    Array.isArray(value) ||
+    (value.result !== "CREATED" &&
+      value.result !== "IDEMPOTENT_REPLAY" &&
+      value.result !== "CURRENTNESS_REFUSED") ||
+    !isRecord(value.draft) ||
+    (value.decision !== null && !isRecord(value.decision)) ||
+    (value.snapshot !== null && !isRecord(value.snapshot)) ||
+    (value.authorization_attempt !== null && !isRecord(value.authorization_attempt)) ||
+    (value.authorization_currentness !== null &&
+      !isRecord(value.authorization_currentness)) ||
+    (value.operation !== null && !isRecord(value.operation)) ||
+    (value.currentness !== null && !isRecord(value.currentness)) ||
+    (value.terminal_claim !== null && !isRecord(value.terminal_claim))
+  ) {
+    throw new Error("invalid manager decision response");
+  }
+  return {
+    ...value,
+    result: value.result,
+    decision: value.decision,
+    snapshot: value.snapshot,
+    draft: parseDraftVersion(value.draft),
+    authorization_attempt: value.authorization_attempt,
+    authorization_currentness: value.authorization_currentness,
+    operation: value.operation,
+    currentness: value.currentness,
+    terminal_claim: value.terminal_claim,
+  } as ManagerDecisionResponse;
 }
 
 export function parseDraftContextPreview(value: unknown): DraftContextPreview {

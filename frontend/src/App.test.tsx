@@ -1076,6 +1076,35 @@ describe("Deterministic DraftContext preview", () => {
       )
       .mockResolvedValueOnce(
         new Response(JSON.stringify({ draft: approvedDraft }), { status: 201 }),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            result: "CREATED",
+            decision: {
+              disposition: "APPROVE",
+              authorization_state: "AUTHORIZED",
+              execution_state: "NOT_EXECUTED",
+              no_send: true,
+              no_send_language: "No message was sent and no action was executed.",
+              draft_version_ref_and_hash: {
+                reference: approvedDraft.occurrence_id,
+                content_hash: approvedDraft.content_hash,
+              },
+              recommendation_ref_and_hash: approvedDraft.recommendation_ref_and_hash,
+              evidence_ref_and_hash: approvedDraft.evidence_ref_and_hash,
+              currentness_outcome_or_null: "CURRENTNESS_PROVEN_AT_CHECK",
+            },
+            snapshot: {},
+            draft: approvedDraft,
+            authorization_attempt: {},
+            authorization_currentness: {},
+            operation: {},
+            currentness: { currentness_outcome: "CURRENTNESS_PROVEN_AT_CHECK" },
+            terminal_claim: {},
+          }),
+          { status: 201 },
+        ),
       );
     vi.stubGlobal("fetch", fetchMock);
 
@@ -1109,6 +1138,24 @@ describe("Deterministic DraftContext preview", () => {
       expected_head_ref_and_hash: {
         reference: editedDraft.occurrence_id,
         content_hash: editedDraft.content_hash,
+      },
+    });
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Authorize and record Manager Decision" }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByText(/Manager authorization was recorded from a fresh exact currentness proof/),
+      ).toBeInTheDocument(),
+    );
+    expect(screen.getByText("No message was sent and no action was executed.")).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(JSON.parse(String(fetchMock.mock.calls[2][1]?.body))).toMatchObject({
+      disposition: "APPROVE",
+      expected_head_ref_and_hash: {
+        reference: approvedDraft.occurrence_id,
+        content_hash: approvedDraft.content_hash,
       },
     });
   });

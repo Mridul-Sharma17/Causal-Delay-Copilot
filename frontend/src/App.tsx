@@ -15,6 +15,7 @@ import {
   publishDecisionBrief,
   publishTradeoffSelection,
   pollOperation,
+  recordManagerDecision,
   recordBootOccurrence,
   refreshInvestigation,
   replayDecisionBrief,
@@ -31,6 +32,7 @@ import {
   type DecisionSupportRegistryInspection,
   type DraftContextPreview,
   type DraftVersion,
+  type ManagerDecisionResponse,
   type DiagnosticResult,
   type DiagnosticSummary,
   type DurableOperation,
@@ -817,6 +819,7 @@ export function DraftContextPreviewPanel({
 }) {
   const persistedDraft = preview.draft ?? null;
   const [draft, setDraft] = useState<DraftVersion | null>(persistedDraft);
+  const [managerDecision, setManagerDecision] = useState<ManagerDecisionResponse | null>(null);
   const [subject, setSubject] = useState(
     persistedDraft?.subject ??
       (typeof preview.artifact.subject === "string" ? preview.artifact.subject : ""),
@@ -837,6 +840,7 @@ export function DraftContextPreviewPanel({
         (typeof preview.artifact.subject === "string" ? preview.artifact.subject : ""),
     );
     setBody(persistedDraft?.body ?? preview.artifact.body);
+    setManagerDecision(null);
     setMutationState("idle");
     setMutationMessage(null);
   }, [persistedDraft?.content_hash, preview.artifact.body, preview.artifact.subject]);
@@ -952,7 +956,63 @@ export function DraftContextPreviewPanel({
       );
     }
   };
+  const submitManagerDecision = async (
+    disposition: "APPROVE" | "REJECT" | "INVESTIGATE_FURTHER",
+  ) => {
+    if (draft === null || headBinding === null) {
+      return;
+    }
+    const expectedDisposition = {
+      APPROVE: "APPROVE_INTENT",
+      REJECT: "REJECTED",
+      INVESTIGATE_FURTHER: "INVESTIGATE_FURTHER",
+    }[disposition];
+    if (draft.disposition !== expectedDisposition) {
+      setMutationState("unavailable");
+      setMutationMessage(
+        "Record the matching immutable manager disposition before creating a terminal decision.",
+      );
+      return;
+    }
+    setMutationState("submitting");
+    setMutationMessage(
+      disposition === "APPROVE"
+        ? "Re-proving exact authorization-time currentness and publishing the Manager Decision…"
+        : "Publishing the terminal non-authorizing Manager Decision…",
+    );
+    try {
+      const result = await recordManagerDecision(draft.draft_id, {
+        idempotency_key: mutationKey(`decision-${disposition.toLowerCase()}`),
+        expected_head_ref_and_hash: headBinding,
+        manager_actor_ref: draft.manager_actor_ref,
+        disposition,
+      });
+      setManagerDecision(result);
+      setMutationState(result.result === "CURRENTNESS_REFUSED" ? "unavailable" : "idle");
+      setMutationMessage(
+        result.result === "CURRENTNESS_REFUSED"
+          ? "Authorization was refused because the exact advice was no longer the authoritative head. No Manager Decision, send, or execution was recorded."
+          : disposition === "APPROVE"
+            ? "Manager authorization was recorded from a fresh exact currentness proof. No message was sent and no action was executed."
+            : "The terminal Manager Decision was recorded without fabricating authorization. No message was sent and no action was executed.",
+      );
+    } catch {
+      setMutationState("unavailable");
+      setMutationMessage(
+        "The Manager Decision was unavailable or stale. Read the current draft head and exact evidence chain; no authority was overwritten.",
+      );
+    }
+  };
   const operation = draft === null ? null : asRecord(draft.manager_operation);
+  const terminalDisposition =
+    draft?.disposition === "APPROVE_INTENT"
+      ? "APPROVE"
+      : draft?.disposition === "REJECTED"
+        ? "REJECT"
+        : draft?.disposition === "INVESTIGATE_FURTHER"
+          ? "INVESTIGATE_FURTHER"
+          : null;
+  const terminalDecision = managerDecision?.decision ?? null;
   return (
     <div className="draft-preview action-publication" role="status">
       <strong>
@@ -1112,6 +1172,95 @@ export function DraftContextPreviewPanel({
               action, or execute operational work.
             </span>
           </fieldset>
+          <fieldset className="draft-disposition manager-decision-actions">
+            <legend>Terminal Governance decision</legend>
+            <p>
+              This is the terminal Governance record. Approval requires a new exact
+              authorization-time currentness proof; rejection and investigation remain explicitly
+              non-authorizing.
+            </p>
+            {terminalDisposition === null ? (
+              <span>Record a manager disposition before publishing its terminal decision.</span>
+            ) : (
+              <button
+                type="button"
+                onClick={() => void submitManagerDecision(terminalDisposition)}
+                disabled={mutationState === "saving" || mutationState === "submitting"}
+              >
+                {terminalDisposition === "APPROVE"
+                  ? "Authorize and record Manager Decision"
+                  : terminalDisposition === "REJECT"
+                    ? "Record rejected Manager Decision"
+                    : "Record investigate-further Manager Decision"}
+              </button>
+            )}
+            <span>
+              Nothing here sends a message or executes an operational action. The immutable result
+              below is the authority boundary only.
+            </span>
+          </fieldset>
+          {managerDecision !== null && (
+            <section className="manager-decision-result" aria-labelledby="manager-decision-heading">
+              <div className="record-heading">
+                <div>
+                  <p className="eyebrow">Governance terminal record</p>
+                  <h4 id="manager-decision-heading">
+                    {managerDecision.result === "CURRENTNESS_REFUSED"
+                      ? "Authorization refused"
+                      : "Manager Decision recorded"}
+                  </h4>
+                </div>
+                <span>{formatValue(terminalDecision?.disposition ?? managerDecision.result)}</span>
+              </div>
+              {terminalDecision !== null ? (
+                <>
+                  <p>{String(terminalDecision.no_send_language ?? "No message was sent and no action was executed.")}</p>
+                  <dl className="draft-version-facts">
+                    <div>
+                      <dt>Authorization</dt>
+                      <dd><code>{formatValue(terminalDecision.authorization_state)}</code></dd>
+                    </div>
+                    <div>
+                      <dt>Execution</dt>
+                      <dd><code>{formatValue(terminalDecision.execution_state)}</code></dd>
+                    </div>
+                    <div>
+                      <dt>Draft version</dt>
+                      <dd><code>{formatValue(terminalDecision.draft_version_ref_and_hash)}</code></dd>
+                    </div>
+                    <div>
+                      <dt>Recommendation</dt>
+                      <dd><code>{formatValue(terminalDecision.recommendation_ref_and_hash)}</code></dd>
+                    </div>
+                    <div>
+                      <dt>Evidence</dt>
+                      <dd><code>{formatValue(terminalDecision.evidence_ref_and_hash)}</code></dd>
+                    </div>
+                    <div>
+                      <dt>Currentness</dt>
+                      <dd><code>{formatValue(terminalDecision.currentness_outcome_or_null)}</code></dd>
+                    </div>
+                  </dl>
+                  <details>
+                    <summary>Inspect exact authorization, evidence, recommendation, and draft chain</summary>
+                    <code>{formatValue({
+                      decision: terminalDecision,
+                      snapshot: managerDecision.snapshot,
+                      authorization_attempt: managerDecision.authorization_attempt,
+                      authorization_currentness: managerDecision.authorization_currentness,
+                      currentness: managerDecision.currentness,
+                      terminal_claim: managerDecision.terminal_claim,
+                    })}</code>
+                  </details>
+                </>
+              ) : (
+                <p>
+                  No Manager Decision was published because the authorization-time currentness
+                  proof was refused. No message was sent and no action was executed.
+                </p>
+              )}
+            </section>
+          )}
           {operation !== null && (
             <details>
               <summary>Inspect investigate-further operation</summary>

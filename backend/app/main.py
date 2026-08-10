@@ -31,6 +31,8 @@ from .contracts import (
     DraftContextRequest,
     DraftDispositionRequest,
     DraftEditRequest,
+    ManagerDecisionRequest,
+    ManagerDecisionResponse,
     DecisionSupportMonitoringMatchRequest,
     DecisionSupportMonitoringObservationRequest,
     DecisionSupportMonitoringObservationResponse,
@@ -103,6 +105,11 @@ from .drafts import (
     DraftHeadRace,
     DraftIdempotencyConflict,
     DraftStoreUnavailable,
+)
+from .manager_decisions import (
+    ManagerDecisionConflict,
+    ManagerDecisionHeadRace,
+    ManagerDecisionUnavailable,
 )
 from .gemini_drafting import GeminiDraftingService, GeminiResponseProvider
 from .monitoring import MonitoringContractError, monitoring_observation_key_for
@@ -556,6 +563,39 @@ def create_app(
             503,
             SafeErrorCode.DRAFT_UNAVAILABLE.value,
             "RESTORE_CORE_STATE_AND_RETRY",
+        )
+
+    @app.exception_handler(ManagerDecisionConflict)
+    async def handle_manager_decision_conflict(
+        _: Request,
+        __: ManagerDecisionConflict,
+    ) -> JSONResponse:
+        return _error_response(
+            409,
+            SafeErrorCode.MANAGER_DECISION_IDEMPOTENCY_CONFLICT.value,
+            "USE_A_NEW_MANAGER_DECISION_IDEMPOTENCY_KEY",
+        )
+
+    @app.exception_handler(ManagerDecisionHeadRace)
+    async def handle_manager_decision_head_race(
+        _: Request,
+        __: ManagerDecisionHeadRace,
+    ) -> JSONResponse:
+        return _error_response(
+            409,
+            SafeErrorCode.MANAGER_DECISION_HEAD_RACE.value,
+            "READ_THE_CURRENT_DRAFT_HEAD_AND_RETRY",
+        )
+
+    @app.exception_handler(ManagerDecisionUnavailable)
+    async def handle_manager_decision_unavailable(
+        _: Request,
+        __: ManagerDecisionUnavailable,
+    ) -> JSONResponse:
+        return _error_response(
+            422,
+            SafeErrorCode.MANAGER_DECISION_UNAVAILABLE.value,
+            "RESTORE_THE_EXACT_DRAFT_AND_CURRENTNESS_CHAIN_AND_RETRY",
         )
 
     @app.exception_handler(DecisionSupportEvaluationConflict)
@@ -1681,6 +1721,72 @@ def create_app(
         )
         return attach_workspace_cookie(
             JSONResponse(status_code=201, content={"draft": draft}),
+            resolution,
+        )
+
+    @app.post(
+        "/api/decision-support/drafts/{draft_id}/decisions",
+        response_model=ManagerDecisionResponse,
+    )
+    @app.post(
+        "/api/decision-support/drafts/{draft_id}/authorize",
+        response_model=ManagerDecisionResponse,
+    )
+    async def record_decision_support_manager_decision(
+        request_context: Request,
+        draft_id: str,
+        request: ManagerDecisionRequest,
+    ) -> JSONResponse:
+        resolution = resolve_workspace(request_context)
+        stored = core_store.record_manager_decision(
+            resolution.snapshot.workspace_id,
+            draft_id,
+            idempotency_key=request.idempotency_key,
+            manager_actor_ref=request.manager_actor_ref,
+            expected_head=request.expected_head_ref_and_hash.model_dump(),
+            disposition=request.disposition,
+        )
+        response = ManagerDecisionResponse(
+            result=stored.result,
+            decision=stored.decision,
+            snapshot=stored.snapshot,
+            draft=stored.draft,
+            authorization_attempt=stored.authorization_attempt,
+            authorization_currentness=stored.authorization_currentness,
+            operation=stored.operation,
+            currentness=stored.currentness,
+            terminal_claim=stored.terminal_claim,
+        )
+        status_code = (
+            200
+            if stored.result == "IDEMPOTENT_REPLAY"
+            else 409
+            if stored.result == "CURRENTNESS_REFUSED"
+            else 201
+        )
+        return attach_workspace_cookie(
+            JSONResponse(
+                status_code=status_code,
+                content=response.model_dump(mode="json"),
+            ),
+            resolution,
+        )
+
+    @app.get(
+        "/api/decision-support/drafts/{draft_id}/decisions",
+        response_model=dict[str, object],
+    )
+    async def list_decision_support_manager_decisions(
+        request_context: Request,
+        draft_id: str,
+    ) -> JSONResponse:
+        resolution = resolve_workspace(request_context)
+        decisions = core_store.get_manager_decisions(
+            resolution.snapshot.workspace_id,
+            draft_id,
+        )
+        return attach_workspace_cookie(
+            JSONResponse(status_code=200, content=decisions),
             resolution,
         )
 

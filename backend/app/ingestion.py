@@ -18,6 +18,7 @@ from .canonical import sha256 as _sha256
 from .governance import GovernanceMixin, ensure_governance_schema
 from .decision_support_heads import DecisionSupportEvaluationMixin
 from .decision_support_currentness import DecisionSupportCurrentnessMixin
+from .manager_decisions import ManagerDecisionMixin, ensure_manager_decision_schema
 from .operations import DurableOperationsMixin, ensure_operation_schema
 from .risk import ReactiveInvestigationMixin, ensure_risk_schema
 from .drafts import DraftStoreMixin, ensure_draft_schema
@@ -2424,6 +2425,7 @@ def _insert_ingestion_run(
 
 class LineageStore(
     DraftStoreMixin,
+    ManagerDecisionMixin,
     DurableOperationsMixin,
     ReactiveInvestigationMixin,
     GovernanceMixin,
@@ -2442,6 +2444,7 @@ class LineageStore(
             ensure_governance_schema(connection, create=False)
             ensure_operation_schema(connection, create=False)
             ensure_draft_schema(connection, create=False)
+            ensure_manager_decision_schema(connection, create=False)
         except sqlite3.Error:
             self.close()
             raise

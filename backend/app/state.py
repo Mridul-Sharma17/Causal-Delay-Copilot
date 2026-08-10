@@ -13,6 +13,10 @@ from .drafts import DRAFT_STORAGE_SCHEMA_VERSION, ensure_draft_schema
 from .errors import CoreSafeError, SafeErrorCode
 from .governance import GOVERNANCE_SCHEMA_VERSION, ensure_governance_schema
 from .ingestion import INGESTION_SCHEMA_VERSION, ensure_ingestion_schema
+from .manager_decisions import (
+    MANAGER_DECISION_SCHEMA_VERSION,
+    ensure_manager_decision_schema,
+)
 from .operations import (
     DURABLE_OPERATION_SCHEMA_VERSION,
     ensure_operation_schema,
@@ -243,6 +247,7 @@ class StateRoot:
             ensure_governance_schema(connection, create=True)
             ensure_operation_schema(connection, create=True)
             ensure_draft_schema(connection, create=True)
+            ensure_manager_decision_schema(connection, create=True)
             _ensure_table(
                 connection,
                 "core_state_metadata",
@@ -356,6 +361,7 @@ class StateRoot:
             ensure_governance_schema(connection, create=False)
             ensure_operation_schema(connection, create=False)
             ensure_draft_schema(connection, create=False)
+            ensure_manager_decision_schema(connection, create=False)
             _ensure_table(
                 connection,
                 "core_state_metadata",
@@ -428,6 +434,7 @@ class StateRoot:
             "durable_operation_schema": DURABLE_OPERATION_SCHEMA_VERSION,
             "tradeoff_selection_schema": TRADEOFF_SELECTION_STORAGE_SCHEMA_VERSION,
             "draft_storage_schema": DRAFT_STORAGE_SCHEMA_VERSION,
+            "manager_decision_schema": MANAGER_DECISION_SCHEMA_VERSION,
         }
 
     def _cleanup(
