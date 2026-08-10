@@ -12,6 +12,8 @@ import {
   parseRefreshInvestigationResponse,
   parseRiskSignalListResponse,
   parseReplayResponse,
+  parseTradeoffSelectionAcceptanceResponse,
+  parseTradeoffSelectionPublishResponse,
   parseValidatedReferenceDelivery,
   type AuditOccurrenceRequest,
   type AuditOccurrenceResponse,
@@ -27,6 +29,10 @@ import {
   type RefreshInvestigationResponse,
   type RiskSignalListResponse,
   type ReplayResponse,
+  type TradeoffSelectionAcceptanceResponse,
+  type TradeoffSelectionDeliveryAttempt,
+  type TradeoffSelectionPublishResponse,
+  type TradeoffSelectionRecord,
   type ValidatedReferenceDelivery,
 } from "./contracts";
 
@@ -94,6 +100,44 @@ export function getValidatedReference(): Promise<ValidatedReferenceDelivery> {
       credentials: "same-origin",
     },
     parseValidatedReferenceDelivery,
+  );
+}
+
+export function publishTradeoffSelection(
+  selection: TradeoffSelectionRecord,
+): Promise<TradeoffSelectionPublishResponse> {
+  return requestJson(
+    "/api/decision-support/tradeoff-selections",
+    {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        "content-type": "application/json",
+      },
+      credentials: "same-origin",
+      body: JSON.stringify({ selection }),
+    },
+    parseTradeoffSelectionPublishResponse,
+  );
+}
+
+export function acceptTradeoffSelection(
+  evaluationSeriesId: string,
+  deliveryAttempt: TradeoffSelectionDeliveryAttempt,
+  selection: TradeoffSelectionRecord,
+): Promise<TradeoffSelectionAcceptanceResponse> {
+  return requestJson(
+    `/api/decision-support/evaluation-series/${encodeURIComponent(evaluationSeriesId)}/tradeoff-selection/accept`,
+    {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        "content-type": "application/json",
+      },
+      credentials: "same-origin",
+      body: JSON.stringify({ delivery_attempt: deliveryAttempt, selection }),
+    },
+    parseTradeoffSelectionAcceptanceResponse,
   );
 }
 

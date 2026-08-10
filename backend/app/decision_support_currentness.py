@@ -10,6 +10,30 @@ from uuid import NAMESPACE_URL, uuid5
 
 from .canonical import canonical_json as _canonical_json
 from .canonical import normalise_temporal, sha256 as _sha256
+from .tradeoff_selection import (
+    GOVERNANCE_SELECTION_REFERENCE_FIELD,
+    TRADEOFF_SELECTION_CLAIM_SCHEMA_IDENTIFIER,
+    TRADEOFF_SELECTION_RESULT_SCHEMA_IDENTIFIER,
+    TRADEOFF_SELECTION_VALIDATION_RESULT_SCHEMA_IDENTIFIER,
+    TRADEOFF_SELECTION_SCHEMA_VERSION,
+    TradeoffSelectionContractError,
+    candidate_identity as _candidate_identity,
+    candidate_matches,
+    candidate_reference,
+    delivery_attempt_identity,
+    delivery_attempt_key_for,
+    ensure_tradeoff_selection_schema,
+    governance_selection_ref_and_hash,
+    normalize_delivery_attempt,
+    normalize_selection,
+    record_content_hash as _selection_record_content_hash,
+    seal_delivery_attempt,
+    selection_claim_key_for,
+    selection_key_for,
+    selection_ref_and_hash,
+    time_equal as _selection_time_equal,
+    validation_result_key_for,
+)
 
 
 CURRENTNESS_POLICY_IDENTIFIER = "decision-support-advice-currentness"
@@ -95,6 +119,24 @@ class StoredCurrentnessResult:
     render: dict[str, Any] | None
     consuming_result: dict[str, Any] | None
     head: dict[str, Any]
+    selection_claim: dict[str, Any] | None = None
+    action_recommendation: dict[str, Any] | None = None
+    validation_result: dict[str, Any] | None = None
+    delivery_attempt: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class StoredTradeoffSelectionAcceptance:
+    result: str
+    selection_result: dict[str, Any] | None
+    validation_result: dict[str, Any] | None
+    delivery_attempt: dict[str, Any] | None
+    operation: dict[str, Any] | None
+    currentness: dict[str, Any] | None
+    terminal_claim: dict[str, Any] | None
+    selection_claim: dict[str, Any] | None
+    action_recommendation: dict[str, Any] | None
+    head: dict[str, Any] | None
 
 
 CURRENTNESS_OPERATIONS_TABLE = """
@@ -388,6 +430,7 @@ def ensure_currentness_schema(connection: sqlite3.Connection, *, create: bool) -
     )
     for table_name, create_sql, columns in tables:
         _ensure_table(connection, table_name, create_sql, columns, create=create)
+    ensure_tradeoff_selection_schema(connection, create=create)
     if create:
         for table_name in (
             "decision_support_currentness_operations",
@@ -545,6 +588,8 @@ def _record_id(record: Mapping[str, Any]) -> str | None:
         "reference",
         "record_id",
         "occurrence_id",
+        "selection_occurrence_id",
+        "selection_claim_occurrence_id",
         "attempt_occurrence_id",
         "delivery_attempt_occurrence_id",
         "authorization_attempt_occurrence_id",
@@ -1133,12 +1178,21 @@ def _selection_claim_is_complete(
     """Validate the immutable selection claim without accepting a partial projection."""
 
     claim_hash = claim.get("content_hash")
+    claim_record_ref = _record_id(claim)
+    claim_reference_matches = (
+        claim_record_ref == claim_ref.get("reference")
+        or (
+            isinstance(claim_record_ref, str)
+            and f"tradeoff-selection-claim:{claim_record_ref}"
+            == claim_ref.get("reference")
+        )
+    )
     if (
         claim.get("schema_identifier") != "tradeoff-selection-claim"
         or claim.get("schema_version") != "1"
         or not isinstance(claim_hash, str)
         or not _is_hash(claim_hash)
-        or _record_id(claim) != claim_ref.get("reference")
+        or not claim_reference_matches
         or claim_hash != claim_ref.get("content_hash")
         or _record_content_hash(claim) != claim_hash
         or claim.get("evaluation_series_id") != fields["evaluation_series_id"]
@@ -1430,8 +1484,7 @@ def _operation_payload_error(
     identifiers.discard(None)
     if payload_reference not in identifiers:
         return "currentness operation payload reference does not match its record"
-    available_at = payload.get("available_at")
-    if not _time_equal(available_at, fields["currentness_checked_at"]):
+    if not _time_equal(payload.get("available_at"), fields["currentness_checked_at"]):
         return "currentness operation time is not the payload availability time"
     return None
 
@@ -1474,11 +1527,6 @@ def _operation_payload_shape_error(
             recommendation is None or selection_claim is None
         ):
             return "accepted trade-off advice render has an invalid claim cardinality"
-        if chain_kind == "ACCEPTED_TRADEOFF_SELECTION":
-            return (
-                "accepted trade-off advice render requires the downstream immutable "
-                "selection-claim resolver"
-            )
         return None
     if operation_kind not in {
         "TRADEOFF_SELECTION_ACCEPTANCE",
@@ -1627,8 +1675,16 @@ def _chain_errors(
     else:
         claim_record_ref = _record_id(selection_claim)
         claim_record_hash = _record_content_hash(selection_claim)
+        claim_reference_matches = (
+            claim_record_ref == selection_claim_ref["reference"]
+            or (
+                isinstance(claim_record_ref, str)
+                and f"tradeoff-selection-claim:{claim_record_ref}"
+                == selection_claim_ref["reference"]
+            )
+        )
         if (
-            claim_record_ref != selection_claim_ref["reference"]
+            not claim_reference_matches
             or claim_record_hash != selection_claim_ref["content_hash"]
             or not _selection_claim_is_complete(
                 selection_claim,
@@ -1696,7 +1752,15 @@ def _chain_errors(
                 claim_hash = _record_content_hash(claim)
                 claim_ref = _record_id(claim)
                 expected_claim = fields["accepted_selection_claim_ref_and_hash_or_null"]
-                if claim_hash != expected_claim["content_hash"] or claim_ref != expected_claim["reference"]:
+                claim_ref_matches = (
+                    claim_ref == expected_claim["reference"]
+                    or (
+                        isinstance(claim_ref, str)
+                        and f"tradeoff-selection-claim:{claim_ref}"
+                        == expected_claim["reference"]
+                    )
+                )
+                if claim_hash != expected_claim["content_hash"] or not claim_ref_matches:
                     errors.append("GOVERNED_DEPENDENCY_NOT_CURRENT")
                 if not _time_equal(chain_published_at, claim.get("published_at")):
                     errors.append("GOVERNED_DEPENDENCY_NOT_CURRENT")
@@ -2144,15 +2208,82 @@ class DecisionSupportCurrentnessMixin:
                     "stored currentness consuming result is not bound to its operation"
                 )
         if result_kind == "tradeoff-selection-result":
+            selection_result = record.get("selection_result")
             if (
-                record.get("selection_result") != "CURRENTNESS_PROVEN_AT_CHECK"
+                selection_result
+                not in {
+                    "CURRENTNESS_PROVEN_AT_CHECK",
+                    "TRADEOFF_SELECTION_STALE",
+                    "TRADEOFF_SELECTION_TARGET_NOT_TRADEOFF",
+                    "TRADEOFF_SELECTION_INVALID_CANDIDATE",
+                    "TRADEOFF_SELECTION_ACCEPTED_IDEMPOTENT",
+                    "TRADEOFF_SELECTION_CONFLICT_ALREADY_RESOLVED",
+                    "TRADEOFF_SELECTION_ACCEPTED",
+                }
                 or not isinstance(record.get("selected_candidate_ref"), str)
-                or record.get("selection_side_effect")
-                != "DEFERRED_TO_TRADEOFF_SELECTION_CONTRACT"
+                or (
+                    selection_result != "CURRENTNESS_PROVEN_AT_CHECK"
+                    and record.get("selection_not_authorization") is not True
+                )
+                or (
+                    selection_result == "CURRENTNESS_PROVEN_AT_CHECK"
+                    and record.get("selection_side_effect")
+                    != "DEFERRED_TO_TRADEOFF_SELECTION_CONTRACT"
+                    and record.get("selection_not_authorization") is not True
+                )
             ):
                 raise DecisionSupportCurrentnessUnavailable(
                     "stored trade-off consuming result failed its closed contract"
                 )
+            if record.get("selection_not_authorization") is True:
+                selection_ref = _ref_and_hash(
+                    record.get("tradeoff_selection_ref_and_hash")
+                )
+                governance_selection_ref = _ref_and_hash(
+                    record.get(GOVERNANCE_SELECTION_REFERENCE_FIELD)
+                )
+                if (
+                    _ref_and_hash(
+                        record.get(
+                            "tradeoff_selection_delivery_attempt_ref_and_hash"
+                        )
+                    )
+                    is None
+                    or selection_ref is None
+                    or governance_selection_ref is None
+                    or governance_selection_ref["reference"]
+                    != f"governance-tradeoff-selection:{selection_ref['reference'].removeprefix('tradeoff-selection:')}"
+                    or governance_selection_ref["content_hash"]
+                    != selection_ref["content_hash"]
+                ):
+                    raise DecisionSupportCurrentnessUnavailable(
+                        "stored trade-off result lacks its immutable selection bindings"
+                    )
+                recommendation = _mapping(record.get("action_recommendation"))
+                recommendation_ref = _ref_and_hash(
+                    record.get("action_recommendation_ref_and_hash_or_null")
+                )
+                if recommendation is not None:
+                    if (
+                        not _is_hash(recommendation.get("content_hash"))
+                        or _hash_without_content_hash(recommendation)
+                        != recommendation.get("content_hash")
+                        or recommendation_ref is None
+                        or not _same_ref(
+                            recommendation_ref,
+                            {
+                                "reference": recommendation.get("occurrence_id"),
+                                "content_hash": recommendation.get("content_hash"),
+                            },
+                        )
+                    ):
+                        raise DecisionSupportCurrentnessUnavailable(
+                            "stored trade-off recommendation failed its integrity binding"
+                        )
+                elif recommendation_ref is not None:
+                    raise DecisionSupportCurrentnessUnavailable(
+                        "stored trade-off recommendation reference has no record"
+                    )
         elif result_kind == "authorization-currentness-result":
             if (
                 record.get("authorization_currentness") != "PROVEN"
@@ -2561,6 +2692,506 @@ class DecisionSupportCurrentnessMixin:
                 _canonical_json(record),
             ),
         )
+        return record
+
+    def _tradeoff_selection_from_ref_locked(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        workspace_id: str,
+        reference: str,
+        content_hash: str,
+    ) -> dict[str, Any] | None:
+        occurrence_id = reference
+        if occurrence_id.startswith("tradeoff-selection:"):
+            occurrence_id = occurrence_id.split(":", 1)[1]
+        elif ":" in occurrence_id:
+            raise DecisionSupportCurrentnessUnavailable(
+                "Governance trade-off selection reference has the wrong type"
+            )
+        row = connection.execute(
+            """
+            SELECT * FROM governance_tradeoff_selections
+            WHERE workspace_id = ? AND selection_occurrence_id = ?
+            """,
+            (workspace_id, occurrence_id),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            record = normalize_selection(json.loads(str(row["payload_json"])))
+        except (TradeoffSelectionContractError, json.JSONDecodeError) as error:
+            raise DecisionSupportCurrentnessUnavailable(
+                "stored Governance trade-off selection is invalid"
+            ) from error
+        audit = connection.execute(
+            """
+            SELECT occurrence_kind, outcome_code, content_hash
+            FROM audit_events
+            WHERE workspace_id = ? AND occurrence_id = ?
+            """,
+            (workspace_id, f"governance-tradeoff-selection:{occurrence_id}"),
+        ).fetchone()
+        if (
+            record["content_hash"] != content_hash
+            or record["content_hash"] != str(row["content_hash"])
+            or _selection_record_content_hash(record) != record["content_hash"]
+            or str(row["selection_occurrence_id"]) != occurrence_id
+            or str(row["selection_key"]) != selection_key_for(record)
+            or governance_selection_ref_and_hash(record)
+            != {
+                "reference": f"governance-tradeoff-selection:{occurrence_id}",
+                "content_hash": record["content_hash"],
+            }
+            or audit is None
+            or str(audit["occurrence_kind"]) != "GOVERNANCE_TRADEOFF_SELECTION"
+            or str(audit["outcome_code"]) != "TRADEOFF_SELECTION_RECORDED"
+            or str(audit["content_hash"]) != record["content_hash"]
+        ):
+            raise DecisionSupportCurrentnessUnavailable(
+                "Governance trade-off selection reference failed integrity"
+            )
+        return record
+
+    def _tradeoff_attempt_from_row_locked(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        workspace_id: str,
+        delivery_attempt_key: str,
+    ) -> dict[str, Any] | None:
+        row = connection.execute(
+            """
+            SELECT * FROM decision_support_tradeoff_selection_attempts
+            WHERE workspace_id = ? AND delivery_attempt_key = ?
+            """,
+            (workspace_id, delivery_attempt_key),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            record = normalize_delivery_attempt(json.loads(str(row["payload_json"])))
+        except (TradeoffSelectionContractError, json.JSONDecodeError) as error:
+            raise DecisionSupportCurrentnessUnavailable(
+                "stored trade-off delivery attempt is invalid"
+            ) from error
+        if (
+            record["content_hash"] != str(row["content_hash"])
+            or _selection_record_content_hash(record) != record["content_hash"]
+            or delivery_attempt_key_for(record) != delivery_attempt_key
+            or str(row["delivery_attempt_occurrence_id"]) != str(record["occurrence_id"])
+        ):
+            raise DecisionSupportCurrentnessUnavailable(
+                "stored trade-off delivery attempt failed integrity"
+            )
+        return record
+
+    def _tradeoff_attempt_by_occurrence_locked(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        workspace_id: str,
+        occurrence_id: str,
+    ) -> dict[str, Any] | None:
+        row = connection.execute(
+            """
+            SELECT delivery_attempt_key
+            FROM decision_support_tradeoff_selection_attempts
+            WHERE workspace_id = ? AND delivery_attempt_occurrence_id = ?
+            """,
+            (workspace_id, occurrence_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return self._tradeoff_attempt_from_row_locked(
+            connection,
+            workspace_id=workspace_id,
+            delivery_attempt_key=str(row["delivery_attempt_key"]),
+        )
+
+    def _tradeoff_selection_claim_from_row_locked(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        workspace_id: str,
+        evaluation_series_id: str,
+        evaluation_occurrence_id: str,
+    ) -> dict[str, Any] | None:
+        claim_key = selection_claim_key_for(
+            evaluation_series_id,
+            evaluation_occurrence_id,
+        )
+        row = connection.execute(
+            """
+            SELECT * FROM decision_support_tradeoff_selection_claims
+            WHERE workspace_id = ? AND selection_claim_key = ?
+            """,
+            (workspace_id, claim_key),
+        ).fetchone()
+        if row is None:
+            return None
+        claim = _json_mapping(
+            row["payload_json"],
+            "stored trade-off selection claim is invalid",
+        )
+        if (
+            claim.get("schema_identifier") != TRADEOFF_SELECTION_CLAIM_SCHEMA_IDENTIFIER
+            or claim.get("schema_version") != TRADEOFF_SELECTION_SCHEMA_VERSION
+            or claim.get("selection_claim_key") != claim_key
+            or claim.get("content_hash") != str(row["content_hash"])
+            or _hash_without_content_hash(claim) != str(row["content_hash"])
+            or claim.get("selection_claim_occurrence_id")
+            != str(row["selection_claim_occurrence_id"])
+            or claim.get("evaluation_series_id") != evaluation_series_id
+            or claim.get("evaluation_occurrence_id") != evaluation_occurrence_id
+        ):
+            raise DecisionSupportCurrentnessUnavailable(
+                "stored trade-off selection claim failed integrity"
+            )
+        selection_ref = _ref_and_hash(claim.get("tradeoff_selection_ref_and_hash"))
+        governance_selection_ref = _ref_and_hash(
+            claim.get(GOVERNANCE_SELECTION_REFERENCE_FIELD)
+        )
+        recommendation = _mapping(claim.get("action_recommendation"))
+        recommendation_ref = _ref_and_hash(
+            claim.get("action_recommendation_ref_and_hash")
+        )
+        audit = connection.execute(
+            """
+            SELECT occurrence_kind, outcome_code, content_hash
+            FROM audit_events
+            WHERE workspace_id = ? AND occurrence_id = ?
+            """,
+            (workspace_id, str(claim["selection_claim_occurrence_id"])),
+        ).fetchone()
+        if (
+            selection_ref is None
+            or governance_selection_ref is None
+            or governance_selection_ref["reference"]
+            != f"governance-tradeoff-selection:{selection_ref['reference'].removeprefix('tradeoff-selection:')}"
+            or governance_selection_ref["content_hash"] != selection_ref["content_hash"]
+            or not isinstance(claim.get("selected_candidate_ref"), str)
+            or recommendation is None
+            or not _is_hash(recommendation.get("content_hash"))
+            or _hash_without_content_hash(recommendation)
+            != recommendation.get("content_hash")
+            or recommendation_ref is None
+            or not _same_ref(
+                recommendation_ref,
+                {
+                    "reference": recommendation.get("occurrence_id"),
+                    "content_hash": recommendation.get("content_hash"),
+                },
+            )
+            or claim.get("selection_is_not_authorization") is not True
+            or audit is None
+            or str(audit["occurrence_kind"])
+            != "DECISION_SUPPORT_TRADEOFF_SELECTION_CLAIM"
+            or str(audit["outcome_code"]) != "TRADEOFF_SELECTION_ACCEPTED"
+            or str(audit["content_hash"]) != str(claim["content_hash"])
+        ):
+            raise DecisionSupportCurrentnessUnavailable(
+                "stored trade-off selection claim lacks its complete immutable advice binding"
+            )
+        return claim
+
+    def _selection_claim_by_ref_locked(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        workspace_id: str,
+        reference: str,
+        content_hash: str,
+    ) -> dict[str, Any] | None:
+        occurrence_id = reference.split(":", 1)[1] if ":" in reference else reference
+        row = connection.execute(
+            """
+            SELECT * FROM decision_support_tradeoff_selection_claims
+            WHERE workspace_id = ? AND selection_claim_occurrence_id = ?
+            """,
+            (workspace_id, occurrence_id),
+        ).fetchone()
+        if row is None:
+            return None
+        claim = _json_mapping(
+            row["payload_json"],
+            "stored trade-off selection claim is invalid",
+        )
+        if (
+            claim.get("content_hash") != content_hash
+            or _hash_without_content_hash(claim) != content_hash
+            or claim.get("selection_claim_occurrence_id") != occurrence_id
+        ):
+            raise DecisionSupportCurrentnessUnavailable(
+                "trade-off selection claim reference failed integrity"
+            )
+        validated = self._tradeoff_selection_claim_from_row_locked(
+            connection,
+            workspace_id=workspace_id,
+            evaluation_series_id=str(claim["evaluation_series_id"]),
+            evaluation_occurrence_id=str(claim["evaluation_occurrence_id"]),
+        )
+        if validated is None:
+            raise DecisionSupportCurrentnessUnavailable(
+                "trade-off selection claim reference is not authoritative"
+            )
+        return validated
+
+    def _selected_recommendation_by_ref_locked(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        workspace_id: str,
+        reference: str,
+        content_hash: str,
+    ) -> dict[str, Any] | None:
+        rows = connection.execute(
+            """
+            SELECT evaluation_series_id, evaluation_occurrence_id
+            FROM decision_support_tradeoff_selection_claims
+            WHERE workspace_id = ?
+            """,
+            (workspace_id,),
+        ).fetchall()
+        for row in rows:
+            claim = self._tradeoff_selection_claim_from_row_locked(
+                connection,
+                workspace_id=workspace_id,
+                evaluation_series_id=str(row["evaluation_series_id"]),
+                evaluation_occurrence_id=str(row["evaluation_occurrence_id"]),
+            )
+            if claim is None:
+                continue
+            recommendation = _mapping(claim.get("action_recommendation"))
+            if recommendation is None:
+                continue
+            if (
+                recommendation.get("occurrence_id") == reference
+                and recommendation.get("content_hash") == content_hash
+                and _hash_without_content_hash(recommendation) == content_hash
+            ):
+                return recommendation
+        return None
+
+    def _persist_tradeoff_delivery_attempt_locked(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        workspace_id: str,
+        attempt: Mapping[str, Any],
+        created_at: str,
+    ) -> dict[str, Any]:
+        attempt_key = delivery_attempt_key_for(attempt)
+        existing = self._tradeoff_attempt_from_row_locked(
+            connection,
+            workspace_id=workspace_id,
+            delivery_attempt_key=attempt_key,
+        )
+        if existing is not None:
+            if existing != attempt:
+                raise DecisionSupportCurrentnessConflict(
+                    "trade-off delivery attempt key was reused with different content"
+                )
+            return existing
+        occurrence_id = str(attempt["occurrence_id"])
+        _audit_locked(
+            connection,
+            workspace_id=workspace_id,
+            occurrence_id=occurrence_id,
+            idempotency_key=f"decision-support-tradeoff-selection-attempt:{attempt_key}",
+            occurrence_kind=CURRENTNESS_SOURCE_OCCURRENCE_AUDIT_KIND,
+            outcome_code=CURRENTNESS_SOURCE_OCCURRENCE_AUDIT_OUTCOME,
+            content_hash=str(attempt["content_hash"]),
+            created_at=created_at,
+        )
+        selection_ref = attempt["tradeoff_selection_ref_and_hash"]
+        connection.execute(
+            """
+            INSERT INTO decision_support_tradeoff_selection_attempts (
+                delivery_attempt_occurrence_id, workspace_id,
+                delivery_attempt_key, content_hash, selection_ref,
+                selection_hash, evaluation_series_id, evaluation_occurrence_id,
+                evaluation_digest, selected_candidate_ref, delivered_at,
+                available_at, created_at, payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                occurrence_id,
+                workspace_id,
+                attempt_key,
+                attempt["content_hash"],
+                selection_ref["reference"],
+                selection_ref["content_hash"],
+                attempt["evaluation_series_id"],
+                attempt["evaluation_occurrence_id"],
+                attempt["evaluation_digest"],
+                attempt["selected_candidate_ref"],
+                _canonical_json(attempt["delivered_at"]),
+                _canonical_json(attempt["available_at"]),
+                created_at,
+                _canonical_json(attempt),
+            ),
+        )
+        return deepcopy(dict(attempt))
+
+    def _write_tradeoff_selection_validation_result_locked(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        workspace_id: str,
+        attempt: Mapping[str, Any],
+        validation_code: str,
+        evaluation_series_id: str | None,
+        selection_ref_and_hash: Mapping[str, Any] | None,
+        created_at: str,
+    ) -> dict[str, Any]:
+        if validation_code not in {
+            "TRADEOFF_SELECTION_SERIES_NOT_FOUND",
+            "TRADEOFF_SELECTION_GOVERNANCE_REFERENCE_INTEGRITY_MISMATCH",
+        }:
+            raise DecisionSupportCurrentnessUnavailable(
+                "trade-off validation code is not a pre-currentness code"
+            )
+        attempt_ref = {
+            "reference": f"tradeoff-selection-delivery-attempt:{attempt['occurrence_id']}",
+            "content_hash": attempt["content_hash"],
+        }
+        result_key = validation_result_key_for(attempt_ref)
+        existing = connection.execute(
+            """
+            SELECT * FROM decision_support_tradeoff_selection_validation_results
+            WHERE workspace_id = ? AND validation_result_key = ?
+            """,
+            (workspace_id, result_key),
+        ).fetchone()
+        if existing is not None:
+            record = _json_mapping(
+                existing["payload_json"],
+                "stored trade-off validation result is invalid",
+            )
+            if (
+                record.get("content_hash") != str(existing["content_hash"])
+                or _hash_without_content_hash(record) != str(existing["content_hash"])
+            ):
+                raise DecisionSupportCurrentnessUnavailable(
+                    "stored trade-off validation result failed integrity"
+                )
+            return record
+        occurrence_id = uuid5(
+            NAMESPACE_URL,
+            f"causal-delay-copilot:tradeoff-selection-validation:{result_key}",
+        ).hex
+        record: dict[str, Any] = {
+            "schema_identifier": "tradeoff-selection-validation-result",
+            "schema_version": TRADEOFF_SELECTION_SCHEMA_VERSION,
+            "validation_result_occurrence_id": occurrence_id,
+            "validation_result_key": result_key,
+            "validation_code": validation_code,
+            "delivery_attempt_ref_and_hash": attempt_ref,
+            "evaluation_series_id": evaluation_series_id,
+            "governance_tradeoff_selection_ref_and_hash": deepcopy(
+                dict(selection_ref_and_hash)
+            )
+            if selection_ref_and_hash is not None
+            else None,
+            "action_recommendation": None,
+            "selection_not_authorization": True,
+        }
+        record["content_hash"] = _hash_without_content_hash(record)
+        _audit_locked(
+            connection,
+            workspace_id=workspace_id,
+            occurrence_id=occurrence_id,
+            idempotency_key=f"decision-support-tradeoff-selection-validation:{result_key}",
+            occurrence_kind="DECISION_SUPPORT_TRADEOFF_SELECTION_VALIDATION",
+            outcome_code=validation_code,
+            content_hash=str(record["content_hash"]),
+            created_at=created_at,
+        )
+        connection.execute(
+            """
+            INSERT INTO decision_support_tradeoff_selection_validation_results (
+                validation_result_occurrence_id, workspace_id,
+                validation_result_key, content_hash, validation_code,
+                delivery_attempt_ref, delivery_attempt_hash,
+                evaluation_series_id, governance_selection_ref,
+                governance_selection_hash, created_at, payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                occurrence_id,
+                workspace_id,
+                result_key,
+                record["content_hash"],
+                validation_code,
+                attempt_ref["reference"],
+                attempt_ref["content_hash"],
+                evaluation_series_id,
+                None
+                if selection_ref_and_hash is None
+                else selection_ref_and_hash.get("reference"),
+                None
+                if selection_ref_and_hash is None
+                else selection_ref_and_hash.get("content_hash"),
+                created_at,
+                _canonical_json(record),
+            ),
+        )
+        return record
+
+    def _tradeoff_selection_validation_from_row_locked(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        workspace_id: str,
+        row: sqlite3.Row,
+        attempt_ref: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        record = _json_mapping(
+            row["payload_json"],
+            "stored trade-off selection validation result is invalid",
+        )
+        result_key = validation_result_key_for(attempt_ref)
+        if (
+            record.get("schema_identifier")
+            != TRADEOFF_SELECTION_VALIDATION_RESULT_SCHEMA_IDENTIFIER
+            or record.get("schema_version") != TRADEOFF_SELECTION_SCHEMA_VERSION
+            or record.get("validation_result_key") != result_key
+            or record.get("validation_code")
+            not in {
+                "TRADEOFF_SELECTION_SERIES_NOT_FOUND",
+                "TRADEOFF_SELECTION_GOVERNANCE_REFERENCE_INTEGRITY_MISMATCH",
+            }
+            or record.get("delivery_attempt_ref_and_hash") != dict(attempt_ref)
+            or record.get("content_hash") != str(row["content_hash"])
+            or _hash_without_content_hash(record) != str(row["content_hash"])
+            or str(row["validation_result_key"]) != result_key
+            or str(row["validation_result_occurrence_id"])
+            != str(record.get("validation_result_occurrence_id"))
+            or "currentness" in record
+            or "operation" in record
+        ):
+            raise DecisionSupportCurrentnessUnavailable(
+                "stored trade-off selection validation result failed integrity"
+            )
+        audit = connection.execute(
+            """
+            SELECT occurrence_kind, outcome_code, content_hash
+            FROM audit_events
+            WHERE workspace_id = ? AND occurrence_id = ?
+            """,
+            (workspace_id, str(record["validation_result_occurrence_id"])),
+        ).fetchone()
+        if (
+            audit is None
+            or str(audit["occurrence_kind"])
+            != "DECISION_SUPPORT_TRADEOFF_SELECTION_VALIDATION"
+            or str(audit["outcome_code"]) != str(record["validation_code"])
+            or str(audit["content_hash"]) != str(record["content_hash"])
+        ):
+            raise DecisionSupportCurrentnessUnavailable(
+                "trade-off selection validation audit binding failed integrity"
+            )
         return record
 
     def _load_evaluation_locked(
@@ -3369,6 +4000,955 @@ class DecisionSupportCurrentnessMixin:
         )
         return record
 
+    def _tradeoff_candidates_locked(
+        self,
+        terminal_result: Mapping[str, Any],
+        *,
+        evaluation_occurrence_id: str | None = None,
+    ) -> list[dict[str, Any]] | None:
+        tradeoff = _mapping(terminal_result.get("tradeoff"))
+        if tradeoff is None:
+            return None
+        tradeoff_hash = tradeoff.get("content_hash")
+        if (
+            not _is_hash(tradeoff_hash)
+            or _hash_without_content_hash(tradeoff) != tradeoff_hash
+        ):
+            return None
+        candidates_value = tradeoff.get("candidates")
+        if not isinstance(candidates_value, list) or len(candidates_value) != 2:
+            return None
+        candidates: list[dict[str, Any]] = []
+        references: set[str] = set()
+        for value in candidates_value:
+            candidate = _mapping(value)
+            if candidate is None:
+                return None
+            candidate = deepcopy(dict(candidate))
+            try:
+                reference = candidate_reference(candidate)
+                candidate_identity = _candidate_identity(candidate)
+            except TradeoffSelectionContractError:
+                return None
+            if candidate_identity["evaluation_occurrence_id"] != evaluation_occurrence_id:
+                return None
+            candidate_hash = candidate.get("content_hash")
+            if (
+                not _is_hash(candidate_hash)
+                or _hash_without_content_hash(candidate) != candidate_hash
+                or reference in references
+            ):
+                return None
+            references.add(reference)
+            candidates.append(candidate)
+        return candidates
+
+    def _selected_action_recommendation(
+        self,
+        *,
+        evaluation: Mapping[str, Any],
+        terminal_result: Mapping[str, Any],
+        selected_candidate: Mapping[str, Any],
+        presented_alternative: Mapping[str, Any],
+        selection: Mapping[str, Any],
+        operation: Mapping[str, Any],
+        check: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        def required_binding(value: object, label: str) -> dict[str, str]:
+            binding = _ref_and_hash(value)
+            if binding is None:
+                raise DecisionSupportCurrentnessUnavailable(
+                    f"{label} provenance binding is unavailable"
+                )
+            return binding
+
+        def dependency_binding(
+            dependencies: object,
+            dependency_kind: str,
+            *,
+            option_code: str | None = None,
+            trigger_mode: str | None = None,
+        ) -> dict[str, str]:
+            if not isinstance(dependencies, list):
+                raise DecisionSupportCurrentnessUnavailable(
+                    "advice currentness dependency set is unavailable"
+                )
+            matches: list[dict[str, str]] = []
+            for value in dependencies:
+                dependency = _mapping(value)
+                if dependency is None or dependency.get("dependency_kind") != dependency_kind:
+                    continue
+                current = _mapping(dependency.get("current")) or dependency
+                if option_code is not None and current.get("option_code") != option_code:
+                    continue
+                if trigger_mode is not None and current.get("trigger_mode") != trigger_mode:
+                    continue
+                matches.append(
+                    required_binding(
+                        {
+                            "reference": dependency.get("reference"),
+                            "content_hash": dependency.get("content_hash"),
+                        },
+                        dependency_kind,
+                    )
+                )
+            if len(matches) != 1:
+                raise DecisionSupportCurrentnessUnavailable(
+                    f"exact {dependency_kind} provenance is unavailable"
+                )
+            return matches[0]
+
+        def explicit_or_dependency_binding(
+            field_name: str,
+            dependency_kind: str,
+            *,
+            option_code: str | None = None,
+            trigger_mode: str | None = None,
+        ) -> dict[str, str]:
+            authoritative = dependency_binding(
+                currentness_dependencies,
+                dependency_kind,
+                option_code=option_code,
+                trigger_mode=trigger_mode,
+            )
+            for source in (terminal_result, identity_binding):
+                if field_name in source:
+                    supplied = required_binding(source.get(field_name), field_name)
+                    if supplied != authoritative:
+                        raise DecisionSupportCurrentnessUnavailable(
+                            f"{field_name} disagrees with the authoritative dependency"
+                        )
+            return authoritative
+
+        def first_present(*values: object) -> object | None:
+            for value in values:
+                if value is not None:
+                    return value
+            return None
+
+        option_evaluation = _mapping(selected_candidate.get("option_evaluation"))
+        if option_evaluation is None:
+            option_evaluation = selected_candidate
+        selected_option_code = selected_candidate.get("option_code")
+        selected_option_version = selected_candidate.get("option_version")
+        decision_support_input_digest = evaluation.get(
+            "decision_support_input_digest"
+        ) or terminal_result.get("decision_support_input_digest")
+        if not _is_hash(decision_support_input_digest):
+            raise DecisionSupportCurrentnessUnavailable(
+                "Decision Support input digest is unavailable"
+            )
+        identity_binding = _mapping(evaluation.get("identity_binding")) or {}
+        permission_provenance = _mapping(terminal_result.get("permission_provenance")) or {}
+        currentness_dependencies = terminal_result.get(
+            "advice_currentness_dependency_set",
+            _mapping(identity_binding.get("governed_records"))
+            and _mapping(identity_binding.get("governed_records")).get(
+                "advice_currentness_dependency_set", []
+            ),
+        )
+
+        def source_binding(value: object) -> dict[str, Any] | None:
+            source = _mapping(value)
+            if source is None:
+                return None
+            reference = next(
+                (
+                    source.get(key)
+                    for key in (
+                        "reference",
+                        "record_id",
+                        "investigation_request_id",
+                        "id",
+                    )
+                    if isinstance(source.get(key), str) and source.get(key)
+                ),
+                None,
+            )
+            if not isinstance(reference, str):
+                return None
+            return _ref_and_hash(
+                {"reference": reference, "content_hash": source.get("content_hash")}
+            )
+
+        investigation_request = _mapping(identity_binding.get("investigation_request"))
+        investigation_request_binding = source_binding(investigation_request)
+        if investigation_request_binding is None:
+            raise DecisionSupportCurrentnessUnavailable(
+                "Investigation Request provenance binding is unavailable"
+            )
+        upstream_trigger_mode = first_present(
+            permission_provenance.get("upstream_trigger_mode"),
+            identity_binding.get("trigger_mode"),
+            terminal_result.get("upstream_trigger_mode"),
+        )
+        trigger_mode = first_present(
+            permission_provenance.get("trigger_mode"),
+            identity_binding.get("trigger_mode_mapping"),
+            terminal_result.get("trigger_mode"),
+        )
+        if not isinstance(upstream_trigger_mode, str) or not upstream_trigger_mode:
+            raise DecisionSupportCurrentnessUnavailable(
+                "upstream trigger mode provenance is unavailable"
+            )
+        if not isinstance(trigger_mode, str) or not trigger_mode:
+            raise DecisionSupportCurrentnessUnavailable(
+                "mapped trigger mode provenance is unavailable"
+            )
+        subject_identity = first_present(
+            identity_binding.get("subject_identity"),
+            terminal_result.get("subject_identity"),
+        )
+        if not isinstance(subject_identity, str) or not subject_identity:
+            raise DecisionSupportCurrentnessUnavailable(
+                "subject identity provenance is unavailable"
+            )
+        subject_driver_state = first_present(
+            terminal_result.get("subject_driver_state"),
+            identity_binding.get("subject_driver_state"),
+        )
+        if not isinstance(subject_driver_state, Mapping):
+            raise DecisionSupportCurrentnessUnavailable(
+                "Subject Driver State provenance is unavailable"
+            )
+        subject_verdict = first_present(
+            terminal_result.get("subject_verdict"),
+            identity_binding.get("subject_verdict"),
+        )
+        population_verdict = first_present(
+            terminal_result.get("population_verdict"),
+            identity_binding.get("population_verdict"),
+        )
+        subject_verdict_binding = permission_provenance.get(
+            "subject_verdict_ref_and_hash"
+        )
+        if subject_verdict_binding is None:
+            subject_verdict_binding = source_binding(subject_verdict)
+        subject_verdict_binding = required_binding(
+            subject_verdict_binding,
+            "Subject Verdict",
+        )
+        population_verdict_binding = permission_provenance.get(
+            "population_verdict_ref_and_hash"
+        )
+        if population_verdict_binding is None:
+            population_verdict_binding = source_binding(population_verdict)
+        population_verdict_binding = required_binding(
+            population_verdict_binding,
+            "Population Verdict",
+        )
+        requested_claim_scope = first_present(
+            identity_binding.get("requested_claim_scope"),
+            permission_provenance.get("requested_claim_scope"),
+            terminal_result.get("requested_claim_scope"),
+        )
+        if not isinstance(requested_claim_scope, str) or not requested_claim_scope:
+            raise DecisionSupportCurrentnessUnavailable(
+                "Decision Support claim scope provenance is unavailable"
+            )
+        constraints_as_of = first_present(
+            identity_binding.get("constraints_as_of"),
+            terminal_result.get("constraints_as_of"),
+        )
+        if constraints_as_of is None:
+            raise DecisionSupportCurrentnessUnavailable(
+                "constraints-as-of provenance is unavailable"
+            )
+        causal_decision_at = first_present(
+            identity_binding.get("causal_decision_at"),
+            terminal_result.get("causal_decision_at"),
+        )
+        if causal_decision_at is None:
+            raise DecisionSupportCurrentnessUnavailable(
+                "causal decision time provenance is unavailable"
+            )
+        def consistent_ref_binding(
+            label: str,
+            *values: object,
+        ) -> dict[str, str] | None:
+            present = [value for value in values if value is not None]
+            if not present:
+                return None
+            bindings: list[dict[str, str]] = []
+            for value in present:
+                binding = _ref_and_hash(value)
+                if binding is None:
+                    raise DecisionSupportCurrentnessUnavailable(
+                        f"{label} provenance binding is malformed"
+                    )
+                bindings.append(binding)
+            if any(binding != bindings[0] for binding in bindings[1:]):
+                raise DecisionSupportCurrentnessUnavailable(
+                    f"{label} provenance bindings disagree"
+                )
+            return bindings[0]
+
+        def consistent_mapping(
+            label: str,
+            *values: object,
+        ) -> dict[str, Any] | None:
+            present: list[dict[str, Any]] = []
+            for value in values:
+                if value is None:
+                    continue
+                mapped = _mapping(value)
+                if mapped is None:
+                    raise DecisionSupportCurrentnessUnavailable(
+                        f"{label} provenance binding is malformed"
+                    )
+                present.append(deepcopy(dict(mapped)))
+            if not present:
+                return None
+            if any(_canonical_json(value) != _canonical_json(present[0]) for value in present[1:]):
+                raise DecisionSupportCurrentnessUnavailable(
+                    f"{label} provenance bindings disagree"
+                )
+            return present[0]
+
+        analysis_bundle_ref = consistent_ref_binding(
+            "verified Analysis Run bundle",
+            terminal_result.get("analysis_run_bundle_ref_and_hash"),
+            identity_binding.get("analysis_run_bundle_ref_and_hash"),
+        )
+        verified_analysis_bundle = consistent_mapping(
+            "verified Analysis Run bundle",
+            terminal_result.get("verified_analysis_run_bundle_binding"),
+            identity_binding.get("verified_analysis_run_bundle_binding"),
+        )
+        for source in (terminal_result, identity_binding, subject_verdict, population_verdict):
+            source_mapping = _mapping(source)
+            if source_mapping is None:
+                continue
+            analysis_run_id = source_mapping.get("analysis_run_id")
+            bundle_manifest_hash = source_mapping.get("bundle_manifest_hash")
+            if analysis_run_id is None and bundle_manifest_hash is None:
+                continue
+            if not isinstance(analysis_run_id, str) or not analysis_run_id or not _is_hash(
+                bundle_manifest_hash
+            ):
+                raise DecisionSupportCurrentnessUnavailable(
+                    "verified Analysis Run bundle provenance is malformed"
+                )
+            analysis_bundle_ref = consistent_ref_binding(
+                "verified Analysis Run bundle",
+                analysis_bundle_ref,
+                {
+                    "reference": analysis_run_id,
+                    "content_hash": bundle_manifest_hash,
+                },
+            )
+            if verified_analysis_bundle is None:
+                verified_analysis_bundle = {
+                    "analysis_run_id": analysis_run_id,
+                    "bundle_manifest_hash": bundle_manifest_hash,
+                }
+            elif (
+                verified_analysis_bundle.get("analysis_run_id") != analysis_run_id
+                or verified_analysis_bundle.get("bundle_manifest_hash")
+                != bundle_manifest_hash
+            ):
+                raise DecisionSupportCurrentnessUnavailable(
+                    "verified Analysis Run bundle bindings disagree"
+                )
+        analysis_bundle_ref = required_binding(
+            analysis_bundle_ref,
+            "verified Analysis Run bundle",
+        )
+        if not isinstance(verified_analysis_bundle, Mapping):
+            raise DecisionSupportCurrentnessUnavailable(
+                "verified Analysis Run bundle binding is unavailable"
+            )
+        verified_analysis_bundle = deepcopy(dict(verified_analysis_bundle))
+        if (
+            verified_analysis_bundle.get("analysis_run_id")
+            != analysis_bundle_ref["reference"]
+            or verified_analysis_bundle.get("bundle_manifest_hash")
+            != analysis_bundle_ref["content_hash"]
+        ):
+            raise DecisionSupportCurrentnessUnavailable(
+                "verified Analysis Run bundle binding disagrees with its reference"
+            )
+        analysis_binding_sources: list[Mapping[str, Any]] = [
+            verified_analysis_bundle
+        ]
+        for source in (terminal_result, identity_binding):
+            source_mapping = _mapping(source)
+            if source_mapping is None:
+                continue
+            for field_name in (
+                "verified_analysis_run_bundle_binding",
+                "analysis_run_provenance",
+            ):
+                candidate = _mapping(source_mapping.get(field_name))
+                if candidate is not None:
+                    analysis_binding_sources.append(candidate)
+
+        def required_analysis_field(
+            field_name: str,
+            *,
+            label: str,
+            valid: Any,
+        ) -> object:
+            values = [
+                source[field_name]
+                for source in analysis_binding_sources
+                if field_name in source
+            ]
+            if not values or any(value != values[0] for value in values[1:]):
+                raise DecisionSupportCurrentnessUnavailable(
+                    f"{label} provenance is unavailable or inconsistent"
+                )
+            if not valid(values[0]):
+                raise DecisionSupportCurrentnessUnavailable(
+                    f"{label} provenance is malformed"
+                )
+            return values[0]
+
+        verified_analysis_bundle["scientific_request_digest"] = required_analysis_field(
+            "scientific_request_digest",
+            label="scientific request digest",
+            valid=lambda value: _is_hash(value),
+        )
+        verified_analysis_bundle[
+            "engine_request_descriptor_hash"
+        ] = required_analysis_field(
+            "engine_request_descriptor_hash",
+            label="canonical engine request descriptor hash",
+            valid=lambda value: _is_hash(value),
+        )
+        verified_analysis_bundle[
+            "producer_schema_identifier"
+        ] = required_analysis_field(
+            "producer_schema_identifier",
+            label="Analysis Run producer schema identifier",
+            valid=lambda value: isinstance(value, str) and bool(value),
+        )
+        verified_analysis_bundle["producer_schema_version"] = required_analysis_field(
+            "producer_schema_version",
+            label="Analysis Run producer schema version",
+            valid=lambda value: isinstance(value, str) and bool(value),
+        )
+
+        def required_explanation_templates(value: object) -> list[dict[str, Any]]:
+            if not isinstance(value, list) or not value:
+                raise DecisionSupportCurrentnessUnavailable(
+                    "deterministic explanation-template provenance is unavailable"
+                )
+            result: list[dict[str, Any]] = []
+            for item in value:
+                template = _mapping(item)
+                if (
+                    template is None
+                    or not isinstance(template.get("identifier"), str)
+                    or not template.get("identifier")
+                    or not isinstance(template.get("version"), str)
+                    or not template.get("version")
+                ):
+                    raise DecisionSupportCurrentnessUnavailable(
+                        "deterministic explanation-template provenance is malformed"
+                    )
+                result.append(deepcopy(dict(template)))
+            return result
+
+        explanation_templates_value = first_present(
+            terminal_result.get("explanation_template_identifiers"),
+            identity_binding.get("explanation_template_identifiers"),
+            selected_candidate.get("explanation_template_identifiers"),
+            option_evaluation.get("explanation_template_identifiers"),
+        )
+        explanation_template_identifiers = required_explanation_templates(
+            explanation_templates_value
+        )
+        library_binding = explicit_or_dependency_binding(
+            "intervention_library_ref_and_hash",
+            "INTERVENTION_LIBRARY_VERSION",
+        )
+        link_binding = explicit_or_dependency_binding(
+            "driver_action_link_ref_and_hash",
+            "DRIVER_ACTION_LINK_VERSION",
+            option_code=str(selected_option_code),
+            trigger_mode=trigger_mode,
+        )
+        if selected_option_code == "ACCEPT_AND_MONITOR":
+            monitoring_trigger_binding = explicit_or_dependency_binding(
+                "monitoring_escalation_trigger_ref_and_hash",
+                "MONITORING_ESCALATION_TRIGGER_VERSION",
+                option_code=str(selected_option_code),
+                trigger_mode=trigger_mode,
+            )
+            monitoring_trigger = monitoring_trigger_binding
+        else:
+            monitoring_trigger = "NOT_APPLICABLE"
+        case_constraint_snapshot_binding = first_present(
+            terminal_result.get("case_constraint_snapshot_ref_and_hash"),
+            identity_binding.get("case_constraint_snapshot_ref_and_hash"),
+        )
+        if case_constraint_snapshot_binding is None:
+            snapshot = _mapping(identity_binding.get("operational_snapshot"))
+            if snapshot is not None:
+                snapshot_reference = snapshot.get("snapshot_id") or snapshot.get("record_id")
+                if snapshot_reference is not None or snapshot.get("content_hash") is not None:
+                    case_constraint_snapshot_binding = {
+                        "reference": snapshot_reference,
+                        "content_hash": snapshot.get("content_hash"),
+                    }
+        case_constraint_snapshot_binding = required_binding(
+            case_constraint_snapshot_binding,
+            "Case Constraint Snapshot",
+        )
+        operational_horizons = terminal_result.get("consumed_operational_horizons", [])
+        governance_selection = governance_selection_ref_and_hash(selection)
+        recommendation_key = _sha256(
+            {
+                "evaluation_series_id": operation["evaluation_series_id"],
+                "evaluation_occurrence_id": operation["evaluation_occurrence_id"],
+                "decision_support_input_digest": decision_support_input_digest,
+                "selected_option_code_and_version": {
+                    "option_code": selected_option_code,
+                    "option_version": selected_option_version,
+                },
+                "selection_basis": "MANAGER_TRADEOFF_SELECTION",
+                "governance_tradeoff_selection_ref_and_hash": governance_selection,
+            }
+        )
+        recommendation: dict[str, Any] = {
+            "schema_identifier": "action-recommendation",
+            "schema_version": "1",
+            "action_recommendation_key": recommendation_key,
+            "occurrence_id": f"action-recommendation:{recommendation_key}",
+            "evaluation_series_id": operation["evaluation_series_id"],
+            "evaluation_occurrence_id": operation["evaluation_occurrence_id"],
+            "decision_support_input_digest": decision_support_input_digest,
+            "selected_option_code": selected_option_code,
+            "selected_option_version": selected_option_version,
+            "selected_option": deepcopy(dict(option_evaluation)),
+            "selected_candidate_ref": candidate_reference(selected_candidate),
+            "selection_basis": "MANAGER_TRADEOFF_SELECTION",
+            "runner_up": None,
+            "presented_alternative": deepcopy(dict(presented_alternative)),
+            "comparison": deepcopy(
+                dict(_mapping(terminal_result.get("comparison")) or {})
+            ),
+            "monitoring_fallback_reason": None,
+            "action_effect_evidence": selected_candidate.get(
+                "action_effect_evidence", "INTERVENTION_EFFECT_NOT_ESTIMATED"
+            ),
+            "provenance": {
+                "evaluation_provenance": deepcopy(
+                    dict(_mapping(terminal_result.get("provenance")) or {})
+                ),
+                "selected_option": deepcopy(
+                    dict(_mapping(selected_candidate.get("provenance")) or {})
+                ),
+                "governance_tradeoff_selection": governance_selection,
+                "currentness_operation_ref_and_hash": {
+                    "reference": f"currentness-operation:{operation['operation_occurrence_id']}",
+                    "content_hash": operation["content_hash"],
+                },
+                "currentness_check_ref_and_hash": {
+                    "reference": f"currentness-check:{check['currentness_check_occurrence_id']}",
+                    "content_hash": check["content_hash"],
+                },
+                "comparison_policy": {
+                    "identifier": "pareto-tradeoff-comparison-policy",
+                    "version": "1",
+                },
+                "explanation_template_identifiers": deepcopy(
+                    explanation_template_identifiers
+                ),
+            },
+            "evaluation_digest": evaluation.get("evaluation_digest")
+            or terminal_result.get("evaluation_digest"),
+            "evaluation_published_at": evaluation.get("evaluation_published_at")
+            or terminal_result.get("evaluation_published_at"),
+            "identity_binding": deepcopy(dict(identity_binding)),
+            "investigation_request_ref_and_hash": investigation_request_binding,
+            "analysis_run_bundle_ref_and_hash": analysis_bundle_ref,
+            "verified_analysis_run_bundle_binding": verified_analysis_bundle,
+            "explanation_template_identifiers": explanation_template_identifiers,
+            "subject_identity": subject_identity,
+            "causal_decision_at": deepcopy(causal_decision_at),
+            "constraints_as_of": deepcopy(constraints_as_of),
+            "upstream_trigger_mode": upstream_trigger_mode,
+            "trigger_mode": trigger_mode,
+            "subject_driver_state": deepcopy(dict(subject_driver_state)),
+            "subject_verdict": deepcopy(dict(subject_verdict))
+            if isinstance(subject_verdict, Mapping)
+            else None,
+            "population_verdict": deepcopy(dict(population_verdict))
+            if isinstance(population_verdict, Mapping)
+            else None,
+            "subject_verdict_ref_and_hash": subject_verdict_binding,
+            "population_verdict_ref_and_hash": population_verdict_binding,
+            "requested_claim_scope": requested_claim_scope,
+            "case_constraint_snapshot_ref_and_hash": case_constraint_snapshot_binding,
+            "constraint_results": deepcopy(
+                terminal_result.get("constraint_results")
+                or _mapping(selected_candidate.get("option_evaluation"))
+                and _mapping(selected_candidate["option_evaluation"]).get(
+                    "constraint_results"
+                )
+                or []
+            ),
+            "assumptions": deepcopy(
+                terminal_result.get("assumptions")
+                or _mapping(selected_candidate.get("option_evaluation"))
+                and _mapping(selected_candidate["option_evaluation"]).get(
+                    "assumptions"
+                )
+            ),
+            "costs": deepcopy(
+                terminal_result.get("costs")
+                or _mapping(selected_candidate.get("option_evaluation"))
+                and _mapping(selected_candidate["option_evaluation"]).get("costs")
+            ),
+            "calculations": deepcopy(
+                terminal_result.get("calculations")
+                or _mapping(selected_candidate.get("option_evaluation"))
+                and _mapping(selected_candidate["option_evaluation"]).get(
+                    "calculations"
+                )
+            ),
+            "intervention_library_ref_and_hash": library_binding,
+            "driver_action_link_ref_and_hash": link_binding,
+            "monitoring_escalation_trigger_ref_and_hash": monitoring_trigger,
+            "monitoring_trigger_ref_and_hash": monitoring_trigger,
+            "monitoring_activated_at": deepcopy(
+                operation["currentness_checked_at"]
+                if selected_option_code == "ACCEPT_AND_MONITOR"
+                else "NOT_APPLICABLE"
+            ),
+            "advice_currentness_dependency_set": deepcopy(
+                currentness_dependencies
+            ),
+            "consumed_operational_horizons": deepcopy(operational_horizons),
+            "advice_valid_through": deepcopy(
+                terminal_result.get("advice_valid_through", "NO_EXPIRY")
+            ),
+            "options": deepcopy(terminal_result.get("options", [])),
+            "evidence_tags": deepcopy(terminal_result.get("evidence_tags", {})),
+            "suppression_reasons": deepcopy(
+                terminal_result.get("suppression_reasons", [])
+            ),
+            "comparison_dimensions": deepcopy(
+                _mapping(terminal_result.get("comparison")) or {}
+            ),
+            "tradeoff": deepcopy(terminal_result.get("tradeoff")),
+            "exact_evaluation_terminal_result": deepcopy(dict(terminal_result)),
+            "governance_tradeoff_selection_ref_and_hash": governance_selection,
+            "creation_currentness_operation_ref_and_hash": {
+                "reference": f"currentness-operation:{operation['operation_occurrence_id']}",
+                "content_hash": operation["content_hash"],
+            },
+            "creation_currentness_check_ref_and_hash": {
+                "reference": f"currentness-check:{check['currentness_check_occurrence_id']}",
+                "content_hash": check["content_hash"],
+            },
+            "authorization": {
+                "state": "NOT_RECORDED",
+                "selection_is_not_authorization": True,
+            },
+            "selection_is_not_authorization": True,
+        }
+        recommendation["content_hash"] = _hash_without_content_hash(recommendation)
+        return recommendation
+
+    def _write_tradeoff_selection_result_locked(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        workspace_id: str,
+        operation: Mapping[str, Any],
+        check: Mapping[str, Any],
+        currentness_outcome: str,
+        evaluation: Mapping[str, Any],
+        terminal_result: Mapping[str, Any],
+        selection: Mapping[str, Any],
+        attempt: Mapping[str, Any],
+        created_at: str,
+    ) -> tuple[dict[str, Any], dict[str, Any] | None, dict[str, Any] | None]:
+        operation_ref = {
+            "reference": f"currentness-operation:{operation['operation_occurrence_id']}",
+            "content_hash": operation["content_hash"],
+        }
+        check_ref = {
+            "reference": f"currentness-check:{check['currentness_check_occurrence_id']}",
+            "content_hash": check["content_hash"],
+        }
+        attempt_ref = {
+            "reference": f"tradeoff-selection-delivery-attempt:{attempt['occurrence_id']}",
+            "content_hash": attempt["content_hash"],
+        }
+        selection_ref = selection_ref_and_hash(selection)
+        selected_candidate_ref = str(attempt["selected_candidate_ref"])
+        selected_candidate_content_hash = _mapping(
+            attempt.get("selected_candidate")
+        )
+        selected_candidate_hash = (
+            None
+            if selected_candidate_content_hash is None
+            else selected_candidate_content_hash.get("content_hash")
+        )
+        selection_result = "TRADEOFF_SELECTION_STALE"
+        selection_claim: dict[str, Any] | None = None
+        recommendation: dict[str, Any] | None = None
+        if currentness_outcome == "CURRENTNESS_PROVEN_AT_CHECK":
+            candidates = self._tradeoff_candidates_locked(
+                terminal_result,
+                evaluation_occurrence_id=str(operation["evaluation_occurrence_id"]),
+            )
+            if terminal_result.get("outcome") != "TRADEOFF_REQUIRES_MANAGER_CHOICE":
+                selection_result = "TRADEOFF_SELECTION_TARGET_NOT_TRADEOFF"
+            elif candidates is None:
+                selection_result = "TRADEOFF_SELECTION_INVALID_CANDIDATE"
+            else:
+                matching = [
+                    candidate
+                    for candidate in candidates
+                    if candidate_matches(candidate, selected_candidate_ref)
+                    and candidate.get("content_hash") == selected_candidate_hash
+                    and candidate == attempt.get("selected_candidate")
+                ]
+                if len(matching) != 1:
+                    selection_result = "TRADEOFF_SELECTION_INVALID_CANDIDATE"
+                else:
+                    selected_candidate = matching[0]
+                    presented_alternative = next(
+                        candidate
+                        for candidate in candidates
+                        if candidate is not selected_candidate
+                    )
+                    existing_claim = self._tradeoff_selection_claim_from_row_locked(
+                        connection,
+                        workspace_id=workspace_id,
+                        evaluation_series_id=str(operation["evaluation_series_id"]),
+                        evaluation_occurrence_id=str(operation["evaluation_occurrence_id"]),
+                    )
+                    if existing_claim is not None:
+                        existing_selection = _mapping(
+                            existing_claim.get("tradeoff_selection_ref_and_hash")
+                        )
+                        if (
+                            existing_selection is not None
+                            and _canonical_json(existing_selection)
+                            == _canonical_json(selection_ref)
+                            and existing_claim.get("selected_candidate_ref")
+                            == selected_candidate_ref
+                        ):
+                            selection_result = "TRADEOFF_SELECTION_ACCEPTED_IDEMPOTENT"
+                            recommendation = _mapping(
+                                existing_claim.get("action_recommendation")
+                            )
+                            selection_claim = existing_claim
+                        else:
+                            selection_result = "TRADEOFF_SELECTION_CONFLICT_ALREADY_RESOLVED"
+                            selection_claim = existing_claim
+                    else:
+                        try:
+                            recommendation = self._selected_action_recommendation(
+                                evaluation=evaluation,
+                                terminal_result=terminal_result,
+                                selected_candidate=selected_candidate,
+                                presented_alternative=presented_alternative,
+                                selection=selection,
+                                operation=operation,
+                                check=check,
+                            )
+                        except DecisionSupportCurrentnessUnavailable:
+                            selection_result = "TRADEOFF_SELECTION_INVALID_CANDIDATE"
+                        else:
+                            claim_key = selection_claim_key_for(
+                                str(operation["evaluation_series_id"]),
+                                str(operation["evaluation_occurrence_id"]),
+                            )
+                            claim_occurrence_id = uuid5(
+                                NAMESPACE_URL,
+                                f"causal-delay-copilot:tradeoff-selection-claim:{claim_key}",
+                            ).hex
+                            claim: dict[str, Any] = {
+                                "schema_identifier": TRADEOFF_SELECTION_CLAIM_SCHEMA_IDENTIFIER,
+                                "schema_version": TRADEOFF_SELECTION_SCHEMA_VERSION,
+                                "selection_claim_occurrence_id": claim_occurrence_id,
+                                "selection_claim_key": claim_key,
+                                "evaluation_series_id": operation["evaluation_series_id"],
+                                "evaluation_occurrence_id": operation["evaluation_occurrence_id"],
+                                "evaluation_digest": operation["evaluation_digest"],
+                                "terminal_result_ref_and_hash": deepcopy(
+                                    operation["terminal_result_ref_and_hash"]
+                                ),
+                                "tradeoff_selection_ref_and_hash": selection_ref,
+                                GOVERNANCE_SELECTION_REFERENCE_FIELD: governance_selection_ref_and_hash(
+                                    selection
+                                ),
+                                "selected_candidate_ref": selected_candidate_ref,
+                                "selected_candidate_content_hash": selected_candidate_hash,
+                                "action_recommendation_key": recommendation[
+                                    "action_recommendation_key"
+                                ],
+                                "action_recommendation_ref_and_hash": {
+                                    "reference": recommendation["occurrence_id"],
+                                    "content_hash": recommendation["content_hash"],
+                                },
+                                "action_recommendation": recommendation,
+                                "creation_currentness_operation_ref_and_hash": operation_ref,
+                                "creation_currentness_check_ref_and_hash": check_ref,
+                                "creation_currentness_checked_at": deepcopy(
+                                    operation["currentness_checked_at"]
+                                ),
+                                "published_at": deepcopy(operation["currentness_checked_at"]),
+                                "selection_is_not_authorization": True,
+                            }
+                            claim["content_hash"] = _hash_without_content_hash(claim)
+                            _audit_locked(
+                                connection,
+                                workspace_id=workspace_id,
+                                occurrence_id=claim_occurrence_id,
+                                idempotency_key=f"decision-support-tradeoff-selection-claim:{claim_key}",
+                                occurrence_kind="DECISION_SUPPORT_TRADEOFF_SELECTION_CLAIM",
+                                outcome_code="TRADEOFF_SELECTION_ACCEPTED",
+                                content_hash=claim["content_hash"],
+                                created_at=created_at,
+                            )
+                            connection.execute(
+                                """
+                                INSERT INTO decision_support_tradeoff_selection_claims (
+                                    selection_claim_occurrence_id, workspace_id,
+                                    selection_claim_key, content_hash,
+                                    evaluation_series_id, evaluation_occurrence_id,
+                                    created_at, payload_json
+                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                """,
+                                (
+                                    claim_occurrence_id,
+                                    workspace_id,
+                                    claim_key,
+                                    claim["content_hash"],
+                                    operation["evaluation_series_id"],
+                                    operation["evaluation_occurrence_id"],
+                                    created_at,
+                                    _canonical_json(claim),
+                                ),
+                            )
+                            selection_result = "TRADEOFF_SELECTION_ACCEPTED"
+                            selection_claim = claim
+
+        result_key = _sha256(
+            {
+                "tradeoff_selection_delivery_attempt_ref_and_hash": attempt_ref,
+                "currentness_operation_ref_and_hash": operation_ref,
+                "currentness_check_ref_and_hash": check_ref,
+                "selection_result": selection_result,
+                "tradeoff_selection_ref_and_hash": selection_ref,
+                "selected_candidate_ref": selected_candidate_ref,
+                "action_recommendation_ref_and_hash_or_null": (
+                    None
+                    if recommendation is None
+                    else {
+                        "reference": recommendation["occurrence_id"],
+                        "content_hash": recommendation["content_hash"],
+                    }
+                ),
+            }
+        )
+        existing_result = connection.execute(
+            """
+            SELECT * FROM decision_support_currentness_consuming_results
+            WHERE workspace_id = ? AND consuming_result_key = ?
+            """,
+            (workspace_id, result_key),
+        ).fetchone()
+        if existing_result is not None:
+            return (
+                self._consuming_result_from_row(existing_result, connection=connection),
+                selection_claim,
+                recommendation,
+            )
+        occurrence_id = uuid5(
+            NAMESPACE_URL,
+            f"causal-delay-copilot:tradeoff-selection-result:{result_key}",
+        ).hex
+        selection_claim_ref = (
+            None
+            if selection_claim is None
+            else {
+                "reference": f"tradeoff-selection-claim:{selection_claim['selection_claim_occurrence_id']}",
+                "content_hash": selection_claim["content_hash"],
+            }
+        )
+        recommendation_ref = (
+            None
+            if recommendation is None
+            else {
+                "reference": recommendation["occurrence_id"],
+                "content_hash": recommendation["content_hash"],
+            }
+        )
+        record: dict[str, Any] = {
+            "schema_identifier": TRADEOFF_SELECTION_RESULT_SCHEMA_IDENTIFIER,
+            "schema_version": TRADEOFF_SELECTION_SCHEMA_VERSION,
+            "consuming_result_occurrence_id": occurrence_id,
+            "consuming_result_key": result_key,
+            "currentness_operation_key": operation["currentness_operation_key"],
+            "operation_kind": operation["operation_kind"],
+            "currentness_operation_ref_and_hash": operation_ref,
+            "currentness_check_ref_and_hash": check_ref,
+            "evaluation_series_id": operation["evaluation_series_id"],
+            "evaluation_occurrence_id": operation["evaluation_occurrence_id"],
+            "evaluation_digest": operation["evaluation_digest"],
+            "terminal_result_ref_and_hash": deepcopy(
+                operation["terminal_result_ref_and_hash"]
+            ),
+            "tradeoff_selection_delivery_attempt_ref_and_hash": attempt_ref,
+            "tradeoff_selection_ref_and_hash": selection_ref,
+            GOVERNANCE_SELECTION_REFERENCE_FIELD: governance_selection_ref_and_hash(
+                selection
+            ),
+            "selected_candidate_ref": selected_candidate_ref,
+            "selected_candidate_content_hash": selected_candidate_hash,
+            "selection_result": selection_result,
+            "selection_claim_ref_and_hash_or_null": selection_claim_ref,
+            "action_recommendation_ref_and_hash_or_null": recommendation_ref,
+            "currentness_outcome": currentness_outcome,
+            "current_as_of": deepcopy(operation["currentness_checked_at"]),
+            "selection_not_authorization": True,
+        }
+        if recommendation is not None:
+            record["action_recommendation"] = recommendation
+        record["content_hash"] = _hash_without_content_hash(record)
+        _audit_locked(
+            connection,
+            workspace_id=workspace_id,
+            occurrence_id=occurrence_id,
+            idempotency_key=f"decision-support-currentness-result:{result_key}",
+            occurrence_kind="DECISION_SUPPORT_CURRENTNESS_CONSUMING_RESULT",
+            outcome_code=selection_result,
+            content_hash=record["content_hash"],
+            created_at=created_at,
+        )
+        connection.execute(
+            """
+            INSERT INTO decision_support_currentness_consuming_results (
+                consuming_result_occurrence_id, workspace_id,
+                consuming_result_key, consuming_result_kind,
+                currentness_operation_key, currentness_check_ref,
+                currentness_check_hash, content_hash, created_at, payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                occurrence_id,
+                workspace_id,
+                result_key,
+                TRADEOFF_SELECTION_RESULT_SCHEMA_IDENTIFIER,
+                operation["currentness_operation_key"],
+                check_ref["reference"],
+                check_ref["content_hash"],
+                record["content_hash"],
+                created_at,
+                _canonical_json(record),
+            ),
+        )
+        return record, selection_claim, recommendation
+
     def _write_currentness_invalidation_locked(
         self,
         connection: sqlite3.Connection,
@@ -3818,6 +5398,54 @@ class DecisionSupportCurrentnessMixin:
             head=deepcopy(dict(terminal_head)),
         )
 
+    def _resolve_bound_selection_advice_locked(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        workspace_id: str,
+        operation: Mapping[str, Any],
+        fields: Mapping[str, Any],
+        terminal_result: Mapping[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Resolve immutable selected advice before validating a downstream consumer."""
+
+        resolved_operation = deepcopy(dict(operation))
+        resolved_terminal = deepcopy(dict(terminal_result))
+        selection_claim_ref = fields["accepted_selection_claim_ref_and_hash_or_null"]
+        if selection_claim_ref is not None:
+            claim = _mapping(resolved_operation.get("accepted_selection_claim"))
+            if claim is None:
+                claim = self._selection_claim_by_ref_locked(
+                    connection,
+                    workspace_id=workspace_id,
+                    reference=str(selection_claim_ref["reference"]),
+                    content_hash=str(selection_claim_ref["content_hash"]),
+                )
+                if claim is None:
+                    raise DecisionSupportCurrentnessUnavailable(
+                        "bound trade-off selection claim is unavailable"
+                    )
+                resolved_operation["accepted_selection_claim"] = claim
+        recommendation_ref = fields["recommendation_ref_and_hash_or_null"]
+        if recommendation_ref is not None:
+            current_recommendation = _recommendation_ref(resolved_terminal)
+            if not _same_ref(current_recommendation, recommendation_ref):
+                recommendation = self._selected_recommendation_by_ref_locked(
+                    connection,
+                    workspace_id=workspace_id,
+                    reference=str(recommendation_ref["reference"]),
+                    content_hash=str(recommendation_ref["content_hash"]),
+                )
+                if recommendation is None:
+                    raise DecisionSupportCurrentnessUnavailable(
+                        "bound selected Action Recommendation is unavailable"
+                    )
+                resolved_terminal["action_recommendation"] = recommendation
+                resolved_terminal["content_hash"] = _hash_without_content_hash(
+                    resolved_terminal
+                )
+        return resolved_operation, resolved_terminal
+
     def _check_currentness_locked(
         self,
         connection: sqlite3.Connection,
@@ -3826,6 +5454,9 @@ class DecisionSupportCurrentnessMixin:
         operation: Mapping[str, Any],
         currentness_context: Mapping[str, Any] | None,
         now: str,
+        selection_acceptance: bool = False,
+        tradeoff_selection: Mapping[str, Any] | None = None,
+        tradeoff_delivery_attempt: Mapping[str, Any] | None = None,
     ) -> StoredCurrentnessResult:
         fields, payload, operation_key, check_key = self._normalize_operation(operation)
         invocation_kind = operation.get("invocation_operation_kind")
@@ -3856,11 +5487,29 @@ class DecisionSupportCurrentnessMixin:
             evaluation_digest=fields["evaluation_digest"],
             terminal_binding=fields["terminal_result_ref_and_hash"],
         )
+        if selection_acceptance and (
+            tradeoff_selection is None or tradeoff_delivery_attempt is None
+        ):
+            raise DecisionSupportCurrentnessUnavailable(
+                "trade-off selection acceptance payload is incomplete"
+            )
+        validation_operation = operation
+        validation_terminal_result = terminal_result
+        if fields["operation_kind"] == "CURRENT_ADVICE_RENDER":
+            validation_operation, validation_terminal_result = (
+                self._resolve_bound_selection_advice_locked(
+                    connection,
+                    workspace_id=workspace_id,
+                    operation=operation,
+                    fields=fields,
+                    terminal_result=terminal_result,
+                )
+            )
         self._validate_bound_operation_locked(
-            operation=operation,
+            operation=validation_operation,
             fields=fields,
             evaluation=evaluation,
-            terminal_result=terminal_result,
+            terminal_result=validation_terminal_result,
         )
         consumed_dependencies: list[dict[str, Any]] = []
         horizons: list[dict[str, Any]] = []
@@ -3972,6 +5621,8 @@ class DecisionSupportCurrentnessMixin:
                 offending = []
                 observed_head = final_head
 
+        selection_claim: dict[str, Any] | None = None
+        action_recommendation: dict[str, Any] | None = None
         connection.execute("SAVEPOINT currentness_publish")
         try:
             check = self._write_currentness_check_locked(
@@ -4006,8 +5657,23 @@ class DecisionSupportCurrentnessMixin:
                         check=check,
                         render_request=render_request,
                         evaluation=evaluation,
-                        terminal_result=terminal_result,
+                        terminal_result=validation_terminal_result,
                         created_at=now,
+                    )
+                elif selection_acceptance:
+                    consuming_result, selection_claim, action_recommendation = (
+                        self._write_tradeoff_selection_result_locked(
+                            connection,
+                            workspace_id=workspace_id,
+                            operation=operation_record,
+                            check=check,
+                            currentness_outcome=outcome,
+                            evaluation=evaluation,
+                            terminal_result=terminal_result,
+                            selection=tradeoff_selection,  # type: ignore[arg-type]
+                            attempt=tradeoff_delivery_attempt,  # type: ignore[arg-type]
+                            created_at=now,
+                        )
                     )
                 else:
                     consuming_result = self._write_currentness_consuming_result_locked(
@@ -4029,6 +5695,36 @@ class DecisionSupportCurrentnessMixin:
                     offending=offending,
                     advice_valid_through=advice_valid_through,
                     created_at=now,
+                )
+                if selection_acceptance:
+                    consuming_result, selection_claim, action_recommendation = (
+                        self._write_tradeoff_selection_result_locked(
+                            connection,
+                            workspace_id=workspace_id,
+                            operation=operation_record,
+                            check=check,
+                            currentness_outcome=outcome,
+                            evaluation=evaluation,
+                            terminal_result=terminal_result,
+                            selection=tradeoff_selection,  # type: ignore[arg-type]
+                            attempt=tradeoff_delivery_attempt,  # type: ignore[arg-type]
+                            created_at=now,
+                        )
+                    )
+            elif selection_acceptance:
+                consuming_result, selection_claim, action_recommendation = (
+                    self._write_tradeoff_selection_result_locked(
+                        connection,
+                        workspace_id=workspace_id,
+                        operation=operation_record,
+                        check=check,
+                        currentness_outcome=outcome,
+                        evaluation=evaluation,
+                        terminal_result=terminal_result,
+                        selection=tradeoff_selection,  # type: ignore[arg-type]
+                        attempt=tradeoff_delivery_attempt,  # type: ignore[arg-type]
+                        created_at=now,
+                    )
                 )
             claim = self._write_terminal_claim_locked(
                 connection,
@@ -4076,7 +5772,24 @@ class DecisionSupportCurrentnessMixin:
             )
             render = None
             consuming_result = None
+            selection_claim = None
+            action_recommendation = None
             invalidation_head = None
+            if selection_acceptance:
+                consuming_result, selection_claim, action_recommendation = (
+                    self._write_tradeoff_selection_result_locked(
+                        connection,
+                        workspace_id=workspace_id,
+                        operation=operation_record,
+                        check=check,
+                        currentness_outcome=outcome,
+                        evaluation=evaluation,
+                        terminal_result=terminal_result,
+                        selection=tradeoff_selection,  # type: ignore[arg-type]
+                        attempt=tradeoff_delivery_attempt,  # type: ignore[arg-type]
+                        created_at=now,
+                    )
+                )
             claim = self._write_terminal_claim_locked(
                 connection,
                 workspace_id=workspace_id,
@@ -4104,6 +5817,8 @@ class DecisionSupportCurrentnessMixin:
             render=render,
             consuming_result=consuming_result,
             head=final_head[1],
+            selection_claim=selection_claim,
+            action_recommendation=action_recommendation,
         )
 
     def _render_request_by_ref_locked(
@@ -4220,11 +5935,20 @@ class DecisionSupportCurrentnessMixin:
                     evaluation_digest=preview_fields["evaluation_digest"],
                     terminal_binding=preview_fields["terminal_result_ref_and_hash"],
                 )
+                preview_operation_for_validation, preview_terminal_for_validation = (
+                    self._resolve_bound_selection_advice_locked(
+                        connection,
+                        workspace_id=workspace_id,
+                        operation=preview_operation,
+                        fields=preview_fields,
+                        terminal_result=preview_terminal,
+                    )
+                )
                 self._validate_bound_operation_locked(
-                    operation=preview_operation,
+                    operation=preview_operation_for_validation,
                     fields=preview_fields,
                     evaluation=preview_evaluation,
-                    terminal_result=preview_terminal,
+                    terminal_result=preview_terminal_for_validation,
                 )
                 request_record = self._claim_render_request_locked(
                     connection,
@@ -4312,6 +6036,326 @@ class DecisionSupportCurrentnessMixin:
             except Exception:
                 connection.rollback()
                 raise
+
+    def accept_tradeoff_selection(
+        self,
+        workspace_id: str,
+        *,
+        delivery_attempt: Mapping[str, Any],
+        selection: Mapping[str, Any] | None = None,
+        currentness_context: Mapping[str, Any] | None = None,
+        now: datetime | None = None,
+    ) -> StoredTradeoffSelectionAcceptance:
+        """Accept one exact manager selection only after an operation-bound head proof."""
+
+        if not isinstance(delivery_attempt, Mapping):
+            raise DecisionSupportCurrentnessUnavailable(
+                "trade-off delivery attempt is invalid"
+            )
+        try:
+            normalized_attempt = normalize_delivery_attempt(delivery_attempt)
+        except TradeoffSelectionContractError as error:
+            raise DecisionSupportCurrentnessUnavailable(
+                "trade-off delivery attempt is invalid"
+            ) from error
+        current_time = now or datetime.now(timezone.utc)
+        authoritative_delivery_time = _timestamp(datetime.now(timezone.utc))
+        normalized_selection: dict[str, Any] | None = None
+        selection_binding_mismatch = False
+        if selection is not None:
+            if not isinstance(selection, Mapping):
+                raise DecisionSupportCurrentnessUnavailable(
+                    "trade-off selection is invalid"
+                )
+            try:
+                normalized_selection = normalize_selection(selection)
+            except TradeoffSelectionContractError as error:
+                raise DecisionSupportCurrentnessUnavailable(
+                    "trade-off selection is invalid"
+                ) from error
+            selection_binding_mismatch = (
+                selection_ref_and_hash(normalized_selection)
+                != normalized_attempt["tradeoff_selection_ref_and_hash"]
+            )
+            if not selection_binding_mismatch:
+                self.publish_tradeoff_selection(  # type: ignore[attr-defined]
+                    workspace_id,
+                    selection=normalized_selection,
+                    now=current_time,
+                )
+
+        def validation_response(
+            *,
+            result: dict[str, Any],
+            attempt: dict[str, Any],
+            replayed: bool,
+        ) -> StoredTradeoffSelectionAcceptance:
+            return StoredTradeoffSelectionAcceptance(
+                result="IDEMPOTENT_REPLAY" if replayed else "CREATED",
+                selection_result=None,
+                validation_result=result,
+                delivery_attempt=attempt,
+                operation=None,
+                currentness=None,
+                terminal_claim=None,
+                selection_claim=None,
+                action_recommendation=None,
+                head=None,
+            )
+
+        with self._lock:  # type: ignore[attr-defined]
+            connection = self._currentness_connection()
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                existing_attempt = self._tradeoff_attempt_by_occurrence_locked(
+                    connection,
+                    workspace_id=workspace_id,
+                    occurrence_id=str(normalized_attempt["occurrence_id"]),
+                )
+                if existing_attempt is not None:
+                    if delivery_attempt_identity(existing_attempt) != delivery_attempt_identity(
+                        normalized_attempt
+                    ):
+                        raise DecisionSupportCurrentnessConflict(
+                            "trade-off delivery attempt occurrence was reused with different content"
+                        )
+                    normalized_attempt = existing_attempt
+                else:
+                    try:
+                        normalized_attempt = seal_delivery_attempt(
+                            normalized_attempt,
+                            authoritative_available_at=authoritative_delivery_time,
+                        )
+                    except TradeoffSelectionContractError as error:
+                        raise DecisionSupportCurrentnessUnavailable(
+                            "trade-off delivery attempt cannot be sealed"
+                        ) from error
+                normalized_attempt = self._persist_tradeoff_delivery_attempt_locked(
+                    connection,
+                    workspace_id=workspace_id,
+                    attempt=normalized_attempt,
+                    created_at=authoritative_delivery_time,
+                )
+                attempt_ref = {
+                    "reference": (
+                        "tradeoff-selection-delivery-attempt:"
+                        f"{normalized_attempt['occurrence_id']}"
+                    ),
+                    "content_hash": normalized_attempt["content_hash"],
+                }
+                validation_key = validation_result_key_for(attempt_ref)
+                existing_validation = connection.execute(
+                    """
+                    SELECT *
+                    FROM decision_support_tradeoff_selection_validation_results
+                    WHERE workspace_id = ? AND validation_result_key = ?
+                    """,
+                    (workspace_id, validation_key),
+                ).fetchone()
+                if existing_validation is not None:
+                    validation = self._tradeoff_selection_validation_from_row_locked(
+                        connection,
+                        workspace_id=workspace_id,
+                        row=existing_validation,
+                        attempt_ref=attempt_ref,
+                    )
+                    connection.commit()
+                    return validation_response(
+                        result=validation,
+                        attempt=normalized_attempt,
+                        replayed=True,
+                    )
+                series = connection.execute(
+                    """
+                    SELECT 1 FROM decision_support_evaluation_series
+                    WHERE workspace_id = ? AND evaluation_series_id = ?
+                    """,
+                    (workspace_id, normalized_attempt["evaluation_series_id"]),
+                ).fetchone()
+                if series is None:
+                    validation = self._write_tradeoff_selection_validation_result_locked(
+                        connection,
+                        workspace_id=workspace_id,
+                        attempt=normalized_attempt,
+                        validation_code="TRADEOFF_SELECTION_SERIES_NOT_FOUND",
+                        evaluation_series_id=None,
+                        selection_ref_and_hash=None,
+                        created_at=_timestamp(current_time),
+                    )
+                    connection.commit()
+                    return validation_response(
+                        result=validation,
+                        attempt=normalized_attempt,
+                        replayed=existing_validation is not None,
+                    )
+
+                selection_ref = normalized_attempt["tradeoff_selection_ref_and_hash"]
+                stored_selection: dict[str, Any] | None = None
+                selection_reference_integrity_error = selection_binding_mismatch
+                if not selection_reference_integrity_error:
+                    try:
+                        stored_selection = self._tradeoff_selection_from_ref_locked(
+                            connection,
+                            workspace_id=workspace_id,
+                            reference=str(selection_ref["reference"]),
+                            content_hash=str(selection_ref["content_hash"]),
+                        )
+                    except DecisionSupportCurrentnessUnavailable:
+                        selection_reference_integrity_error = True
+                selection_mismatch = stored_selection is None
+                if stored_selection is not None:
+                    selection_mismatch = any(
+                        (
+                            stored_selection["evaluation_series_id"]
+                            != normalized_attempt["evaluation_series_id"],
+                            stored_selection["evaluation_occurrence_id"]
+                            != normalized_attempt["evaluation_occurrence_id"],
+                            stored_selection["evaluation_digest"]
+                            != normalized_attempt["evaluation_digest"],
+                            not _same_ref(
+                                stored_selection["terminal_result_ref_and_hash"],
+                                normalized_attempt["terminal_result_ref_and_hash"],
+                            ),
+                            stored_selection["selected_candidate_ref"]
+                            != normalized_attempt["selected_candidate_ref"],
+                            stored_selection["selected_candidate"]
+                            != normalized_attempt["selected_candidate"],
+                            not _selection_time_equal(
+                                stored_selection["available_at"],
+                                normalized_attempt["selection_available_at"],
+                            ),
+                        )
+                    )
+                if selection_reference_integrity_error or selection_mismatch:
+                    safe_governance_ref = None
+                    if stored_selection is not None:
+                        safe_governance_ref = governance_selection_ref_and_hash(
+                            stored_selection
+                        )
+                    validation = self._write_tradeoff_selection_validation_result_locked(
+                        connection,
+                        workspace_id=workspace_id,
+                        attempt=normalized_attempt,
+                        validation_code=(
+                            "TRADEOFF_SELECTION_GOVERNANCE_REFERENCE_INTEGRITY_MISMATCH"
+                        ),
+                        evaluation_series_id=normalized_attempt["evaluation_series_id"],
+                        selection_ref_and_hash=safe_governance_ref,
+                        created_at=_timestamp(current_time),
+                    )
+                    connection.commit()
+                    return validation_response(
+                        result=validation,
+                        attempt=normalized_attempt,
+                        replayed=existing_validation is not None,
+                    )
+
+                authoritative_currentness_checked_at = normalized_attempt["available_at"]
+
+                operation: dict[str, Any] = {
+                    "schema_identifier": CURRENTNESS_OPERATION_SCHEMA_IDENTIFIER,
+                    "schema_version": CURRENTNESS_SCHEMA_VERSION,
+                    "currentness_policy_identifier_and_version": deepcopy(
+                        CURRENTNESS_POLICY_IDENTIFIER_AND_VERSION
+                    ),
+                    "operation_kind": "TRADEOFF_SELECTION_ACCEPTANCE",
+                    "evaluation_series_id": normalized_attempt["evaluation_series_id"],
+                    "evaluation_occurrence_id": normalized_attempt[
+                        "evaluation_occurrence_id"
+                    ],
+                    "evaluation_digest": normalized_attempt["evaluation_digest"],
+                    "terminal_result_ref_and_hash": deepcopy(
+                        normalized_attempt["terminal_result_ref_and_hash"]
+                    ),
+                    "recommendation_ref_and_hash_or_null": None,
+                    "accepted_selection_claim_ref_and_hash_or_null": None,
+                    "operation_payload_ref_and_hash": attempt_ref,
+                    "operation_payload": deepcopy(normalized_attempt),
+                    "currentness_checked_at": authoritative_currentness_checked_at,
+                }
+                fields = _key_fields(operation)
+                operation_key = currentness_operation_key_for(fields)
+                operation_record = _operation_record_for(
+                    fields,
+                    normalized_attempt,
+                    operation_key,
+                )
+                operation.update(
+                    {
+                        "currentness_operation_key": operation_key,
+                        "operation_occurrence_id": operation_record[
+                            "operation_occurrence_id"
+                        ],
+                        "content_hash": operation_record["content_hash"],
+                    }
+                )
+                stored = self._check_currentness_locked(
+                    connection,
+                    workspace_id=workspace_id,
+                    operation=operation,
+                    # Trade-off acceptance is a public mutation boundary. Its
+                    # currentness proof may use only the server-owned authority
+                    # projection, never caller-supplied dependency resolutions.
+                    currentness_context=None,
+                    now=_timestamp(current_time),
+                    selection_acceptance=True,
+                    tradeoff_selection=stored_selection,
+                    tradeoff_delivery_attempt=normalized_attempt,
+                )
+                selection_result = stored.consuming_result
+                if selection_result is None:
+                    raise DecisionSupportCurrentnessUnavailable(
+                        "trade-off selection result is unavailable"
+                    )
+                selection_claim = stored.selection_claim
+                if selection_claim is None:
+                    claim_ref = _mapping(
+                        selection_result.get(
+                            "selection_claim_ref_and_hash_or_null"
+                        )
+                    )
+                    if claim_ref is not None:
+                        selection_claim = self._selection_claim_by_ref_locked(
+                            connection,
+                            workspace_id=workspace_id,
+                            reference=str(claim_ref["reference"]),
+                            content_hash=str(claim_ref["content_hash"]),
+                        )
+                recommendation = stored.action_recommendation or _mapping(
+                    selection_result.get("action_recommendation")
+                )
+                connection.commit()
+                return StoredTradeoffSelectionAcceptance(
+                    result=stored.result,
+                    selection_result=selection_result,
+                    validation_result=None,
+                    delivery_attempt=normalized_attempt,
+                    operation=stored.operation,
+                    currentness=stored.currentness,
+                    terminal_claim=stored.terminal_claim,
+                    selection_claim=selection_claim,
+                    action_recommendation=recommendation,
+                    head=stored.head,
+                )
+            except (
+                DecisionSupportCurrentnessConflict,
+                DecisionSupportCurrentnessOperationMismatch,
+                DecisionSupportCurrentnessUnavailable,
+            ):
+                connection.rollback()
+                raise
+            except sqlite3.IntegrityError as error:
+                connection.rollback()
+                raise DecisionSupportCurrentnessConflict from error
+            except sqlite3.Error as error:
+                connection.rollback()
+                raise DecisionSupportCurrentnessUnavailable from error
+            except Exception:
+                connection.rollback()
+                raise
+
+    accept_tradeoff_selection_safely = accept_tradeoff_selection
+    validate_tradeoff_selection = accept_tradeoff_selection
 
     prove_decision_support_currentness = check_decision_support_currentness
     check_advice_currentness = check_decision_support_currentness

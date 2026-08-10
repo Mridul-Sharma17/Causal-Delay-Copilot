@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -108,6 +109,66 @@ def test_startup_rejects_corrupt_sealed_state_without_repairing_it(
 
     assert failure.value.code is SafeErrorCode.STATE_CORRUPT
     assert quota_path.read_text(encoding="utf-8") == "{}"
+
+
+def test_startup_rejects_pre_tradeoff_storage_version_without_repairing_it(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    settings = local_settings(state_root)
+
+    with start(settings):
+        pass
+
+    manifest_path = state_root / "state_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["schema_version"] = "core-state.v11"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(CoreSafeError) as failure:
+        with start(settings):
+            pass
+
+    assert failure.value.code is SafeErrorCode.STATE_CORRUPT
+    assert json.loads(manifest_path.read_text(encoding="utf-8"))["schema_version"] == (
+        "core-state.v11"
+    )
+
+
+def test_startup_rejects_tampered_tradeoff_storage_metadata_without_repairing_it(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    settings = local_settings(state_root)
+
+    with start(settings):
+        pass
+
+    database_path = state_root / "core.sqlite3"
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            UPDATE core_state_metadata
+            SET metadata_value = ?
+            WHERE metadata_key = 'tradeoff_selection_schema'
+            """,
+            ("tampered",),
+        )
+        connection.commit()
+
+    with pytest.raises(CoreSafeError) as failure:
+        with start(settings):
+            pass
+
+    assert failure.value.code is SafeErrorCode.STATE_CORRUPT
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute(
+            """
+            SELECT metadata_value
+            FROM core_state_metadata
+            WHERE metadata_key = 'tradeoff_selection_schema'
+            """
+        ).fetchone() == ("tampered",)
 
 
 def test_startup_rejects_release_changes_for_an_existing_state_root(

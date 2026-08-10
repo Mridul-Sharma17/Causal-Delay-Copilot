@@ -7,8 +7,10 @@ import {
   getRiskSignals,
   getValidatedReference,
   getWorkspace,
+  acceptTradeoffSelection,
   createOperation,
   publishDecisionBrief,
+  publishTradeoffSelection,
   pollOperation,
   recordBootOccurrence,
   refreshInvestigation,
@@ -43,6 +45,8 @@ import {
   type RefreshInvestigationSnapshot,
   type ReplayResponse,
   type RiskSignal,
+  type TradeoffSelectionDeliveryAttempt,
+  type TradeoffSelectionRecord,
   type SupplierMilestoneOutcome,
   type ValidatedReferenceDelivery,
 } from "./contracts";
@@ -332,6 +336,61 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
+}
+
+function tradeoffCandidateReference(candidate: Record<string, unknown>): string | null {
+  const optionCode = candidate.option_code;
+  const optionVersion = candidate.option_version ?? "1";
+  const candidateIdentity = asRecord(candidate.candidate_reference);
+  const evaluationOccurrenceId = candidateIdentity?.evaluation_occurrence_id;
+  return typeof optionCode === "string" &&
+    typeof optionVersion === "string" &&
+    typeof evaluationOccurrenceId === "string"
+    ? `candidate:${evaluationOccurrenceId}:${optionCode}:${optionVersion}`
+    : null;
+}
+
+function clientOccurrenceId(prefix: string): string | null {
+  const randomUuid = globalThis.crypto?.randomUUID?.();
+  if (typeof randomUuid === "string" && randomUuid) {
+    return `${prefix}-${randomUuid}`;
+  }
+  const randomValues = globalThis.crypto?.getRandomValues;
+  if (typeof randomValues !== "function") {
+    return null;
+  }
+  const bytes = new Uint32Array(4);
+  randomValues.call(globalThis.crypto, bytes);
+  return `${prefix}-${Array.from(bytes)
+    .map((value) => value.toString(16).padStart(8, "0"))
+    .join("")}`;
+}
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalJson).join(",")}]`;
+  }
+  if (typeof value === "object" && value !== null) {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+async function contentHash(value: unknown): Promise<string> {
+  if (globalThis.crypto?.subtle === undefined) {
+    throw new Error("content hashing is unavailable");
+  }
+  const digest = await globalThis.crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(canonicalJson(value)),
+  );
+  return `sha256:${Array.from(new Uint8Array(digest))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("")}`;
 }
 
 const projectionRanges = [
@@ -681,6 +740,13 @@ export function DecisionSupportActionsStage({
   boundary: DecisionSupportBoundary;
   registryInspection: DecisionSupportRegistryInspection | null;
 }) {
+  const [tradeoffSelectionState, setTradeoffSelectionState] = useState<
+    "idle" | "submitting" | "accepted" | "unavailable"
+  >("idle");
+  const [selectedTradeoffCandidateRef, setSelectedTradeoffCandidateRef] = useState<string | null>(
+    null,
+  );
+  const [tradeoffSelectionMessage, setTradeoffSelectionMessage] = useState<string | null>(null);
   const registry: Record<string, unknown> = registryInspection ?? {};
   const releaseBinding =
     typeof registry.release_binding === "object" && registry.release_binding !== null
@@ -825,6 +891,130 @@ export function DecisionSupportActionsStage({
     },
     {},
   );
+  const lifecycleEvaluation = lifecycleHistory.find(
+    (item) =>
+      item.record_type === "evaluation" &&
+      item.evaluation_occurrence_id === boundary.decision_support_evaluation_id,
+  );
+  const tradeoffEvaluationSeriesId =
+    typeof evaluationLifecycle?.evaluation_series_id === "string"
+      ? evaluationLifecycle.evaluation_series_id
+      : null;
+  const tradeoffEvaluationOccurrenceId =
+    typeof boundary.decision_support_evaluation_id === "string"
+      ? boundary.decision_support_evaluation_id
+      : null;
+  const tradeoffEvaluationDigest =
+    typeof lifecycleEvaluation?.evaluation_digest === "string"
+      ? lifecycleEvaluation.evaluation_digest
+      : typeof boundary.evaluation_digest === "string"
+        ? boundary.evaluation_digest
+        : null;
+  const tradeoffTerminalBinding =
+    asRecord(lifecycleEvaluation?.terminal_result_ref_and_hash) ??
+    asRecord(boundary.terminal_result_ref_and_hash);
+  const selectTradeoffCandidate = async (candidate: Record<string, unknown>) => {
+    const candidateRef = tradeoffCandidateReference(candidate);
+    const now = new Date().toISOString();
+    if (
+      candidateRef === null ||
+      tradeoffEvaluationSeriesId === null ||
+      tradeoffEvaluationOccurrenceId === null ||
+      tradeoffEvaluationDigest === null ||
+      tradeoffTerminalBinding === null
+    ) {
+      setTradeoffSelectionState("unavailable");
+      setTradeoffSelectionMessage(
+        "Selection is unavailable because the exact evaluation binding is not present.",
+      );
+      return;
+    }
+    const selectionOccurrenceId = clientOccurrenceId("ui-tradeoff-selection");
+    if (selectionOccurrenceId === null) {
+      setTradeoffSelectionState("unavailable");
+      setTradeoffSelectionMessage(
+        "Selection is unavailable because a cryptographic occurrence identity could not be created.",
+      );
+      return;
+    }
+    setTradeoffSelectionState("submitting");
+    setSelectedTradeoffCandidateRef(candidateRef);
+    setTradeoffSelectionMessage("Recording the Governance & Audit selection and proving currentness…");
+    const selection = {
+      schema_identifier: "tradeoff-selection",
+      schema_version: "1",
+      selection_occurrence_id: selectionOccurrenceId,
+      evaluation_series_id: tradeoffEvaluationSeriesId,
+      evaluation_occurrence_id: tradeoffEvaluationOccurrenceId,
+      evaluation_digest: tradeoffEvaluationDigest,
+      terminal_result_ref_and_hash: tradeoffTerminalBinding,
+      selected_candidate_ref: candidateRef,
+      selected_candidate: candidate,
+      manager_actor_ref: "anonymous-demo-manager",
+      selected_at: now,
+      available_at: now,
+    } as TradeoffSelectionRecord;
+    try {
+      selection.content_hash = await contentHash(selection);
+      selection.governance_tradeoff_selection_ref_and_hash = {
+        reference: `governance-tradeoff-selection:${selection.selection_occurrence_id as string}`,
+        content_hash: selection.content_hash,
+      };
+      const published = await publishTradeoffSelection(selection);
+      const publishedSelection = published.selection;
+      const selectionHash = publishedSelection.content_hash;
+      const publishedSelectionOccurrenceId = publishedSelection.selection_occurrence_id;
+      const deliveryOccurrenceId = clientOccurrenceId("ui-tradeoff-delivery");
+      if (deliveryOccurrenceId === null) {
+        throw new Error("cryptographic delivery occurrence identity is unavailable");
+      }
+      const deliveryAttempt = {
+        schema_identifier: "tradeoff-selection-delivery-attempt",
+        schema_version: "1",
+        occurrence_id: deliveryOccurrenceId,
+        tradeoff_selection_ref_and_hash: {
+          reference: publishedSelectionOccurrenceId,
+          content_hash: selectionHash,
+        },
+        evaluation_series_id: tradeoffEvaluationSeriesId,
+        evaluation_occurrence_id: tradeoffEvaluationOccurrenceId,
+        evaluation_digest: tradeoffEvaluationDigest,
+        terminal_result_ref_and_hash: tradeoffTerminalBinding,
+        selected_candidate_ref: candidateRef,
+        selected_candidate: candidate,
+        selection_available_at: publishedSelection.available_at,
+        delivered_at: now,
+        available_at: now,
+      } as TradeoffSelectionDeliveryAttempt;
+      deliveryAttempt.content_hash = await contentHash(deliveryAttempt);
+      const accepted = await acceptTradeoffSelection(
+        tradeoffEvaluationSeriesId,
+        deliveryAttempt,
+        publishedSelection,
+      );
+      const selectionResult = asRecord(accepted.selection_result);
+      const resultCode = selectionResult?.selection_result;
+      if (
+        resultCode !== "TRADEOFF_SELECTION_ACCEPTED" &&
+        resultCode !== "TRADEOFF_SELECTION_ACCEPTED_IDEMPOTENT"
+      ) {
+        setTradeoffSelectionState("unavailable");
+        setTradeoffSelectionMessage(
+          `Selection was not published: ${String(resultCode ?? "UNAVAILABLE")}. No authorization or action was created.`,
+        );
+        return;
+      }
+      setTradeoffSelectionState("accepted");
+      setTradeoffSelectionMessage(
+        `Candidate ${String(candidate.option_code)} was selected under a proven currentness claim. This records a choice only; it is not authorization and does not execute an action.`,
+      );
+    } catch {
+      setTradeoffSelectionState("unavailable");
+      setTradeoffSelectionMessage(
+        "Selection could not be proven current. No recommendation, authorization, or action was published.",
+      );
+    }
+  };
 
   return (
     <section className="actions-stage" aria-labelledby="actions-stage-heading">
@@ -928,14 +1118,45 @@ export function DecisionSupportActionsStage({
           </span>
           <p>No candidate is recommended; manager choice is required.</p>
           <span>This publication does not imply approval or authorization.</span>
+          <span>
+            Selection records a manager choice only; it does not authorize or execute an action.
+          </span>
+          {tradeoffSelectionMessage !== null && (
+            <span role="status">{tradeoffSelectionMessage}</span>
+          )}
           {tradeoffCandidates.length > 0 && (
             <ol>
               {tradeoffCandidates.map((candidate) => (
                 <li key={String(candidate.candidate_label ?? candidate.option_code)}>
-                  <code>{formatValue(candidate.option_code)}</code>
+                  <div>
+                    <code>{formatValue(candidate.option_code)}</code>
+                    <button
+                      type="button"
+                      onClick={() => void selectTradeoffCandidate(candidate)}
+                      disabled={tradeoffSelectionState === "submitting"}
+                      aria-pressed={
+                        selectedTradeoffCandidateRef === tradeoffCandidateReference(candidate)
+                      }
+                    >
+                      {tradeoffSelectionState === "submitting" &&
+                      selectedTradeoffCandidateRef === tradeoffCandidateReference(candidate)
+                        ? "Proving selection…"
+                        : `Select ${formatValue(candidate.option_code)}`}
+                    </button>
+                  </div>
                   <span>
                     Basis: {formatValue(candidate.candidate_basis ?? candidate.basis)}
                   </span>
+                  <details>
+                    <summary>Inspect unchanged candidate evidence</summary>
+                    <span>
+                      Candidate binding: <code>{formatValue(tradeoffCandidateReference(candidate))}</code>
+                    </span>
+                    <span>
+                      Candidate content hash: <code>{formatValue(candidate.content_hash)}</code>
+                    </span>
+                    <code>{formatValue(candidate.option_evaluation ?? candidate.comparison_profile)}</code>
+                  </details>
                 </li>
               ))}
             </ol>

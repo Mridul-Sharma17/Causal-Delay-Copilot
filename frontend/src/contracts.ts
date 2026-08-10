@@ -119,6 +119,227 @@ export type DecisionSupportBoundary = Record<string, unknown> & {
   consumed_inputs: string[];
 };
 
+export type TradeoffSelectionReference = {
+  reference: string;
+  content_hash: string;
+};
+
+export type TradeoffSelectionCandidateReference = {
+  evaluation_occurrence_id: string;
+  option_code: string;
+  option_version: string;
+};
+
+export type TradeoffSelectionCandidate = Record<string, unknown> & {
+  candidate_reference: TradeoffSelectionCandidateReference;
+  option_code: string;
+  option_version: string;
+  content_hash: string;
+};
+
+export type TradeoffSelectionRecord = Record<string, unknown> & {
+  schema_identifier: "tradeoff-selection";
+  schema_version: "1";
+  selection_occurrence_id: string;
+  evaluation_series_id: string;
+  evaluation_occurrence_id: string;
+  evaluation_digest: string;
+  terminal_result_ref_and_hash: TradeoffSelectionReference;
+  selected_candidate_ref: string;
+  selected_candidate: TradeoffSelectionCandidate;
+  manager_actor_ref: string;
+  selected_at: string | Record<string, unknown>;
+  available_at: string | Record<string, unknown>;
+  governance_tradeoff_selection_ref_and_hash: TradeoffSelectionReference;
+  content_hash: string;
+};
+
+export type TradeoffSelectionDeliveryAttempt = Record<string, unknown> & {
+  schema_identifier: "tradeoff-selection-delivery-attempt";
+  schema_version: "1";
+  occurrence_id: string;
+  tradeoff_selection_ref_and_hash: TradeoffSelectionReference;
+  evaluation_series_id: string;
+  evaluation_occurrence_id: string;
+  evaluation_digest: string;
+  terminal_result_ref_and_hash: TradeoffSelectionReference;
+  selected_candidate_ref: string;
+  selected_candidate: TradeoffSelectionCandidate;
+  selection_available_at: string | Record<string, unknown>;
+  delivered_at: string | Record<string, unknown>;
+  available_at: string | Record<string, unknown>;
+  content_hash: string;
+};
+
+export type TradeoffSelectionPublishResponse = {
+  result: "CREATED" | "IDEMPOTENT_REPLAY";
+  selection: TradeoffSelectionRecord;
+};
+
+export type TradeoffSelectionValidationResult = Record<string, unknown> & {
+  schema_identifier: "tradeoff-selection-validation-result";
+  schema_version: "1";
+  validation_result_occurrence_id: string;
+  validation_result_key: string;
+  validation_code:
+    | "TRADEOFF_SELECTION_SERIES_NOT_FOUND"
+    | "TRADEOFF_SELECTION_GOVERNANCE_REFERENCE_INTEGRITY_MISMATCH";
+  delivery_attempt_ref_and_hash: TradeoffSelectionReference;
+  evaluation_series_id: string | null;
+  governance_tradeoff_selection_ref_and_hash: TradeoffSelectionReference | null;
+  action_recommendation: null;
+  selection_not_authorization: true;
+  content_hash: string;
+};
+
+export type TradeoffSelectionOperation = Record<string, unknown> & {
+  schema_identifier: "advice-currentness-operation";
+  schema_version: "1";
+  operation_occurrence_id: string;
+  currentness_operation_key: string;
+  operation_kind: "TRADEOFF_SELECTION_ACCEPTANCE";
+  evaluation_series_id: string;
+  evaluation_occurrence_id: string;
+  evaluation_digest: string;
+  terminal_result_ref_and_hash: TradeoffSelectionReference;
+  recommendation_ref_and_hash_or_null: TradeoffSelectionReference | null;
+  accepted_selection_claim_ref_and_hash_or_null: TradeoffSelectionReference | null;
+  operation_payload_ref_and_hash: TradeoffSelectionReference;
+  currentness_checked_at: string | Record<string, unknown>;
+  content_hash: string;
+};
+
+export type TradeoffSelectionCurrentness = Record<string, unknown> & {
+  schema_identifier: "advice-currentness-check";
+  schema_version: "1";
+  currentness_check_occurrence_id: string;
+  currentness_check_key: string;
+  currentness_operation_key: string;
+  currentness_operation_ref_and_hash: TradeoffSelectionReference;
+  currentness_outcome:
+    | "CURRENTNESS_PROVEN_AT_CHECK"
+    | "CURRENTNESS_NOT_AUTHORITATIVE_HEAD"
+    | "ADVICE_CURRENTNESS_INVALIDATION";
+  currentness_evidence_digest: string;
+  currentness_checked_at: string | Record<string, unknown>;
+  content_hash: string;
+};
+
+export type TradeoffSelectionTerminalClaim = Record<string, unknown> & {
+  currentness_operation_key: string;
+  currentness_operation_ref_and_hash: TradeoffSelectionReference;
+  currentness_check_key: string;
+  terminal_currentness_ref_and_hash: TradeoffSelectionReference;
+  currentness_outcome: TradeoffSelectionCurrentness["currentness_outcome"];
+  consuming_result_kind: "tradeoff-selection-result" | "NOT_APPLICABLE";
+  consuming_result_ref_and_hash: TradeoffSelectionReference | null;
+  refusal_result_ref_and_hash_or_null: TradeoffSelectionReference | null;
+  installed_invalidation_head_ref_and_hash_or_null: TradeoffSelectionReference | null;
+  terminal_head: TradeoffSelectionHead;
+  content_hash: string;
+};
+
+export type TradeoffSelectionClaim = Record<string, unknown> & {
+  schema_identifier: "tradeoff-selection-claim";
+  schema_version: "1";
+  selection_claim_occurrence_id: string;
+  selection_claim_key: string;
+  evaluation_series_id: string;
+  evaluation_occurrence_id: string;
+  evaluation_digest: string;
+  terminal_result_ref_and_hash: TradeoffSelectionReference;
+  tradeoff_selection_ref_and_hash: TradeoffSelectionReference;
+  governance_tradeoff_selection_ref_and_hash: TradeoffSelectionReference;
+  selected_candidate_ref: string;
+  selected_candidate_content_hash: string;
+  action_recommendation_key: string;
+  action_recommendation_ref_and_hash: TradeoffSelectionReference;
+  creation_currentness_operation_ref_and_hash: TradeoffSelectionReference;
+  creation_currentness_check_ref_and_hash: TradeoffSelectionReference;
+  published_at: string | Record<string, unknown>;
+  selection_is_not_authorization: true;
+  content_hash: string;
+};
+
+export type TradeoffSelectionResult = Record<string, unknown> & {
+  schema_identifier: "tradeoff-selection-result";
+  schema_version: "1";
+  consuming_result_occurrence_id: string;
+  consuming_result_key: string;
+  currentness_operation_key: string;
+  operation_kind: "TRADEOFF_SELECTION_ACCEPTANCE";
+  currentness_operation_ref_and_hash: TradeoffSelectionReference;
+  currentness_check_ref_and_hash: TradeoffSelectionReference;
+  evaluation_series_id: string;
+  evaluation_occurrence_id: string;
+  evaluation_digest: string;
+  terminal_result_ref_and_hash: TradeoffSelectionReference;
+  tradeoff_selection_delivery_attempt_ref_and_hash: TradeoffSelectionReference;
+  tradeoff_selection_ref_and_hash: TradeoffSelectionReference;
+  governance_tradeoff_selection_ref_and_hash: TradeoffSelectionReference;
+  selected_candidate_ref: string;
+  selected_candidate_content_hash: string;
+  selection_result:
+    | "TRADEOFF_SELECTION_STALE"
+    | "TRADEOFF_SELECTION_TARGET_NOT_TRADEOFF"
+    | "TRADEOFF_SELECTION_INVALID_CANDIDATE"
+    | "TRADEOFF_SELECTION_ACCEPTED_IDEMPOTENT"
+    | "TRADEOFF_SELECTION_CONFLICT_ALREADY_RESOLVED"
+    | "TRADEOFF_SELECTION_ACCEPTED";
+  selection_claim_ref_and_hash_or_null: TradeoffSelectionReference | null;
+  action_recommendation_ref_and_hash_or_null: TradeoffSelectionReference | null;
+  currentness_outcome:
+    | "CURRENTNESS_PROVEN_AT_CHECK"
+    | "CURRENTNESS_NOT_AUTHORITATIVE_HEAD"
+    | "ADVICE_CURRENTNESS_INVALIDATION";
+  current_as_of: string | Record<string, unknown>;
+  selection_not_authorization: true;
+  content_hash: string;
+};
+
+export type TradeoffSelectionActionRecommendation = Record<string, unknown> & {
+  schema_identifier: "action-recommendation";
+  schema_version: "1";
+  action_recommendation_key: string;
+  occurrence_id: string;
+  evaluation_series_id: string;
+  evaluation_occurrence_id: string;
+  decision_support_input_digest: string;
+  selected_option_code: string;
+  selected_option_version: string;
+  selected_candidate_ref: string;
+  selection_basis: "MANAGER_TRADEOFF_SELECTION";
+  governance_tradeoff_selection_ref_and_hash: TradeoffSelectionReference;
+  selection_is_not_authorization: true;
+  content_hash: string;
+};
+
+export type TradeoffSelectionHead = Record<string, unknown> & {
+  evaluation_series_id: string;
+  head_kind:
+    | "EVALUATION"
+    | "PERMISSION_INVALIDATION"
+    | "EVIDENCE_INTEGRITY_INVALIDATION"
+    | "ADVICE_CURRENTNESS_INVALIDATION";
+  head_occurrence_id: string;
+  head_digest: string;
+  head_result_hash: string;
+  head_record_ref_and_hash: TradeoffSelectionReference;
+};
+
+export type TradeoffSelectionAcceptanceResponse = {
+  result: "CREATED" | "IDEMPOTENT_REPLAY";
+  selection_result: TradeoffSelectionResult | null;
+  validation_result: TradeoffSelectionValidationResult | null;
+  delivery_attempt: TradeoffSelectionDeliveryAttempt | null;
+  operation: TradeoffSelectionOperation | null;
+  currentness: TradeoffSelectionCurrentness | null;
+  terminal_claim: TradeoffSelectionTerminalClaim | null;
+  selection_claim: TradeoffSelectionClaim | null;
+  action_recommendation: TradeoffSelectionActionRecommendation | null;
+  head: TradeoffSelectionHead | null;
+};
+
 export type DecisionBriefSnapshot = {
   schema_version: "decision-brief-snapshot.v2";
   snapshot_id: string;
@@ -756,6 +977,679 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isNonNegativeInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isInteger(value) && value >= 0;
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
+function parseTradeoffReference(value: unknown): TradeoffSelectionReference {
+  if (
+    !isRecord(value) ||
+    Array.isArray(value) ||
+    !isNonEmptyString(value.reference) ||
+    !isNonEmptyString(value.content_hash)
+  ) {
+    throw new Error("invalid trade-off reference");
+  }
+  return { reference: value.reference, content_hash: value.content_hash };
+}
+
+function parseTradeoffCandidateReference(
+  value: unknown,
+): TradeoffSelectionCandidateReference {
+  if (
+    !isRecord(value) ||
+    Array.isArray(value) ||
+    !isNonEmptyString(value.evaluation_occurrence_id) ||
+    !isNonEmptyString(value.option_code) ||
+    !isNonEmptyString(value.option_version)
+  ) {
+    throw new Error("invalid trade-off candidate reference");
+  }
+  return {
+    evaluation_occurrence_id: value.evaluation_occurrence_id,
+    option_code: value.option_code,
+    option_version: value.option_version,
+  };
+}
+
+function parseTradeoffCandidate(value: unknown): TradeoffSelectionCandidate {
+  if (
+    !isRecord(value) ||
+    Array.isArray(value) ||
+    !isNonEmptyString(value.option_code) ||
+    !isNonEmptyString(value.option_version) ||
+    !isNonEmptyString(value.content_hash)
+  ) {
+    throw new Error("invalid trade-off candidate");
+  }
+  return {
+    ...value,
+    candidate_reference: parseTradeoffCandidateReference(value.candidate_reference),
+    option_code: value.option_code,
+    option_version: value.option_version,
+    content_hash: value.content_hash,
+  };
+}
+
+export function parseTradeoffSelectionRecord(value: unknown): TradeoffSelectionRecord {
+  if (
+    !isRecord(value) ||
+    Array.isArray(value) ||
+    value.schema_identifier !== "tradeoff-selection" ||
+    value.schema_version !== "1" ||
+    !isNonEmptyString(value.selection_occurrence_id) ||
+    !isNonEmptyString(value.evaluation_series_id) ||
+    !isNonEmptyString(value.evaluation_occurrence_id) ||
+    !isNonEmptyString(value.evaluation_digest) ||
+    !isNonEmptyString(value.selected_candidate_ref) ||
+    !isNonEmptyString(value.manager_actor_ref) ||
+    !isNonEmptyString(value.content_hash) ||
+    !(
+      typeof value.selected_at === "string" ||
+      (isRecord(value.selected_at) && !Array.isArray(value.selected_at))
+    ) ||
+    !(
+      typeof value.available_at === "string" ||
+      (isRecord(value.available_at) && !Array.isArray(value.available_at))
+    )
+  ) {
+    throw new Error("invalid trade-off selection");
+  }
+  return {
+    ...value,
+    terminal_result_ref_and_hash: parseTradeoffReference(
+      value.terminal_result_ref_and_hash,
+    ),
+    selected_candidate: parseTradeoffCandidate(value.selected_candidate),
+    governance_tradeoff_selection_ref_and_hash: parseTradeoffReference(
+      value.governance_tradeoff_selection_ref_and_hash,
+    ),
+    schema_identifier: "tradeoff-selection",
+    schema_version: "1",
+    selection_occurrence_id: value.selection_occurrence_id,
+    evaluation_series_id: value.evaluation_series_id,
+    evaluation_occurrence_id: value.evaluation_occurrence_id,
+    evaluation_digest: value.evaluation_digest,
+    selected_candidate_ref: value.selected_candidate_ref,
+    manager_actor_ref: value.manager_actor_ref,
+    selected_at: value.selected_at,
+    available_at: value.available_at,
+    content_hash: value.content_hash,
+  };
+}
+
+export function parseTradeoffSelectionDeliveryAttempt(
+  value: unknown,
+): TradeoffSelectionDeliveryAttempt {
+  if (
+    !isRecord(value) ||
+    Array.isArray(value) ||
+    value.schema_identifier !== "tradeoff-selection-delivery-attempt" ||
+    value.schema_version !== "1" ||
+    !isNonEmptyString(value.occurrence_id) ||
+    !isNonEmptyString(value.evaluation_series_id) ||
+    !isNonEmptyString(value.evaluation_occurrence_id) ||
+    !isNonEmptyString(value.evaluation_digest) ||
+    !isNonEmptyString(value.selected_candidate_ref) ||
+    !isNonEmptyString(value.content_hash) ||
+    !(
+      typeof value.selection_available_at === "string" ||
+      (isRecord(value.selection_available_at) && !Array.isArray(value.selection_available_at))
+    ) ||
+    !(
+      typeof value.delivered_at === "string" ||
+      (isRecord(value.delivered_at) && !Array.isArray(value.delivered_at))
+    ) ||
+    !(
+      typeof value.available_at === "string" ||
+      (isRecord(value.available_at) && !Array.isArray(value.available_at))
+    )
+  ) {
+    throw new Error("invalid trade-off delivery attempt");
+  }
+  return {
+    ...value,
+    tradeoff_selection_ref_and_hash: parseTradeoffReference(
+      value.tradeoff_selection_ref_and_hash,
+    ),
+    terminal_result_ref_and_hash: parseTradeoffReference(
+      value.terminal_result_ref_and_hash,
+    ),
+    selected_candidate: parseTradeoffCandidate(value.selected_candidate),
+    schema_identifier: "tradeoff-selection-delivery-attempt",
+    schema_version: "1",
+    occurrence_id: value.occurrence_id,
+    evaluation_series_id: value.evaluation_series_id,
+    evaluation_occurrence_id: value.evaluation_occurrence_id,
+    evaluation_digest: value.evaluation_digest,
+    selected_candidate_ref: value.selected_candidate_ref,
+    selection_available_at: value.selection_available_at,
+    delivered_at: value.delivered_at,
+    available_at: value.available_at,
+    content_hash: value.content_hash,
+  };
+}
+
+function requiredTradeoffString(
+  record: Record<string, unknown>,
+  key: string,
+  label: string,
+): string {
+  if (!isNonEmptyString(record[key])) {
+    throw new Error(`invalid trade-off ${label}`);
+  }
+  return record[key];
+}
+
+function parseTradeoffTimestamp(
+  value: unknown,
+  label: string,
+): string | Record<string, unknown> {
+  if (
+    typeof value !== "string" &&
+    (!isRecord(value) || Array.isArray(value))
+  ) {
+    throw new Error(`invalid trade-off ${label}`);
+  }
+  return value;
+}
+
+function parseTradeoffResponseRecord(
+  value: unknown,
+  schemaIdentifier: string,
+  label: string,
+): Record<string, unknown> {
+  if (
+    !isRecord(value) ||
+    Array.isArray(value) ||
+    value.schema_identifier !== schemaIdentifier ||
+    value.schema_version !== "1" ||
+    !isNonEmptyString(value.content_hash)
+  ) {
+    throw new Error(`invalid trade-off ${label}`);
+  }
+  return value;
+}
+
+function isTradeoffValidationCode(
+  value: unknown,
+): value is TradeoffSelectionValidationResult["validation_code"] {
+  return (
+    value === "TRADEOFF_SELECTION_SERIES_NOT_FOUND" ||
+    value === "TRADEOFF_SELECTION_GOVERNANCE_REFERENCE_INTEGRITY_MISMATCH"
+  );
+}
+
+function isTradeoffCurrentnessOutcome(
+  value: unknown,
+): value is TradeoffSelectionCurrentness["currentness_outcome"] {
+  return (
+    value === "CURRENTNESS_PROVEN_AT_CHECK" ||
+    value === "CURRENTNESS_NOT_AUTHORITATIVE_HEAD" ||
+    value === "ADVICE_CURRENTNESS_INVALIDATION"
+  );
+}
+
+function isTradeoffSelectionResultCode(
+  value: unknown,
+): value is TradeoffSelectionResult["selection_result"] {
+  return (
+    value === "TRADEOFF_SELECTION_STALE" ||
+    value === "TRADEOFF_SELECTION_TARGET_NOT_TRADEOFF" ||
+    value === "TRADEOFF_SELECTION_INVALID_CANDIDATE" ||
+    value === "TRADEOFF_SELECTION_ACCEPTED_IDEMPOTENT" ||
+    value === "TRADEOFF_SELECTION_CONFLICT_ALREADY_RESOLVED" ||
+    value === "TRADEOFF_SELECTION_ACCEPTED"
+  );
+}
+
+function isTradeoffConsumingResultKind(
+  value: unknown,
+): value is TradeoffSelectionTerminalClaim["consuming_result_kind"] {
+  return value === "tradeoff-selection-result" || value === "NOT_APPLICABLE";
+}
+
+function isTradeoffHeadKind(
+  value: unknown,
+): value is TradeoffSelectionHead["head_kind"] {
+  return (
+    value === "EVALUATION" ||
+    value === "PERMISSION_INVALIDATION" ||
+    value === "EVIDENCE_INTEGRITY_INVALIDATION" ||
+    value === "ADVICE_CURRENTNESS_INVALIDATION"
+  );
+}
+
+function optionalTradeoffReference(
+  record: Record<string, unknown>,
+  key: string,
+): TradeoffSelectionReference | null {
+  if (record[key] === null || record[key] === undefined) {
+    return null;
+  }
+  return parseTradeoffReference(record[key]);
+}
+
+function parseTradeoffSelectionValidationResult(
+  value: unknown,
+): TradeoffSelectionValidationResult {
+  const record = parseTradeoffResponseRecord(
+    value,
+    "tradeoff-selection-validation-result",
+    "validation result",
+  );
+  if (
+    record.selection_not_authorization !== true ||
+    record.action_recommendation !== null ||
+    !isTradeoffValidationCode(record.validation_code)
+  ) {
+    throw new Error("invalid trade-off validation result");
+  }
+  const evaluationSeriesId = record.evaluation_series_id;
+  if (
+    evaluationSeriesId !== null &&
+    !isNonEmptyString(evaluationSeriesId)
+  ) {
+    throw new Error("invalid trade-off validation result");
+  }
+  return {
+    ...record,
+    schema_identifier: "tradeoff-selection-validation-result",
+    schema_version: "1",
+    validation_result_occurrence_id: requiredTradeoffString(
+      record,
+      "validation_result_occurrence_id",
+      "validation result",
+    ),
+    validation_result_key: requiredTradeoffString(
+      record,
+      "validation_result_key",
+      "validation result",
+    ),
+    validation_code: record.validation_code,
+    delivery_attempt_ref_and_hash: parseTradeoffReference(
+      record.delivery_attempt_ref_and_hash,
+    ),
+    evaluation_series_id: evaluationSeriesId,
+    governance_tradeoff_selection_ref_and_hash: optionalTradeoffReference(
+      record,
+      "governance_tradeoff_selection_ref_and_hash",
+    ),
+    action_recommendation: null,
+    selection_not_authorization: true,
+    content_hash: requiredTradeoffString(record, "content_hash", "validation result"),
+  } as TradeoffSelectionValidationResult;
+}
+
+function parseTradeoffSelectionOperation(
+  value: unknown,
+): TradeoffSelectionOperation {
+  const record = parseTradeoffResponseRecord(
+    value,
+    "advice-currentness-operation",
+    "operation",
+  );
+  if (record.operation_kind !== "TRADEOFF_SELECTION_ACCEPTANCE") {
+    throw new Error("invalid trade-off operation");
+  }
+  return {
+    ...record,
+    schema_identifier: "advice-currentness-operation",
+    schema_version: "1",
+    operation_occurrence_id: requiredTradeoffString(record, "operation_occurrence_id", "operation"),
+    currentness_operation_key: requiredTradeoffString(record, "currentness_operation_key", "operation"),
+    operation_kind: "TRADEOFF_SELECTION_ACCEPTANCE",
+    evaluation_series_id: requiredTradeoffString(record, "evaluation_series_id", "operation"),
+    evaluation_occurrence_id: requiredTradeoffString(record, "evaluation_occurrence_id", "operation"),
+    evaluation_digest: requiredTradeoffString(record, "evaluation_digest", "operation"),
+    terminal_result_ref_and_hash: parseTradeoffReference(record.terminal_result_ref_and_hash),
+    recommendation_ref_and_hash_or_null: optionalTradeoffReference(
+      record,
+      "recommendation_ref_and_hash_or_null",
+    ),
+    accepted_selection_claim_ref_and_hash_or_null: optionalTradeoffReference(
+      record,
+      "accepted_selection_claim_ref_and_hash_or_null",
+    ),
+    operation_payload_ref_and_hash: parseTradeoffReference(
+      record.operation_payload_ref_and_hash,
+    ),
+    currentness_checked_at: parseTradeoffTimestamp(
+      record.currentness_checked_at,
+      "operation time",
+    ),
+    content_hash: requiredTradeoffString(record, "content_hash", "operation"),
+  } as TradeoffSelectionOperation;
+}
+
+function parseTradeoffSelectionCurrentness(
+  value: unknown,
+): TradeoffSelectionCurrentness {
+  const record = parseTradeoffResponseRecord(
+    value,
+    "advice-currentness-check",
+    "currentness",
+  );
+  if (!isTradeoffCurrentnessOutcome(record.currentness_outcome)) {
+    throw new Error("invalid trade-off currentness");
+  }
+  return {
+    ...record,
+    schema_identifier: "advice-currentness-check",
+    schema_version: "1",
+    currentness_check_occurrence_id: requiredTradeoffString(
+      record,
+      "currentness_check_occurrence_id",
+      "currentness",
+    ),
+    currentness_check_key: requiredTradeoffString(record, "currentness_check_key", "currentness"),
+    currentness_operation_key: requiredTradeoffString(
+      record,
+      "currentness_operation_key",
+      "currentness",
+    ),
+    currentness_operation_ref_and_hash: parseTradeoffReference(
+      record.currentness_operation_ref_and_hash,
+    ),
+    currentness_outcome: record.currentness_outcome,
+    currentness_evidence_digest: requiredTradeoffString(
+      record,
+      "currentness_evidence_digest",
+      "currentness",
+    ),
+    currentness_checked_at: parseTradeoffTimestamp(
+      record.currentness_checked_at,
+      "currentness time",
+    ),
+    content_hash: requiredTradeoffString(record, "content_hash", "currentness"),
+  } as TradeoffSelectionCurrentness;
+}
+
+function parseTradeoffSelectionTerminalClaim(
+  value: unknown,
+): TradeoffSelectionTerminalClaim {
+  if (!isRecord(value) || Array.isArray(value) || !isNonEmptyString(value.content_hash)) {
+    throw new Error("invalid trade-off terminal claim");
+  }
+  if (
+    !isTradeoffCurrentnessOutcome(value.currentness_outcome) ||
+    !isTradeoffConsumingResultKind(value.consuming_result_kind) ||
+    !isRecord(value.terminal_head) ||
+    Array.isArray(value.terminal_head) ||
+    !isTradeoffHeadKind(value.terminal_head.head_kind)
+  ) {
+    throw new Error("invalid trade-off terminal claim");
+  }
+  return {
+    ...value,
+    currentness_operation_key: requiredTradeoffString(value, "currentness_operation_key", "terminal claim"),
+    currentness_operation_ref_and_hash: parseTradeoffReference(
+      value.currentness_operation_ref_and_hash,
+    ),
+    currentness_check_key: requiredTradeoffString(value, "currentness_check_key", "terminal claim"),
+    terminal_currentness_ref_and_hash: parseTradeoffReference(
+      value.terminal_currentness_ref_and_hash,
+    ),
+    currentness_outcome: value.currentness_outcome,
+    consuming_result_kind: value.consuming_result_kind,
+    consuming_result_ref_and_hash: optionalTradeoffReference(
+      value,
+      "consuming_result_ref_and_hash",
+    ),
+    refusal_result_ref_and_hash_or_null: optionalTradeoffReference(
+      value,
+      "refusal_result_ref_and_hash_or_null",
+    ),
+    installed_invalidation_head_ref_and_hash_or_null: optionalTradeoffReference(
+      value,
+      "installed_invalidation_head_ref_and_hash_or_null",
+    ),
+    terminal_head: parseTradeoffSelectionHead(value.terminal_head),
+    content_hash: requiredTradeoffString(value, "content_hash", "terminal claim"),
+  } as TradeoffSelectionTerminalClaim;
+}
+
+function parseTradeoffSelectionClaim(value: unknown): TradeoffSelectionClaim {
+  const record = parseTradeoffResponseRecord(
+    value,
+    "tradeoff-selection-claim",
+    "selection claim",
+  );
+  if (record.selection_is_not_authorization !== true) {
+    throw new Error("invalid trade-off selection claim");
+  }
+  return {
+    ...record,
+    schema_identifier: "tradeoff-selection-claim",
+    schema_version: "1",
+    selection_claim_occurrence_id: requiredTradeoffString(record, "selection_claim_occurrence_id", "selection claim"),
+    selection_claim_key: requiredTradeoffString(record, "selection_claim_key", "selection claim"),
+    evaluation_series_id: requiredTradeoffString(record, "evaluation_series_id", "selection claim"),
+    evaluation_occurrence_id: requiredTradeoffString(record, "evaluation_occurrence_id", "selection claim"),
+    evaluation_digest: requiredTradeoffString(record, "evaluation_digest", "selection claim"),
+    terminal_result_ref_and_hash: parseTradeoffReference(record.terminal_result_ref_and_hash),
+    tradeoff_selection_ref_and_hash: parseTradeoffReference(record.tradeoff_selection_ref_and_hash),
+    governance_tradeoff_selection_ref_and_hash: parseTradeoffReference(
+      record.governance_tradeoff_selection_ref_and_hash,
+    ),
+    selected_candidate_ref: requiredTradeoffString(record, "selected_candidate_ref", "selection claim"),
+    selected_candidate_content_hash: requiredTradeoffString(
+      record,
+      "selected_candidate_content_hash",
+      "selection claim",
+    ),
+    action_recommendation_key: requiredTradeoffString(record, "action_recommendation_key", "selection claim"),
+    action_recommendation_ref_and_hash: parseTradeoffReference(
+      record.action_recommendation_ref_and_hash,
+    ),
+    creation_currentness_operation_ref_and_hash: parseTradeoffReference(
+      record.creation_currentness_operation_ref_and_hash,
+    ),
+    creation_currentness_check_ref_and_hash: parseTradeoffReference(
+      record.creation_currentness_check_ref_and_hash,
+    ),
+    published_at: parseTradeoffTimestamp(record.published_at, "selection claim time"),
+    selection_is_not_authorization: true,
+    content_hash: requiredTradeoffString(record, "content_hash", "selection claim"),
+  } as TradeoffSelectionClaim;
+}
+
+function parseTradeoffSelectionResult(value: unknown): TradeoffSelectionResult {
+  const record = parseTradeoffResponseRecord(
+    value,
+    "tradeoff-selection-result",
+    "selection result",
+  );
+  if (
+    record.operation_kind !== "TRADEOFF_SELECTION_ACCEPTANCE" ||
+    record.selection_not_authorization !== true ||
+    !isTradeoffSelectionResultCode(record.selection_result) ||
+    !isTradeoffCurrentnessOutcome(record.currentness_outcome)
+  ) {
+    throw new Error("invalid trade-off selection result");
+  }
+  return {
+    ...record,
+    schema_identifier: "tradeoff-selection-result",
+    schema_version: "1",
+    consuming_result_occurrence_id: requiredTradeoffString(record, "consuming_result_occurrence_id", "selection result"),
+    consuming_result_key: requiredTradeoffString(record, "consuming_result_key", "selection result"),
+    currentness_operation_key: requiredTradeoffString(record, "currentness_operation_key", "selection result"),
+    operation_kind: "TRADEOFF_SELECTION_ACCEPTANCE",
+    currentness_operation_ref_and_hash: parseTradeoffReference(record.currentness_operation_ref_and_hash),
+    currentness_check_ref_and_hash: parseTradeoffReference(record.currentness_check_ref_and_hash),
+    evaluation_series_id: requiredTradeoffString(record, "evaluation_series_id", "selection result"),
+    evaluation_occurrence_id: requiredTradeoffString(record, "evaluation_occurrence_id", "selection result"),
+    evaluation_digest: requiredTradeoffString(record, "evaluation_digest", "selection result"),
+    terminal_result_ref_and_hash: parseTradeoffReference(record.terminal_result_ref_and_hash),
+    tradeoff_selection_delivery_attempt_ref_and_hash: parseTradeoffReference(
+      record.tradeoff_selection_delivery_attempt_ref_and_hash,
+    ),
+    tradeoff_selection_ref_and_hash: parseTradeoffReference(record.tradeoff_selection_ref_and_hash),
+    governance_tradeoff_selection_ref_and_hash: parseTradeoffReference(
+      record.governance_tradeoff_selection_ref_and_hash,
+    ),
+    selected_candidate_ref: requiredTradeoffString(record, "selected_candidate_ref", "selection result"),
+    selected_candidate_content_hash: requiredTradeoffString(
+      record,
+      "selected_candidate_content_hash",
+      "selection result",
+    ),
+    selection_result: record.selection_result,
+    selection_claim_ref_and_hash_or_null: optionalTradeoffReference(
+      record,
+      "selection_claim_ref_and_hash_or_null",
+    ),
+    action_recommendation_ref_and_hash_or_null: optionalTradeoffReference(
+      record,
+      "action_recommendation_ref_and_hash_or_null",
+    ),
+    currentness_outcome: record.currentness_outcome,
+    current_as_of: parseTradeoffTimestamp(record.current_as_of, "selection result time"),
+    selection_not_authorization: true,
+    content_hash: requiredTradeoffString(record, "content_hash", "selection result"),
+  } as TradeoffSelectionResult;
+}
+
+function parseTradeoffSelectionActionRecommendation(
+  value: unknown,
+): TradeoffSelectionActionRecommendation {
+  const record = parseTradeoffResponseRecord(
+    value,
+    "action-recommendation",
+    "action recommendation",
+  );
+  if (
+    record.selection_basis !== "MANAGER_TRADEOFF_SELECTION" ||
+    record.selection_is_not_authorization !== true
+  ) {
+    throw new Error("invalid trade-off action recommendation");
+  }
+  return {
+    ...record,
+    schema_identifier: "action-recommendation",
+    schema_version: "1",
+    action_recommendation_key: requiredTradeoffString(record, "action_recommendation_key", "action recommendation"),
+    occurrence_id: requiredTradeoffString(record, "occurrence_id", "action recommendation"),
+    evaluation_series_id: requiredTradeoffString(record, "evaluation_series_id", "action recommendation"),
+    evaluation_occurrence_id: requiredTradeoffString(record, "evaluation_occurrence_id", "action recommendation"),
+    decision_support_input_digest: requiredTradeoffString(
+      record,
+      "decision_support_input_digest",
+      "action recommendation",
+    ),
+    selected_option_code: requiredTradeoffString(record, "selected_option_code", "action recommendation"),
+    selected_option_version: requiredTradeoffString(record, "selected_option_version", "action recommendation"),
+    selected_candidate_ref: requiredTradeoffString(record, "selected_candidate_ref", "action recommendation"),
+    selection_basis: "MANAGER_TRADEOFF_SELECTION",
+    governance_tradeoff_selection_ref_and_hash: parseTradeoffReference(
+      record.governance_tradeoff_selection_ref_and_hash,
+    ),
+    selection_is_not_authorization: true,
+    content_hash: requiredTradeoffString(record, "content_hash", "action recommendation"),
+  } as TradeoffSelectionActionRecommendation;
+}
+
+function parseTradeoffSelectionHead(value: unknown): TradeoffSelectionHead {
+  if (
+    !isRecord(value) ||
+    Array.isArray(value) ||
+    !isTradeoffHeadKind(value.head_kind)
+  ) {
+    throw new Error("invalid trade-off head");
+  }
+  return {
+    ...value,
+    evaluation_series_id: requiredTradeoffString(value, "evaluation_series_id", "head"),
+    head_kind: value.head_kind,
+    head_occurrence_id: requiredTradeoffString(value, "head_occurrence_id", "head"),
+    head_digest: requiredTradeoffString(value, "head_digest", "head"),
+    head_result_hash: requiredTradeoffString(value, "head_result_hash", "head"),
+    head_record_ref_and_hash: parseTradeoffReference(value.head_record_ref_and_hash),
+  } as TradeoffSelectionHead;
+}
+
+function parseOptionalTradeoffResponse<T>(
+  value: unknown,
+  parser: (record: unknown) => T,
+): T | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  return parser(value);
+}
+
+export function parseTradeoffSelectionPublishResponse(
+  value: unknown,
+): TradeoffSelectionPublishResponse {
+  if (
+    !isRecord(value) ||
+    Array.isArray(value) ||
+    (value.result !== "CREATED" && value.result !== "IDEMPOTENT_REPLAY")
+  ) {
+    throw new Error("invalid trade-off publication response");
+  }
+  return {
+    result: value.result,
+    selection: parseTradeoffSelectionRecord(value.selection),
+  };
+}
+
+export function parseTradeoffSelectionAcceptanceResponse(
+  value: unknown,
+): TradeoffSelectionAcceptanceResponse {
+  if (
+    !isRecord(value) ||
+    Array.isArray(value) ||
+    (value.result !== "CREATED" && value.result !== "IDEMPOTENT_REPLAY")
+  ) {
+    throw new Error("invalid trade-off acceptance response");
+  }
+  const hasSelectionResult =
+    value.selection_result !== null && value.selection_result !== undefined;
+  const hasValidationResult =
+    value.validation_result !== null && value.validation_result !== undefined;
+  if (hasSelectionResult === hasValidationResult) {
+    throw new Error("invalid trade-off acceptance terminal result cardinality");
+  }
+  return {
+    result: value.result,
+    selection_result: parseOptionalTradeoffResponse(
+      value.selection_result,
+      parseTradeoffSelectionResult,
+    ),
+    validation_result: parseOptionalTradeoffResponse(
+      value.validation_result,
+      parseTradeoffSelectionValidationResult,
+    ),
+    delivery_attempt:
+      value.delivery_attempt === null
+        ? null
+        : parseTradeoffSelectionDeliveryAttempt(value.delivery_attempt),
+    operation: parseOptionalTradeoffResponse(
+      value.operation,
+      parseTradeoffSelectionOperation,
+    ),
+    currentness: parseOptionalTradeoffResponse(
+      value.currentness,
+      parseTradeoffSelectionCurrentness,
+    ),
+    terminal_claim: parseOptionalTradeoffResponse(
+      value.terminal_claim,
+      parseTradeoffSelectionTerminalClaim,
+    ),
+    selection_claim: parseOptionalTradeoffResponse(
+      value.selection_claim,
+      parseTradeoffSelectionClaim,
+    ),
+    action_recommendation: parseOptionalTradeoffResponse(
+      value.action_recommendation,
+      parseTradeoffSelectionActionRecommendation,
+    ),
+    head: parseOptionalTradeoffResponse(value.head, parseTradeoffSelectionHead),
+  };
 }
 
 function isHealthCode(value: unknown): value is HealthCode {

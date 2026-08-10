@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 HealthState = Literal["live", "ready", "degraded", "unavailable"]
@@ -53,6 +53,9 @@ class AuditOccurrenceRequest(BaseModel):
         "DECISION_SUPPORT_CURRENT_ADVICE_RENDER",
         "DECISION_SUPPORT_CURRENTNESS_INVALIDATION",
         "DECISION_SUPPORT_CURRENTNESS_CONSUMING_RESULT",
+        "GOVERNANCE_TRADEOFF_SELECTION",
+        "DECISION_SUPPORT_TRADEOFF_SELECTION_VALIDATION",
+        "DECISION_SUPPORT_TRADEOFF_SELECTION_CLAIM",
     ]
     outcome_code: Literal[
         "CORE_READY",
@@ -70,6 +73,17 @@ class AuditOccurrenceRequest(BaseModel):
         "TRADEOFF_SELECTION_ACCEPTANCE",
         "MANAGER_AUTHORIZATION",
         "MONITORING_TRIGGER_MATCH",
+        "TRADEOFF_SELECTION_RECORDED",
+        "TRADEOFF_SELECTION_SCHEMA_INVALID",
+        "TRADEOFF_SELECTION_SCHEMA_UNSUPPORTED",
+        "TRADEOFF_SELECTION_SERIES_NOT_FOUND",
+        "TRADEOFF_SELECTION_GOVERNANCE_REFERENCE_INTEGRITY_MISMATCH",
+        "TRADEOFF_SELECTION_STALE",
+        "TRADEOFF_SELECTION_TARGET_NOT_TRADEOFF",
+        "TRADEOFF_SELECTION_INVALID_CANDIDATE",
+        "TRADEOFF_SELECTION_ACCEPTED_IDEMPOTENT",
+        "TRADEOFF_SELECTION_CONFLICT_ALREADY_RESOLVED",
+        "TRADEOFF_SELECTION_ACCEPTED",
     ]
 
 
@@ -115,6 +129,9 @@ class AuditOccurrenceViewResponse(BaseModel):
         "DECISION_SUPPORT_CURRENTNESS_CONSUMING_RESULT",
         "DECISION_SUPPORT_CURRENTNESS_SOURCE_OCCURRENCE",
         "DECISION_SUPPORT_CURRENTNESS_AUTHORITY",
+        "GOVERNANCE_TRADEOFF_SELECTION",
+        "DECISION_SUPPORT_TRADEOFF_SELECTION_VALIDATION",
+        "DECISION_SUPPORT_TRADEOFF_SELECTION_CLAIM",
         "ANALYSIS_RUN_DELIVERY",
         "REFRESH_INVESTIGATION_SNAPSHOT",
     ]
@@ -178,6 +195,17 @@ class AuditOccurrenceViewResponse(BaseModel):
         "MONITORING_TRIGGER_MATCH",
         "CURRENTNESS_SOURCE_REGISTERED",
         "CURRENTNESS_AUTHORITY_UPDATED",
+        "TRADEOFF_SELECTION_RECORDED",
+        "TRADEOFF_SELECTION_SCHEMA_INVALID",
+        "TRADEOFF_SELECTION_SCHEMA_UNSUPPORTED",
+        "TRADEOFF_SELECTION_SERIES_NOT_FOUND",
+        "TRADEOFF_SELECTION_GOVERNANCE_REFERENCE_INTEGRITY_MISMATCH",
+        "TRADEOFF_SELECTION_STALE",
+        "TRADEOFF_SELECTION_TARGET_NOT_TRADEOFF",
+        "TRADEOFF_SELECTION_INVALID_CANDIDATE",
+        "TRADEOFF_SELECTION_ACCEPTED_IDEMPOTENT",
+        "TRADEOFF_SELECTION_CONFLICT_ALREADY_RESOLVED",
+        "TRADEOFF_SELECTION_ACCEPTED",
     ]
     created_at: datetime
     source_role_ceiling: SourceRoleCeilingResponse | None = None
@@ -322,6 +350,293 @@ class DecisionSupportCurrentnessResponse(BaseModel):
     render: dict[str, Any] | None = None
     consuming_result: dict[str, Any] | None = None
     head: dict[str, Any]
+
+
+class TradeoffSelectionCandidateReference(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    evaluation_occurrence_id: str = Field(min_length=1, max_length=256)
+    option_code: str = Field(min_length=1, max_length=128)
+    option_version: str = Field(min_length=1, max_length=64)
+
+
+class TradeoffSelectionCandidate(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    candidate_reference: TradeoffSelectionCandidateReference
+    option_code: str = Field(min_length=1, max_length=128)
+    option_version: str = Field(min_length=1, max_length=64)
+    content_hash: str = Field(min_length=1, max_length=128)
+
+
+class TradeoffSelectionRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_identifier: Literal["tradeoff-selection"]
+    schema_version: Literal["1"]
+    selection_occurrence_id: str = Field(min_length=1, max_length=256)
+    evaluation_series_id: str = Field(min_length=1, max_length=256)
+    evaluation_occurrence_id: str = Field(min_length=1, max_length=256)
+    evaluation_digest: str = Field(min_length=1, max_length=128)
+    terminal_result_ref_and_hash: DecisionSupportReferenceAndHash
+    selected_candidate_ref: str = Field(min_length=1, max_length=512)
+    selected_candidate: TradeoffSelectionCandidate
+    manager_actor_ref: str = Field(min_length=1, max_length=256)
+    selected_at: str | dict[str, Any]
+    available_at: str | dict[str, Any]
+    governance_tradeoff_selection_ref_and_hash: DecisionSupportReferenceAndHash
+    content_hash: str = Field(min_length=1, max_length=128)
+
+
+class TradeoffSelectionDeliveryAttempt(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_identifier: Literal["tradeoff-selection-delivery-attempt"]
+    schema_version: Literal["1"]
+    delivery_attempt_occurrence_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=256,
+    )
+    occurrence_id: str | None = Field(default=None, min_length=1, max_length=256)
+    tradeoff_selection_ref_and_hash: DecisionSupportReferenceAndHash
+    evaluation_series_id: str = Field(min_length=1, max_length=256)
+    evaluation_occurrence_id: str = Field(min_length=1, max_length=256)
+    evaluation_digest: str = Field(min_length=1, max_length=128)
+    terminal_result_ref_and_hash: DecisionSupportReferenceAndHash
+    selected_candidate_ref: str = Field(min_length=1, max_length=512)
+    selected_candidate: TradeoffSelectionCandidate
+    selection_available_at: str | dict[str, Any]
+    delivered_at: str | dict[str, Any]
+    available_at: str | dict[str, Any]
+    content_hash: str = Field(min_length=1, max_length=128)
+
+    @model_validator(mode="after")
+    def require_one_occurrence_id(self) -> "TradeoffSelectionDeliveryAttempt":
+        if (self.delivery_attempt_occurrence_id is None) == (self.occurrence_id is None):
+            raise ValueError(
+                "exactly one delivery attempt occurrence identity is required"
+            )
+        return self
+
+
+class TradeoffSelectionPublishRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    selection: TradeoffSelectionRecord
+
+
+class TradeoffSelectionPublishResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    result: Literal["CREATED", "IDEMPOTENT_REPLAY"]
+    selection: TradeoffSelectionRecord
+
+
+class TradeoffSelectionValidationResultResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    schema_identifier: Literal["tradeoff-selection-validation-result"]
+    schema_version: Literal["1"]
+    validation_result_occurrence_id: str = Field(min_length=1, max_length=256)
+    validation_result_key: str = Field(min_length=1, max_length=128)
+    validation_code: Literal[
+        "TRADEOFF_SELECTION_SERIES_NOT_FOUND",
+        "TRADEOFF_SELECTION_GOVERNANCE_REFERENCE_INTEGRITY_MISMATCH",
+    ]
+    delivery_attempt_ref_and_hash: DecisionSupportReferenceAndHash
+    evaluation_series_id: str | None = None
+    governance_tradeoff_selection_ref_and_hash: DecisionSupportReferenceAndHash | None = None
+    action_recommendation: None = None
+    selection_not_authorization: Literal[True]
+    content_hash: str = Field(min_length=1, max_length=128)
+
+
+class TradeoffSelectionOperationResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    schema_identifier: Literal["advice-currentness-operation"]
+    schema_version: Literal["1"]
+    operation_occurrence_id: str = Field(min_length=1, max_length=256)
+    currentness_operation_key: str = Field(min_length=1, max_length=128)
+    operation_kind: Literal["TRADEOFF_SELECTION_ACCEPTANCE"]
+    evaluation_series_id: str = Field(min_length=1, max_length=256)
+    evaluation_occurrence_id: str = Field(min_length=1, max_length=256)
+    evaluation_digest: str = Field(min_length=1, max_length=128)
+    terminal_result_ref_and_hash: DecisionSupportReferenceAndHash
+    recommendation_ref_and_hash_or_null: DecisionSupportReferenceAndHash | None = None
+    accepted_selection_claim_ref_and_hash_or_null: DecisionSupportReferenceAndHash | None = None
+    operation_payload_ref_and_hash: DecisionSupportReferenceAndHash
+    currentness_checked_at: str | dict[str, Any]
+    content_hash: str = Field(min_length=1, max_length=128)
+
+
+class TradeoffSelectionCurrentnessResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    schema_identifier: Literal["advice-currentness-check"]
+    schema_version: Literal["1"]
+    currentness_check_occurrence_id: str = Field(min_length=1, max_length=256)
+    currentness_check_key: str = Field(min_length=1, max_length=128)
+    currentness_operation_key: str = Field(min_length=1, max_length=128)
+    currentness_operation_ref_and_hash: DecisionSupportReferenceAndHash
+    currentness_outcome: Literal[
+        "CURRENTNESS_PROVEN_AT_CHECK",
+        "CURRENTNESS_NOT_AUTHORITATIVE_HEAD",
+        "ADVICE_CURRENTNESS_INVALIDATION",
+    ]
+    currentness_evidence_digest: str = Field(min_length=1, max_length=128)
+    currentness_checked_at: str | dict[str, Any]
+    content_hash: str = Field(min_length=1, max_length=128)
+
+
+class TradeoffSelectionTerminalClaimResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    currentness_operation_key: str = Field(min_length=1, max_length=128)
+    currentness_operation_ref_and_hash: DecisionSupportReferenceAndHash
+    currentness_check_key: str = Field(min_length=1, max_length=128)
+    terminal_currentness_ref_and_hash: DecisionSupportReferenceAndHash
+    currentness_outcome: Literal[
+        "CURRENTNESS_PROVEN_AT_CHECK",
+        "CURRENTNESS_NOT_AUTHORITATIVE_HEAD",
+        "ADVICE_CURRENTNESS_INVALIDATION",
+    ]
+    consuming_result_kind: Literal["tradeoff-selection-result", "NOT_APPLICABLE"]
+    consuming_result_ref_and_hash: DecisionSupportReferenceAndHash | None = None
+    refusal_result_ref_and_hash_or_null: DecisionSupportReferenceAndHash | None = None
+    installed_invalidation_head_ref_and_hash_or_null: DecisionSupportReferenceAndHash | None = None
+    terminal_head: dict[str, Any]
+    content_hash: str = Field(min_length=1, max_length=128)
+
+
+class TradeoffSelectionClaimResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    schema_identifier: Literal["tradeoff-selection-claim"]
+    schema_version: Literal["1"]
+    selection_claim_occurrence_id: str = Field(min_length=1, max_length=256)
+    selection_claim_key: str = Field(min_length=1, max_length=128)
+    evaluation_series_id: str = Field(min_length=1, max_length=256)
+    evaluation_occurrence_id: str = Field(min_length=1, max_length=256)
+    evaluation_digest: str = Field(min_length=1, max_length=128)
+    terminal_result_ref_and_hash: DecisionSupportReferenceAndHash
+    tradeoff_selection_ref_and_hash: DecisionSupportReferenceAndHash
+    governance_tradeoff_selection_ref_and_hash: DecisionSupportReferenceAndHash
+    selected_candidate_ref: str = Field(min_length=1, max_length=512)
+    selected_candidate_content_hash: str = Field(min_length=1, max_length=128)
+    action_recommendation_key: str = Field(min_length=1, max_length=128)
+    action_recommendation_ref_and_hash: DecisionSupportReferenceAndHash
+    creation_currentness_operation_ref_and_hash: DecisionSupportReferenceAndHash
+    creation_currentness_check_ref_and_hash: DecisionSupportReferenceAndHash
+    published_at: str | dict[str, Any]
+    selection_is_not_authorization: Literal[True]
+    content_hash: str = Field(min_length=1, max_length=128)
+
+
+class TradeoffSelectionResultResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    schema_identifier: Literal["tradeoff-selection-result"]
+    schema_version: Literal["1"]
+    consuming_result_occurrence_id: str = Field(min_length=1, max_length=256)
+    consuming_result_key: str = Field(min_length=1, max_length=128)
+    currentness_operation_key: str = Field(min_length=1, max_length=128)
+    operation_kind: Literal["TRADEOFF_SELECTION_ACCEPTANCE"]
+    currentness_operation_ref_and_hash: DecisionSupportReferenceAndHash
+    currentness_check_ref_and_hash: DecisionSupportReferenceAndHash
+    evaluation_series_id: str = Field(min_length=1, max_length=256)
+    evaluation_occurrence_id: str = Field(min_length=1, max_length=256)
+    evaluation_digest: str = Field(min_length=1, max_length=128)
+    terminal_result_ref_and_hash: DecisionSupportReferenceAndHash
+    tradeoff_selection_delivery_attempt_ref_and_hash: DecisionSupportReferenceAndHash
+    tradeoff_selection_ref_and_hash: DecisionSupportReferenceAndHash
+    governance_tradeoff_selection_ref_and_hash: DecisionSupportReferenceAndHash
+    selected_candidate_ref: str = Field(min_length=1, max_length=512)
+    selected_candidate_content_hash: str = Field(min_length=1, max_length=128)
+    selection_result: Literal[
+        "TRADEOFF_SELECTION_STALE",
+        "TRADEOFF_SELECTION_TARGET_NOT_TRADEOFF",
+        "TRADEOFF_SELECTION_INVALID_CANDIDATE",
+        "TRADEOFF_SELECTION_ACCEPTED_IDEMPOTENT",
+        "TRADEOFF_SELECTION_CONFLICT_ALREADY_RESOLVED",
+        "TRADEOFF_SELECTION_ACCEPTED",
+    ]
+    selection_claim_ref_and_hash_or_null: DecisionSupportReferenceAndHash | None = None
+    action_recommendation_ref_and_hash_or_null: DecisionSupportReferenceAndHash | None = None
+    currentness_outcome: Literal[
+        "CURRENTNESS_PROVEN_AT_CHECK",
+        "CURRENTNESS_NOT_AUTHORITATIVE_HEAD",
+        "ADVICE_CURRENTNESS_INVALIDATION",
+    ]
+    current_as_of: str | dict[str, Any]
+    selection_not_authorization: Literal[True]
+    content_hash: str = Field(min_length=1, max_length=128)
+
+
+class TradeoffSelectionActionRecommendationResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    schema_identifier: Literal["action-recommendation"]
+    schema_version: Literal["1"]
+    action_recommendation_key: str = Field(min_length=1, max_length=128)
+    occurrence_id: str = Field(min_length=1, max_length=256)
+    evaluation_series_id: str = Field(min_length=1, max_length=256)
+    evaluation_occurrence_id: str = Field(min_length=1, max_length=256)
+    decision_support_input_digest: str = Field(min_length=1, max_length=128)
+    selected_option_code: str = Field(min_length=1, max_length=128)
+    selected_option_version: str = Field(min_length=1, max_length=64)
+    selected_candidate_ref: str = Field(min_length=1, max_length=512)
+    selection_basis: Literal["MANAGER_TRADEOFF_SELECTION"]
+    governance_tradeoff_selection_ref_and_hash: DecisionSupportReferenceAndHash
+    selection_is_not_authorization: Literal[True]
+    content_hash: str = Field(min_length=1, max_length=128)
+
+
+class TradeoffSelectionHeadResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    evaluation_series_id: str = Field(min_length=1, max_length=256)
+    head_kind: Literal[
+        "EVALUATION",
+        "PERMISSION_INVALIDATION",
+        "EVIDENCE_INTEGRITY_INVALIDATION",
+        "ADVICE_CURRENTNESS_INVALIDATION",
+    ]
+    head_occurrence_id: str = Field(min_length=1, max_length=256)
+    head_digest: str = Field(min_length=1, max_length=128)
+    head_result_hash: str = Field(min_length=1, max_length=128)
+    head_record_ref_and_hash: DecisionSupportReferenceAndHash
+
+
+class TradeoffSelectionAcceptanceRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    delivery_attempt: TradeoffSelectionDeliveryAttempt
+    selection: TradeoffSelectionRecord | None = None
+
+
+class TradeoffSelectionAcceptanceResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    result: Literal["CREATED", "IDEMPOTENT_REPLAY"]
+    selection_result: TradeoffSelectionResultResponse | None = None
+    validation_result: TradeoffSelectionValidationResultResponse | None = None
+    delivery_attempt: TradeoffSelectionDeliveryAttempt | None = None
+    operation: TradeoffSelectionOperationResponse | None = None
+    currentness: TradeoffSelectionCurrentnessResponse | None = None
+    terminal_claim: TradeoffSelectionTerminalClaimResponse | None = None
+    selection_claim: TradeoffSelectionClaimResponse | None = None
+    action_recommendation: TradeoffSelectionActionRecommendationResponse | None = None
+    head: TradeoffSelectionHeadResponse | None = None
+
+    @model_validator(mode="after")
+    def require_one_terminal_result(self) -> "TradeoffSelectionAcceptanceResponse":
+        if (self.selection_result is None) == (self.validation_result is None):
+            raise ValueError(
+                "exactly one trade-off selection terminal result is required"
+            )
+        return self
 
 
 class ReplayResponse(BaseModel):

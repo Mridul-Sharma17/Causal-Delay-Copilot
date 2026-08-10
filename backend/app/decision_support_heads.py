@@ -921,6 +921,7 @@ class DecisionSupportEvaluationMixin:
         currentness_claims: list[dict[str, Any]] = []
         currentness_renders: list[dict[str, Any]] = []
         currentness_consuming_results: list[dict[str, Any]] = []
+        tradeoff_selection_claims: list[dict[str, Any]] = []
         for operation_row in connection.execute(
             """
             SELECT * FROM decision_support_currentness_operations
@@ -961,6 +962,45 @@ class DecisionSupportEvaluationMixin:
                     currentness_renders.append(render)
                 if consuming_result is not None:
                     currentness_consuming_results.append(consuming_result)
+        for claim_row in connection.execute(
+            """
+            SELECT * FROM decision_support_tradeoff_selection_claims
+            WHERE workspace_id = ? AND evaluation_series_id = ?
+            ORDER BY created_at, selection_claim_occurrence_id
+            """,
+            (workspace_id, evaluation_series_id),
+        ).fetchall():
+            claim = self._tradeoff_selection_claim_from_row_locked(  # type: ignore[attr-defined]
+                connection,
+                workspace_id=workspace_id,
+                evaluation_series_id=str(claim_row["evaluation_series_id"]),
+                evaluation_occurrence_id=str(claim_row["evaluation_occurrence_id"]),
+            )
+            if claim is None:
+                raise DecisionSupportEvaluationUnavailable(
+                    "trade-off selection claim is unavailable"
+                )
+            tradeoff_selection_claims.append(claim)
+            recommendation = _mapping(claim.get("action_recommendation"))
+            if recommendation is not None:
+                history.append(
+                    {
+                        "record_type": "advice",
+                        "record_state": (
+                            "current"
+                            if head["head_kind"] == "EVALUATION"
+                            and head["head_occurrence_id"] == claim["evaluation_occurrence_id"]
+                            else "non-head"
+                        ),
+                        "evaluation_occurrence_id": claim["evaluation_occurrence_id"],
+                        "recommendation_ref_and_hash": {
+                            "reference": recommendation.get("occurrence_id"),
+                            "content_hash": recommendation.get("content_hash"),
+                        },
+                        "selection_basis": recommendation.get("selection_basis"),
+                        "selection_is_not_authorization": True,
+                    }
+                )
         return {
             "schema_version": DECISION_SUPPORT_READ_MODEL_SCHEMA_VERSION,
             "evaluation_series_id": evaluation_series_id,
@@ -977,6 +1017,7 @@ class DecisionSupportEvaluationMixin:
                 "terminal_claims": currentness_claims,
                 "render_results": currentness_renders,
                 "consuming_results": currentness_consuming_results,
+                "tradeoff_selection_claims": tradeoff_selection_claims,
             },
         }
 

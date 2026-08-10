@@ -53,6 +53,10 @@ from .contracts import (
     ReplayResponse,
     RiskSignalListResponse,
     RiskSignalRequest,
+    TradeoffSelectionAcceptanceRequest,
+    TradeoffSelectionAcceptanceResponse,
+    TradeoffSelectionPublishRequest,
+    TradeoffSelectionPublishResponse,
     ValidatedReferenceDeliveryResponse,
     ValidatedReferenceListResponse,
     ValidatedReferenceResponse,
@@ -1178,6 +1182,87 @@ def create_app(
         response = DecisionSupportEvaluationSeriesResponse.model_validate(series)
         return attach_workspace_cookie(
             JSONResponse(status_code=200, content=response.model_dump(mode="json")),
+            resolution,
+        )
+
+    @app.post(
+        "/api/decision-support/tradeoff-selections",
+        response_model=TradeoffSelectionPublishResponse,
+    )
+    async def publish_tradeoff_selection(
+        request_context: Request,
+        request: TradeoffSelectionPublishRequest,
+    ) -> JSONResponse:
+        resolution = resolve_workspace(request_context)
+        stored = core_store.publish_tradeoff_selection(
+            resolution.snapshot.workspace_id,
+            selection=request.selection.model_dump(mode="python"),
+        )
+        response = TradeoffSelectionPublishResponse(
+            result=stored.result,
+            selection=stored.selection,
+        )
+        return attach_workspace_cookie(
+            JSONResponse(
+                status_code=200 if stored.result == "IDEMPOTENT_REPLAY" else 201,
+                content=response.model_dump(mode="json"),
+            ),
+            resolution,
+        )
+
+    @app.post(
+        "/api/decision-support/tradeoff-selections/accept",
+        response_model=TradeoffSelectionAcceptanceResponse,
+    )
+    @app.post(
+        "/api/decision-support/evaluation-series/{evaluation_series_id}/tradeoff-selection/accept",
+        response_model=TradeoffSelectionAcceptanceResponse,
+    )
+    async def accept_tradeoff_selection(
+        request_context: Request,
+        request: TradeoffSelectionAcceptanceRequest,
+        evaluation_series_id: str | None = None,
+    ) -> JSONResponse:
+        delivery_attempt = request.delivery_attempt.model_dump(
+            mode="python",
+            exclude_none=True,
+        )
+        selection = (
+            None
+            if request.selection is None
+            else request.selection.model_dump(mode="python")
+        )
+        attempt_series_id = delivery_attempt.get("evaluation_series_id")
+        if (
+            evaluation_series_id is not None
+            and attempt_series_id != evaluation_series_id
+        ):
+            raise DecisionSupportCurrentnessUnavailable(
+                "trade-off delivery attempt series does not match its route"
+            )
+        resolution = resolve_workspace(request_context)
+        stored = core_store.accept_tradeoff_selection(
+            resolution.snapshot.workspace_id,
+            delivery_attempt=delivery_attempt,
+            selection=selection,
+        )
+        response = TradeoffSelectionAcceptanceResponse(
+            result=stored.result,
+            selection_result=stored.selection_result,
+            validation_result=stored.validation_result,
+            delivery_attempt=stored.delivery_attempt,
+            operation=stored.operation,
+            currentness=stored.currentness,
+            terminal_claim=stored.terminal_claim,
+            selection_claim=stored.selection_claim,
+            action_recommendation=stored.action_recommendation,
+            head=stored.head,
+        )
+        return attach_workspace_cookie(
+            JSONResponse(
+                status_code=200 if stored.result == "IDEMPOTENT_REPLAY" else 201,
+                content=response.model_dump(mode="json"),
+            ),
             resolution,
         )
 

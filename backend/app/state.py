@@ -18,10 +18,11 @@ from .operations import (
 )
 from .risk import ensure_risk_schema
 from .settings import Settings
+from .tradeoff_selection import TRADEOFF_SELECTION_STORAGE_SCHEMA_VERSION
 from .workspace import DEMO_WORKSPACE_SCHEMA_VERSION, ensure_workspace_schema
 
 
-CORE_STATE_SCHEMA_VERSION = "core-state.v11"
+CORE_STATE_SCHEMA_VERSION = "core-state.v12"
 RELEASE_IDENTITY_SCHEMA_VERSION = "release-identity.v1"
 QUOTA_POLICY_SCHEMA_VERSION = "quota-policy.v1"
 VALIDATED_REFERENCE_PARTITION_SCHEMA_VERSION = "validated-reference-partition.v1"
@@ -422,6 +423,7 @@ class StateRoot:
             "intake_lineage_schema": INGESTION_SCHEMA_VERSION,
             "governance_schema": GOVERNANCE_SCHEMA_VERSION,
             "durable_operation_schema": DURABLE_OPERATION_SCHEMA_VERSION,
+            "tradeoff_selection_schema": TRADEOFF_SELECTION_STORAGE_SCHEMA_VERSION,
         }
 
     def _cleanup(

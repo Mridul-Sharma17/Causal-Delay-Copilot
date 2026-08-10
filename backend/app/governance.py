@@ -13,6 +13,10 @@ from .canonical import canonical_json as _canonical_json
 from .canonical import sha256 as _sha256
 from .decision_support import evaluate_decision_support
 from .decision_support_currentness import ensure_currentness_schema
+from .decision_support_currentness import (
+    DecisionSupportCurrentnessConflict,
+    DecisionSupportCurrentnessUnavailable,
+)
 from .decision_support_heads import (
     DecisionSupportEvaluationUnavailable,
     ensure_decision_support_schema,
@@ -26,6 +30,12 @@ from .validity import (
     render_evidence_verdict,
     render_subject_evidence_verdict,
     verify_evidence_verdict,
+)
+from .tradeoff_selection import (
+    TradeoffSelectionContractError,
+    normalize_selection,
+    record_content_hash as _selection_record_content_hash,
+    selection_key_for,
 )
 
 
@@ -85,6 +95,12 @@ class ReplayDecisionBrief:
     snapshot: dict[str, Any] | None
     unresolved_references: list[str]
     recovery_action: str
+
+
+@dataclass(frozen=True, slots=True)
+class StoredTradeoffSelection:
+    result: str
+    selection: dict[str, Any]
 
 
 def _ensure_table(
@@ -847,6 +863,198 @@ def _snapshot_from_row(row: sqlite3.Row) -> dict[str, Any]:
 
 class GovernanceMixin:
     """Immutable Decision Brief publication and semantic replay on Core SQLite."""
+
+    def publish_tradeoff_selection(
+        self,
+        workspace_id: str,
+        *,
+        selection: Mapping[str, Any],
+        now: datetime | None = None,
+    ) -> StoredTradeoffSelection:
+        """Record one immutable manager selection owned by Governance & Audit."""
+
+        try:
+            normalized = normalize_selection(selection)
+        except TradeoffSelectionContractError as error:
+            raise DecisionSupportCurrentnessUnavailable(
+                "trade-off selection envelope is invalid"
+            ) from error
+        selection_key = selection_key_for(normalized)
+        current_time = now or datetime.now(timezone.utc)
+
+        def read_row(row: sqlite3.Row) -> dict[str, Any]:
+            try:
+                payload = json.loads(str(row["payload_json"]))
+                record = normalize_selection(payload)
+            except (TradeoffSelectionContractError, json.JSONDecodeError) as error:
+                raise DecisionSupportCurrentnessUnavailable(
+                    "stored Governance trade-off selection is invalid"
+                ) from error
+            if (
+                record["content_hash"] != str(row["content_hash"])
+                or _selection_record_content_hash(record) != str(row["content_hash"])
+                or record["selection_occurrence_id"]
+                != str(row["selection_occurrence_id"])
+                or selection_key_for(record) != str(row["selection_key"])
+            ):
+                raise DecisionSupportCurrentnessUnavailable(
+                    "stored Governance trade-off selection failed integrity"
+                )
+            return record
+
+        with self._lock:
+            connection = self._connection_or_raise()
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                existing = connection.execute(
+                    """
+                    SELECT * FROM governance_tradeoff_selections
+                    WHERE workspace_id = ? AND selection_occurrence_id = ?
+                    """,
+                    (workspace_id, normalized["selection_occurrence_id"]),
+                ).fetchone()
+                if existing is None:
+                    existing = connection.execute(
+                        """
+                        SELECT * FROM governance_tradeoff_selections
+                        WHERE workspace_id = ? AND selection_key = ?
+                        """,
+                        (workspace_id, selection_key),
+                    ).fetchone()
+                if existing is not None:
+                    stored = read_row(existing)
+                    if stored != normalized:
+                        raise DecisionSupportCurrentnessConflict(
+                            "Governance trade-off selection identity was reused with different content"
+                        )
+                    connection.commit()
+                    return StoredTradeoffSelection("IDEMPOTENT_REPLAY", stored)
+
+                idempotency_key = f"governance-tradeoff-selection:{selection_key}"
+                mutation = self._record_mutation_locked(
+                    workspace_id,
+                    idempotency_key=idempotency_key,
+                    mutation_kind="GOVERNANCE_TRADEOFF_SELECTION",
+                    content_hash=normalized["content_hash"],
+                    terminal_fresh_bundle=False,
+                    now=current_time,
+                )
+                if mutation.replayed:
+                    replay = connection.execute(
+                        """
+                        SELECT * FROM governance_tradeoff_selections
+                        WHERE workspace_id = ? AND selection_key = ?
+                        """,
+                        (workspace_id, selection_key),
+                    ).fetchone()
+                    if replay is None:
+                        raise sqlite3.DatabaseError(
+                            "trade-off selection mutation has no selection row"
+                        )
+                    stored = read_row(replay)
+                    connection.commit()
+                    return StoredTradeoffSelection("IDEMPOTENT_REPLAY", stored)
+
+                created_at = _timestamp(current_time)
+                audit_occurrence_id = (
+                    f"governance-tradeoff-selection:{normalized['selection_occurrence_id']}"
+                )
+                connection.execute(
+                    """
+                    INSERT INTO audit_events (
+                        workspace_id, occurrence_id, idempotency_key,
+                        occurrence_kind, outcome_code, content_hash, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        workspace_id,
+                        audit_occurrence_id,
+                        idempotency_key,
+                        "GOVERNANCE_TRADEOFF_SELECTION",
+                        "TRADEOFF_SELECTION_RECORDED",
+                        normalized["content_hash"],
+                        created_at,
+                    ),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO governance_tradeoff_selections (
+                        selection_occurrence_id, workspace_id, selection_key,
+                        content_hash, evaluation_series_id, evaluation_occurrence_id,
+                        evaluation_digest, terminal_result_ref, terminal_result_hash,
+                        selected_candidate_ref, manager_actor_ref, selected_at,
+                        available_at, created_at, payload_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        normalized["selection_occurrence_id"],
+                        workspace_id,
+                        selection_key,
+                        normalized["content_hash"],
+                        normalized["evaluation_series_id"],
+                        normalized["evaluation_occurrence_id"],
+                        normalized["evaluation_digest"],
+                        normalized["terminal_result_ref_and_hash"]["reference"],
+                        normalized["terminal_result_ref_and_hash"]["content_hash"],
+                        normalized["selected_candidate_ref"],
+                        normalized["manager_actor_ref"],
+                        _canonical_json(normalized["selected_at"]),
+                        _canonical_json(normalized["available_at"]),
+                        created_at,
+                        _canonical_json(normalized),
+                    ),
+                )
+                connection.commit()
+                return StoredTradeoffSelection("CREATED", normalized)
+            except (
+                DecisionSupportCurrentnessConflict,
+                DecisionSupportCurrentnessUnavailable,
+            ):
+                connection.rollback()
+                raise
+            except sqlite3.IntegrityError as error:
+                connection.rollback()
+                raise DecisionSupportCurrentnessConflict from error
+            except sqlite3.Error as error:
+                connection.rollback()
+                raise DecisionSupportCurrentnessUnavailable from error
+            except Exception:
+                connection.rollback()
+                raise
+
+    create_tradeoff_selection = publish_tradeoff_selection
+    record_tradeoff_selection = publish_tradeoff_selection
+
+    def get_tradeoff_selection(
+        self,
+        workspace_id: str,
+        selection_occurrence_id: str,
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            connection = self._connection_or_raise()
+            row = connection.execute(
+                """
+                SELECT * FROM governance_tradeoff_selections
+                WHERE workspace_id = ? AND selection_occurrence_id = ?
+                """,
+                (workspace_id, selection_occurrence_id),
+            ).fetchone()
+            if row is None:
+                return None
+            try:
+                record = normalize_selection(json.loads(str(row["payload_json"])))
+            except (TradeoffSelectionContractError, json.JSONDecodeError) as error:
+                raise DecisionSupportCurrentnessUnavailable(
+                    "stored Governance trade-off selection is invalid"
+                ) from error
+            if (
+                record["content_hash"] != str(row["content_hash"])
+                or _selection_record_content_hash(record) != str(row["content_hash"])
+            ):
+                raise DecisionSupportCurrentnessUnavailable(
+                    "stored Governance trade-off selection failed integrity"
+                )
+            return record
 
     def _get_investigation_request_locked(
         self,
