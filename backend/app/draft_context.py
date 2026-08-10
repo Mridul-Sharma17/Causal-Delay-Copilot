@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from copy import deepcopy
 import json
 import math
@@ -1146,6 +1147,192 @@ def validate_draft_context(context: object) -> dict[str, Any]:
     """Validate and return the only DraftContext shape allowed at provider egress."""
 
     return _validate_context(context)
+
+
+def validate_drafted_artifact(
+    context: object,
+    artifact: object,
+) -> dict[str, Any]:
+    """Validate the checked source artifact before it enters the draft ledger."""
+
+    validated_context = _validate_context(context)
+    mapped = _mapping(artifact)
+    if mapped is None:
+        raise DraftContextUnavailable("drafted artifact is unavailable")
+    record = deepcopy(dict(mapped))
+    if (
+        record.get("schema_identifier") != DRAFTED_ARTEFACT_SCHEMA_IDENTIFIER
+        or record.get("schema_version") != DRAFTED_ARTEFACT_SCHEMA_VERSION
+        or record.get("state") != "UNSENT_PREVIEW"
+        or record.get("authorization_state") != "NOT_AUTHORIZED"
+        or record.get("source") not in {"DETERMINISTIC_ZERO_LLM", GEMINI_CHECKED_SOURCE}
+    ):
+        raise DraftContextUnavailable("drafted artifact schema is unsupported")
+    if not _is_hash(record.get("content_hash")) or _hash_without_content_hash(
+        record
+    ) != record.get("content_hash"):
+        raise DraftContextUnavailable("drafted artifact failed integrity")
+    context_binding = _safe_binding(
+        record.get("draft_context_ref_and_hash"),
+        "drafted artifact context",
+    )
+    if context_binding != {
+        "reference": validated_context["occurrence_id"],
+        "content_hash": validated_context["content_hash"],
+    }:
+        raise DraftContextUnavailable("drafted artifact context binding is invalid")
+    recommendation_binding = _safe_binding(
+        record.get("recommendation_ref_and_hash"),
+        "drafted artifact recommendation",
+    )
+    if recommendation_binding != validated_context["provenance"][
+        "action_recommendation"
+    ]:
+        raise DraftContextUnavailable("drafted artifact recommendation binding is invalid")
+    provenance = _mapping(record.get("provenance"))
+    if provenance is None:
+        raise DraftContextUnavailable("drafted artifact provenance is unavailable")
+    evidence_binding = _safe_binding(
+        provenance.get("evaluation_result"),
+        "drafted artifact evidence",
+    )
+    if evidence_binding is None:
+        raise DraftContextUnavailable("drafted artifact evidence binding is unavailable")
+    if not isinstance(record.get("subject"), str) or not isinstance(
+        record.get("recipient"), str
+    ) or not isinstance(record.get("body"), str):
+        raise DraftContextUnavailable("drafted artifact editable fields are invalid")
+    _safe_text(record["subject"], "drafted artifact subject")
+    _safe_text(record["recipient"], "drafted artifact recipient")
+    _safe_text(record["body"], "drafted artifact body")
+    if not isinstance(record.get("deterministic_sections"), Mapping):
+        raise DraftContextUnavailable("drafted artifact deterministic sections are invalid")
+    deterministic = render_deterministic_draft(validated_context)
+    if record.get("deterministic_sections") != deterministic["deterministic_sections"]:
+        raise DraftContextUnavailable("drafted artifact deterministic sections changed")
+    for code in _privacy_failure_codes(record):
+        raise DraftContextUnavailable(code)
+
+    if record["source"] == "DETERMINISTIC_ZERO_LLM":
+        checker = check_deterministic_draft(validated_context, record)
+    else:
+        provider_sections = _mapping(record.get("provider_sections"))
+        if provider_sections is None:
+            raise DraftContextUnavailable("checked provider sections are unavailable")
+        provider_check = check_gemini_draft_response(
+            validated_context,
+            dict(provider_sections),
+        )
+        if provider_check["state"] != "PASS":
+            raise DraftContextUnavailable("checked provider sections failed integrity")
+        checker = {"state": "PASS"}
+    if checker["state"] != "PASS":
+        raise DraftContextUnavailable("drafted artifact failed its checker")
+    return record
+
+
+def validate_manager_edited_draft(
+    context: object,
+    source_artifact: object,
+    *,
+    subject: str,
+    body: str,
+) -> dict[str, str]:
+    """Validate manager prose while preserving every deterministic fact slot."""
+
+    validated_context = _validate_context(context)
+    source = validate_drafted_artifact(validated_context, source_artifact)
+    if not isinstance(subject, str) or "\n" in subject or "\r" in subject:
+        raise DraftContextUnavailable("edited subject is invalid")
+    if not isinstance(body, str):
+        raise DraftContextUnavailable("edited body is invalid")
+    _safe_text(subject, "edited subject")
+    _safe_text(body, "edited body")
+    recipient = source["recipient"]
+    header = f"Subject: {subject}\nTo: {recipient}\n"
+    if not body.startswith(header):
+        raise DraftContextUnavailable("edited body headers are not bound to the draft")
+    deterministic_sections = _mapping(source.get("deterministic_sections"))
+    deterministic_body = (
+        None
+        if deterministic_sections is None
+        else deterministic_sections.get("connective_body")
+    )
+    if not isinstance(deterministic_body, str) or deterministic_body not in body:
+        raise DraftContextUnavailable("edited body removed deterministic sections")
+    required_phrases = [
+        *validated_context["causal_language"],
+        *validated_context["caveats"],
+        *validated_context["authorization_language"],
+    ]
+    folded_body = body.casefold()
+    if any(phrase.casefold() not in folded_body for phrase in required_phrases):
+        raise DraftContextUnavailable("edited body removed required caveats")
+    allow_list = _mapping(validated_context["allow_list"])
+    if allow_list is None:
+        raise DraftContextUnavailable("edited draft allow-list is unavailable")
+    body_without_dates = _DATE_TOKEN_PATTERN.sub(" ", body)
+    allowed_numbers = {str(value) for value in allow_list.get("number_tokens", [])}
+    if set(_NUMBER_TOKEN_PATTERN.findall(body_without_dates)).difference(
+        allowed_numbers
+    ):
+        raise DraftContextUnavailable("edited body contains unauthorized numbers")
+    allowed_dates = {str(value) for value in allow_list.get("date_tokens", [])}
+    if set(_DATE_TOKEN_PATTERN.findall(body)).difference(allowed_dates):
+        raise DraftContextUnavailable("edited body contains unauthorized dates")
+    allowed_entities = {str(value) for value in allow_list.get("entity_tokens", [])}
+    generic_entities = {
+        "SUBJECT",
+        "TO",
+        "HELLO",
+        "SELECTION",
+        "BASIS",
+        "RECORDED",
+        "FACTS",
+        "EVIDENCE",
+        "TAGS",
+        "DATES",
+        "ALLOW",
+        "LISTED",
+        "NUMERIC",
+        "TOKENS",
+        "NONE",
+        "MANAGER",
+        "REVIEW",
+        "REQUIRED",
+        "THANK",
+        "YOU",
+    }
+    if set(_ENTITY_TOKEN_PATTERN.findall(body)).difference(
+        allowed_entities | generic_entities
+    ):
+        raise DraftContextUnavailable("edited body contains unauthorized entities")
+    source_body = source["body"]
+    source_blocked_actions = Counter(
+        match.casefold() for match in _GEMINI_BLOCKED_ACTION_PATTERN.findall(source_body)
+    )
+    edited_blocked_actions = Counter(
+        match.casefold() for match in _GEMINI_BLOCKED_ACTION_PATTERN.findall(body)
+    )
+    if any(
+        edited_blocked_actions[token] > source_blocked_actions[token]
+        for token in edited_blocked_actions
+    ):
+        raise DraftContextUnavailable("edited body contains a blocked action")
+    source_strong_causal = Counter(
+        phrase
+        for phrase in _GEMINI_STRONG_CAUSAL_PHRASES
+        if phrase in source_body.casefold()
+    )
+    edited_strong_causal = Counter(
+        phrase for phrase in _GEMINI_STRONG_CAUSAL_PHRASES if phrase in folded_body
+    )
+    if any(
+        edited_strong_causal[phrase] > source_strong_causal[phrase]
+        for phrase in edited_strong_causal
+    ):
+        raise DraftContextUnavailable("edited body contains unsupported causal language")
+    return {"subject": subject, "recipient": recipient, "body": body}
 
 
 def build_draft_context(current_advice: object) -> dict[str, Any]:

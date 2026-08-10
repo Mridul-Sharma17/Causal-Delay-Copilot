@@ -323,6 +323,78 @@ code {
   font: 0.875rem/1.5 "IBM Plex Mono", Consolas, monospace;
 }
 
+.draft-governance,
+.draft-editing,
+.draft-disposition {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  background: #ffffff;
+  border: 1px solid #8d8d8d;
+}
+
+.draft-governance h4 {
+  margin: 0;
+  font-size: 1.125rem;
+  font-weight: 500;
+}
+
+.draft-version-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+  margin: 0;
+}
+
+.draft-version-facts div {
+  display: grid;
+  gap: 4px;
+  padding: 8px;
+  background: #f4f4f4;
+}
+
+.draft-version-facts dt {
+  color: #525252;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.draft-version-facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.draft-editing input,
+.draft-editing textarea,
+.draft-disposition textarea,
+.draft-disposition select {
+  width: 100%;
+  padding: 8px;
+  border: 1px solid #8d8d8d;
+  background: #ffffff;
+  font: inherit;
+}
+
+.draft-editing textarea,
+.draft-disposition textarea {
+  resize: vertical;
+}
+
+.draft-disposition {
+  border: 1px solid #8d8d8d;
+}
+
+.draft-disposition legend {
+  padding: 0 4px;
+  font-weight: 600;
+}
+
+.draft-disposition-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .action-evidence ul,
 .action-suppressions ol,
 .action-options ul,

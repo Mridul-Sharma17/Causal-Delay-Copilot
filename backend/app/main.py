@@ -29,6 +29,8 @@ from .contracts import (
     DecisionSupportCurrentnessResponse,
     DraftContextPreviewResponse,
     DraftContextRequest,
+    DraftDispositionRequest,
+    DraftEditRequest,
     DecisionSupportMonitoringMatchRequest,
     DecisionSupportMonitoringObservationRequest,
     DecisionSupportMonitoringObservationResponse,
@@ -71,6 +73,7 @@ from .contracts import (
     WorkspaceResultViewResponse,
 )
 from .errors import SafeErrorCode, WorkspaceRequestError
+from .canonical import sha256
 from .analysis_runs import (
     AnalysisRunRequestError,
     analysis_run_id_for_operation,
@@ -96,6 +99,11 @@ from .decision_support_currentness import (
     DecisionSupportCurrentnessUnavailable,
 )
 from .draft_context import DraftContextUnavailable
+from .drafts import (
+    DraftHeadRace,
+    DraftIdempotencyConflict,
+    DraftStoreUnavailable,
+)
 from .gemini_drafting import GeminiDraftingService, GeminiResponseProvider
 from .monitoring import MonitoringContractError, monitoring_observation_key_for
 from .ingestion import (
@@ -515,6 +523,39 @@ def create_app(
             422,
             "DRAFT_CONTEXT_UNAVAILABLE",
             "RESTORE_A_CURRENT_APPROVED_ACTION_RECOMMENDATION_AND_RETRY",
+        )
+
+    @app.exception_handler(DraftIdempotencyConflict)
+    async def handle_draft_idempotency_conflict(
+        _: Request,
+        __: DraftIdempotencyConflict,
+    ) -> JSONResponse:
+        return _error_response(
+            409,
+            SafeErrorCode.DRAFT_IDEMPOTENCY_CONFLICT.value,
+            "USE_A_NEW_DRAFT_IDEMPOTENCY_KEY",
+        )
+
+    @app.exception_handler(DraftHeadRace)
+    async def handle_draft_head_race(
+        _: Request,
+        __: DraftHeadRace,
+    ) -> JSONResponse:
+        return _error_response(
+            409,
+            SafeErrorCode.DRAFT_HEAD_RACE.value,
+            "READ_THE_CURRENT_DRAFT_HEAD_AND_RETRY",
+        )
+
+    @app.exception_handler(DraftStoreUnavailable)
+    async def handle_draft_store_unavailable(
+        _: Request,
+        __: DraftStoreUnavailable,
+    ) -> JSONResponse:
+        return _error_response(
+            503,
+            SafeErrorCode.DRAFT_UNAVAILABLE.value,
+            "RESTORE_CORE_STATE_AND_RETRY",
         )
 
     @app.exception_handler(DecisionSupportEvaluationConflict)
@@ -1495,9 +1536,39 @@ def create_app(
         request: DraftContextRequest,
     ) -> JSONResponse:
         resolution = resolve_workspace(request_context)
+        request_payload = request.current_advice.model_dump(mode="json")
+        request_hash = sha256(
+            {
+                "kind": "DRAFT_CREATE",
+                "manager_actor_ref": request.manager_actor_ref,
+                "current_advice": request_payload,
+            }
+        )
+        if request.idempotency_key is not None:
+            existing = core_store.find_draft_idempotency(
+                resolution.snapshot.workspace_id,
+                idempotency_key=request.idempotency_key,
+                request_hash=request_hash,
+            )
+            if existing is not None:
+                response = DraftContextPreviewResponse(
+                    schema_identifier="deterministic-draft-preview",
+                    schema_version="1",
+                    state="UNSENT_PREVIEW",
+                    currentness=existing["currentness"],
+                    draft_context=existing["source_context"],
+                    artifact=existing["source_artifact"],
+                    checker=existing["checker"],
+                    drafting=existing["drafting"],
+                    draft=existing,
+                )
+                return attach_workspace_cookie(
+                    JSONResponse(status_code=200, content=response.model_dump(mode="json")),
+                    resolution,
+                )
         stored = core_store.render_current_advice(
             resolution.snapshot.workspace_id,
-            render_request=request.current_advice.model_dump(mode="json"),
+            render_request=request_payload,
         )
         current_advice = {
             "result": stored.result,
@@ -1505,13 +1576,23 @@ def create_app(
             "currentness": stored.currentness,
             "terminal_claim": stored.terminal_claim,
             "render": stored.render,
-            "consuming_result": stored.consuming_result,
+            "consuming_result": getattr(stored, "consuming_result", None),
             "head": stored.head,
         }
         prepared = await app.state.gemini_drafting.prepare(
             current_advice,
             workspace_id=resolution.snapshot.workspace_id,
         )
+        draft = None
+        if request.idempotency_key is not None:
+            draft, _ = core_store.persist_prepared_draft(
+                resolution.snapshot.workspace_id,
+                idempotency_key=request.idempotency_key,
+                request_hash=request_hash,
+                manager_actor_ref=request.manager_actor_ref,
+                available_at=request.current_advice.available_at,
+                prepared=prepared,
+            )
         response = DraftContextPreviewResponse(
             schema_identifier="deterministic-draft-preview",
             schema_version="1",
@@ -1521,9 +1602,85 @@ def create_app(
             artifact=prepared["artifact"],
             checker=prepared["checker"],
             drafting=prepared["drafting"],
+            draft=draft,
         )
         return attach_workspace_cookie(
-            JSONResponse(status_code=200, content=response.model_dump(mode="json")),
+            JSONResponse(
+                status_code=200,
+                content=response.model_dump(mode="json", exclude_none=True),
+            ),
+            resolution,
+        )
+
+    @app.get(
+        "/api/decision-support/drafts/{draft_id}",
+        response_model=dict[str, object],
+    )
+    async def read_decision_support_draft(
+        request_context: Request,
+        draft_id: str,
+    ) -> JSONResponse:
+        resolution = resolve_workspace(request_context)
+        history = core_store.get_draft_history(
+            resolution.snapshot.workspace_id,
+            draft_id,
+        )
+        return attach_workspace_cookie(
+            JSONResponse(status_code=200, content=history),
+            resolution,
+        )
+
+    @app.post(
+        "/api/decision-support/drafts/{draft_id}/edits",
+        response_model=dict[str, object],
+        status_code=201,
+    )
+    async def edit_decision_support_draft(
+        request_context: Request,
+        draft_id: str,
+        request: DraftEditRequest,
+    ) -> JSONResponse:
+        resolution = resolve_workspace(request_context)
+        draft, _ = core_store.edit_draft(
+            resolution.snapshot.workspace_id,
+            draft_id,
+            idempotency_key=request.idempotency_key,
+            manager_actor_ref=request.manager_actor_ref,
+            expected_head=request.expected_head_ref_and_hash.model_dump(),
+            subject=request.subject,
+            body=request.body,
+        )
+        return attach_workspace_cookie(
+            JSONResponse(status_code=201, content={"draft": draft}),
+            resolution,
+        )
+
+    @app.post(
+        "/api/decision-support/drafts/{draft_id}/dispositions",
+        response_model=dict[str, object],
+        status_code=201,
+    )
+    async def dispose_decision_support_draft(
+        request_context: Request,
+        draft_id: str,
+        request: DraftDispositionRequest,
+    ) -> JSONResponse:
+        resolution = resolve_workspace(request_context)
+        draft, _ = core_store.dispose_draft(
+            resolution.snapshot.workspace_id,
+            draft_id,
+            idempotency_key=request.idempotency_key,
+            manager_actor_ref=request.manager_actor_ref,
+            expected_head=request.expected_head_ref_and_hash.model_dump(),
+            disposition=request.disposition,
+            rejection_reason=(
+                request.rejection_reason.model_dump()
+                if request.rejection_reason is not None
+                else None
+            ),
+        )
+        return attach_workspace_cookie(
+            JSONResponse(status_code=201, content={"draft": draft}),
             resolution,
         )
 

@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from .audit import ensure_audit_schema
 from .canonical import canonical_json as _canonical_json
+from .drafts import DRAFT_STORAGE_SCHEMA_VERSION, ensure_draft_schema
 from .errors import CoreSafeError, SafeErrorCode
 from .governance import GOVERNANCE_SCHEMA_VERSION, ensure_governance_schema
 from .ingestion import INGESTION_SCHEMA_VERSION, ensure_ingestion_schema
@@ -22,7 +23,7 @@ from .tradeoff_selection import TRADEOFF_SELECTION_STORAGE_SCHEMA_VERSION
 from .workspace import DEMO_WORKSPACE_SCHEMA_VERSION, ensure_workspace_schema
 
 
-CORE_STATE_SCHEMA_VERSION = "core-state.v12"
+CORE_STATE_SCHEMA_VERSION = "core-state.v13"
 RELEASE_IDENTITY_SCHEMA_VERSION = "release-identity.v1"
 QUOTA_POLICY_SCHEMA_VERSION = "quota-policy.v1"
 VALIDATED_REFERENCE_PARTITION_SCHEMA_VERSION = "validated-reference-partition.v1"
@@ -241,6 +242,7 @@ class StateRoot:
             ensure_risk_schema(connection, create=True)
             ensure_governance_schema(connection, create=True)
             ensure_operation_schema(connection, create=True)
+            ensure_draft_schema(connection, create=True)
             _ensure_table(
                 connection,
                 "core_state_metadata",
@@ -353,6 +355,7 @@ class StateRoot:
             ensure_risk_schema(connection, create=False)
             ensure_governance_schema(connection, create=False)
             ensure_operation_schema(connection, create=False)
+            ensure_draft_schema(connection, create=False)
             _ensure_table(
                 connection,
                 "core_state_metadata",
@@ -424,6 +427,7 @@ class StateRoot:
             "governance_schema": GOVERNANCE_SCHEMA_VERSION,
             "durable_operation_schema": DURABLE_OPERATION_SCHEMA_VERSION,
             "tradeoff_selection_schema": TRADEOFF_SELECTION_STORAGE_SCHEMA_VERSION,
+            "draft_storage_schema": DRAFT_STORAGE_SCHEMA_VERSION,
         }
 
     def _cleanup(

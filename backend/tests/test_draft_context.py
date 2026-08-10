@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 import json
+import sqlite3
 from types import SimpleNamespace
 
 import pytest
@@ -834,3 +835,247 @@ async def test_gemini_provider_rejects_unvalidated_context_before_egress() -> No
         await GeminiProvider(settings).generate(
             {"raw_rows": [{"private_supplier_detail": "do-not-send"}]}
         )
+
+
+def _current_advice_render_request() -> dict[str, object]:
+    current_advice = _current_advice()
+    render = current_advice["render"]
+    assert isinstance(render, dict)
+    recommendation = render["recommendation_ref_and_hash_or_null"]
+    assert isinstance(recommendation, dict)
+    return {
+        "schema_identifier": "current-advice-render-request",
+        "schema_version": "1",
+        "render_mode": "CURRENT_ADVICE",
+        "evaluation_series_id": "series-1",
+        "evaluation_occurrence_id": "evaluation-1",
+        "evaluation_digest": "sha256:" + "1" * 64,
+        "terminal_result_ref_and_hash": render["evaluation_result_ref_and_hash"],
+        "advice_chain_kind": "IMMEDIATE_EVALUATION_RECOMMENDATION",
+        "recommendation_ref_and_hash_or_null": recommendation,
+        "accepted_selection_claim_ref_and_hash_or_null": None,
+        "advice_chain_published_at": "2026-08-09T10:02:00+00:00",
+        "requested_at": "2026-08-09T10:03:00+00:00",
+        "available_at": "2026-08-09T10:03:00+00:00",
+    }
+
+
+def _draft_test_app(tmp_path, monkeypatch):
+    app = create_app(Settings(database_path=tmp_path / "core.sqlite3"))
+    stored_payload = _current_advice()
+
+    def fake_render_current_advice(_workspace_id, *, render_request):
+        assert render_request["render_mode"] == "CURRENT_ADVICE"
+        return SimpleNamespace(**deepcopy(stored_payload))
+
+    monkeypatch.setattr(
+        app.state.audit_store,
+        "render_current_advice",
+        fake_render_current_advice,
+    )
+    return app
+
+
+def _create_persisted_draft(client) -> dict[str, object]:
+    response = client.post(
+        "/api/decision-support/draft-context",
+        json={
+            "idempotency_key": "draft-create-1",
+            "manager_actor_ref": "anonymous-demo-manager",
+            "current_advice": _current_advice_render_request(),
+        },
+    )
+    assert response.status_code == 200
+    return response.json()
+
+
+def test_persisted_draft_versions_are_immutable_and_exactly_idempotent(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    app = _draft_test_app(tmp_path, monkeypatch)
+    request = {
+        "idempotency_key": "draft-create-1",
+        "manager_actor_ref": "anonymous-demo-manager",
+        "current_advice": _current_advice_render_request(),
+    }
+
+    with TestClient(app) as client:
+        client.get("/api/workspace")
+        first = client.post("/api/decision-support/draft-context", json=request)
+        replay = client.post("/api/decision-support/draft-context", json=request)
+        draft_id = first.json()["draft"]["draft_id"]
+        history = client.get(f"/api/decision-support/drafts/{draft_id}")
+
+    assert first.status_code == replay.status_code == 200
+    assert first.json()["draft"] == replay.json()["draft"]
+    version = first.json()["draft"]
+    assert version["schema_identifier"] == "draft-version"
+    assert version["version_number"] == 1
+    assert version["source"] == "DETERMINISTIC_ZERO_LLM"
+    assert version["deterministic_sections"]
+    assert version["generated_sections"] is None
+    assert version["manager_edits"] == {"changed_fields": []}
+    assert version["manager_actor_ref"] == "anonymous-demo-manager"
+    assert isinstance(version["available_at"], str)
+    assert version["recommendation_ref_and_hash"]["reference"].startswith(
+        "action-recommendation:"
+    )
+    assert version["evidence_ref_and_hash"]["reference"] == (
+        "decision-support-result:evaluation-1"
+    )
+    assert version["content_hash"].startswith("sha256:")
+    assert history.status_code == 200
+    assert len(history.json()["history"]) == 1
+    assert history.json()["head"] == version
+    with sqlite3.connect(tmp_path / "core.sqlite3") as connection:
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "UPDATE governance_draft_versions SET content_hash = ?",
+                ("sha256:" + "0" * 64,),
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute("DELETE FROM governance_draft_versions")
+
+
+def test_draft_edits_create_successor_versions_and_stale_retries_do_not_duplicate(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    app = _draft_test_app(tmp_path, monkeypatch)
+    with TestClient(app) as client:
+        client.get("/api/workspace")
+        created = _create_persisted_draft(client)
+        head = created["draft"]
+        edited_body = head["body"].replace(
+            "Hello,\n\n",
+            "Hello,\n\nPlease review this request with the team.\n\n",
+            1,
+        )
+        edit_request = {
+            "idempotency_key": "draft-edit-1",
+            "expected_head_ref_and_hash": {
+                "reference": head["occurrence_id"],
+                "content_hash": head["content_hash"],
+            },
+            "manager_actor_ref": "anonymous-demo-manager",
+            "subject": head["subject"],
+            "body": edited_body,
+        }
+        edited = client.post(
+            f"/api/decision-support/drafts/{head['draft_id']}/edits",
+            json=edit_request,
+        )
+        replay = client.post(
+            f"/api/decision-support/drafts/{head['draft_id']}/edits",
+            json=edit_request,
+        )
+        stale = client.post(
+            f"/api/decision-support/drafts/{head['draft_id']}/edits",
+            json={
+                **edit_request,
+                "idempotency_key": "draft-edit-2",
+                "body": head["body"],
+            },
+        )
+        history = client.get(f"/api/decision-support/drafts/{head['draft_id']}")
+
+    assert edited.status_code == replay.status_code == 201
+    assert edited.json()["draft"] == replay.json()["draft"]
+    successor = edited.json()["draft"]
+    assert successor["version_number"] == 2
+    assert successor["predecessor_ref_and_hash_or_null"] == {
+        "reference": head["occurrence_id"],
+        "content_hash": head["content_hash"],
+    }
+    assert successor["manager_edits"]["changed_fields"] == ["body"]
+    assert successor["body"] == edited_body
+    assert stale.status_code == 409
+    assert stale.json()["code"] == "DRAFT_HEAD_RACE"
+    assert len(history.json()["history"]) == 2
+
+
+def test_dispositions_require_governed_reasons_and_never_authorize_or_execute(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    app = _draft_test_app(tmp_path, monkeypatch)
+    with TestClient(app) as client:
+        client.get("/api/workspace")
+        created = _create_persisted_draft(client)
+        head = created["draft"]
+        base = {
+            "expected_head_ref_and_hash": {
+                "reference": head["occurrence_id"],
+                "content_hash": head["content_hash"],
+            },
+            "manager_actor_ref": "anonymous-demo-manager",
+        }
+        missing_reason = client.post(
+            f"/api/decision-support/drafts/{head['draft_id']}/dispositions",
+            json={
+                **base,
+                "idempotency_key": "draft-reject-missing",
+                "disposition": "REJECT",
+            },
+        )
+        rejected = client.post(
+            f"/api/decision-support/drafts/{head['draft_id']}/dispositions",
+            json={
+                **base,
+                "idempotency_key": "draft-reject-1",
+                "disposition": "REJECT",
+                "rejection_reason": {
+                    "code": "DRAFT_CONTENT_INACCURATE",
+                    "detail": "The manager needs to change the request wording.",
+                },
+            },
+        )
+        rejected_head = rejected.json()["draft"]
+        investigated = client.post(
+            f"/api/decision-support/drafts/{head['draft_id']}/dispositions",
+            json={
+                "expected_head_ref_and_hash": {
+                    "reference": rejected_head["occurrence_id"],
+                    "content_hash": rejected_head["content_hash"],
+                },
+                "idempotency_key": "draft-investigate-1",
+                "manager_actor_ref": "anonymous-demo-manager",
+                "disposition": "INVESTIGATE_FURTHER",
+            },
+        )
+        approved = client.post(
+            f"/api/decision-support/drafts/{head['draft_id']}/dispositions",
+            json={
+                "expected_head_ref_and_hash": {
+                    "reference": investigated.json()["draft"]["occurrence_id"],
+                    "content_hash": investigated.json()["draft"]["content_hash"],
+                },
+                "idempotency_key": "draft-approve-intent-1",
+                "manager_actor_ref": "anonymous-demo-manager",
+                "disposition": "APPROVE",
+            },
+        )
+
+    assert missing_reason.status_code == 422
+    assert rejected.status_code == 201
+    assert rejected_head["disposition"] == "REJECTED"
+    assert rejected_head["rejection_reason"]["code"] == "DRAFT_CONTENT_INACCURATE"
+    assert rejected_head["authorization_state"] == "NOT_AUTHORIZED"
+    assert investigated.status_code == 201
+    investigation_head = investigated.json()["draft"]
+    assert investigation_head["disposition"] == "INVESTIGATE_FURTHER"
+    assert investigation_head["manager_operation"]["operation_kind"] == (
+        "INVESTIGATE_FURTHER"
+    )
+    assert investigation_head["manager_operation"]["draft_version_ref_and_hash"] == {
+        "reference": rejected_head["occurrence_id"],
+        "content_hash": rejected_head["content_hash"],
+    }
+    assert investigation_head["recommendation_ref_and_hash"] == head[
+        "recommendation_ref_and_hash"
+    ]
+    assert investigation_head["evidence_ref_and_hash"] == head["evidence_ref_and_hash"]
+    assert approved.status_code == 201
+    assert approved.json()["draft"]["disposition"] == "APPROVE_INTENT"
+    assert approved.json()["draft"]["authorization_state"] == "NOT_AUTHORIZED"

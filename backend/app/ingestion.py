@@ -20,6 +20,7 @@ from .decision_support_heads import DecisionSupportEvaluationMixin
 from .decision_support_currentness import DecisionSupportCurrentnessMixin
 from .operations import DurableOperationsMixin, ensure_operation_schema
 from .risk import ReactiveInvestigationMixin, ensure_risk_schema
+from .drafts import DraftStoreMixin, ensure_draft_schema
 
 
 INGESTION_SCHEMA_VERSION = "intake-lineage.v1"
@@ -2422,6 +2423,7 @@ def _insert_ingestion_run(
 
 
 class LineageStore(
+    DraftStoreMixin,
     DurableOperationsMixin,
     ReactiveInvestigationMixin,
     GovernanceMixin,
@@ -2439,6 +2441,7 @@ class LineageStore(
             ensure_risk_schema(connection, create=False)
             ensure_governance_schema(connection, create=False)
             ensure_operation_schema(connection, create=False)
+            ensure_draft_schema(connection, create=False)
         except sqlite3.Error:
             self.close()
             raise

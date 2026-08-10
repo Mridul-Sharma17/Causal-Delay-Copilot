@@ -988,6 +988,130 @@ describe("Deterministic DraftContext preview", () => {
     });
     expect(screen.queryByRole("button", { name: /authorize|send|approve/i })).not.toBeInTheDocument();
   });
+
+  test("shows persisted editing and non-authorizing disposition controls", async () => {
+    const draft = {
+      schema_identifier: "draft-version",
+      schema_version: "1",
+      draft_id: "draft-1",
+      version_number: 1,
+      occurrence_id: "draft-version:draft-1:1",
+      predecessor_ref_and_hash_or_null: null,
+      source: "DETERMINISTIC_ZERO_LLM",
+      source_artifact_ref_and_hash: {
+        reference: "drafted-artefact:1",
+        content_hash: "sha256:" + "a".repeat(64),
+      },
+      draft_context_ref_and_hash: {
+        reference: "draft-context:1",
+        content_hash: "sha256:" + "b".repeat(64),
+      },
+      deterministic_sections: { opening: "Hello" },
+      generated_sections: null,
+      manager_edits: { changed_fields: [] },
+      manager_actor_ref: "anonymous-demo-manager",
+      available_at: "2026-08-09T10:03:00+00:00",
+      recommendation_ref_and_hash: {
+        reference: "action-recommendation:1",
+        content_hash: "sha256:" + "c".repeat(64),
+      },
+      evidence_ref_and_hash: {
+        reference: "decision-support-result:evaluation-1",
+        content_hash: "sha256:" + "d".repeat(64),
+      },
+      subject: "Review request",
+      recipient: "[APPROVED_RECIPIENT]",
+      body: "Subject: Review request\nTo: [APPROVED_RECIPIENT]\n\nHello,",
+      disposition: "NOT_DISPOSED",
+      rejection_reason: null,
+      manager_operation: null,
+      authorization_state: "NOT_AUTHORIZED",
+      execution_state: "NOT_EXECUTED",
+      content_hash: "sha256:" + "e".repeat(64),
+    };
+    const editedDraft = {
+      ...draft,
+      version_number: 2,
+      occurrence_id: "draft-version:draft-1:2",
+      predecessor_ref_and_hash_or_null: {
+        reference: draft.occurrence_id,
+        content_hash: draft.content_hash,
+      },
+      body: `${draft.body} Please review this with the team.`,
+      manager_edits: { changed_fields: ["body"] },
+      content_hash: "sha256:" + "f".repeat(64),
+    };
+    const approvedDraft = {
+      ...editedDraft,
+      version_number: 3,
+      occurrence_id: "draft-version:draft-1:3",
+      predecessor_ref_and_hash_or_null: {
+        reference: editedDraft.occurrence_id,
+        content_hash: editedDraft.content_hash,
+      },
+      disposition: "APPROVE_INTENT",
+      manager_edits: { changed_fields: [] },
+      content_hash: "sha256:" + "1".repeat(64),
+    };
+    const preview = {
+      schema_identifier: "deterministic-draft-preview",
+      schema_version: "1",
+      state: "UNSENT_PREVIEW",
+      currentness: { currentness_outcome: "CURRENTNESS_PROVEN_AT_CHECK" },
+      draft_context: { provenance: {} },
+      artifact: {
+        state: "UNSENT_PREVIEW",
+        source: "DETERMINISTIC_ZERO_LLM",
+        subject: draft.subject,
+        body: draft.body,
+        provenance: {},
+      },
+      checker: { state: "PASS", failure_codes: [] },
+      draft,
+    } as unknown as DraftContextPreview;
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ draft: editedDraft }), { status: 201 }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ draft: approvedDraft }), { status: 201 }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<DraftContextPreviewPanel preview={preview} />);
+
+    expect(screen.getByText(/Version 1/)).toBeInTheDocument();
+    expect(screen.getByLabelText("Subject")).toHaveValue("Review request");
+    expect(screen.getByRole("button", { name: "Approve draft" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Reject with reason" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Investigate further" })).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("Draft body"), {
+      target: { value: `${draft.body} Please review this with the team.` },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save immutable draft edit" }));
+    await waitFor(() => expect(screen.getByText(/successor version 2/)).toBeInTheDocument());
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toMatchObject({
+      body: editedDraft.body,
+      expected_head_ref_and_hash: {
+        reference: draft.occurrence_id,
+        content_hash: draft.content_hash,
+      },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Approve draft" }));
+    await waitFor(() => expect(screen.getByText(/Approval intent was recorded only/)).toBeInTheDocument());
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body))).toMatchObject({
+      disposition: "APPROVE",
+      expected_head_ref_and_hash: {
+        reference: editedDraft.occurrence_id,
+        content_hash: editedDraft.content_hash,
+      },
+    });
+  });
 });
 
 describe("Decision Support publication states", () => {

@@ -57,6 +57,7 @@ class AuditOccurrenceRequest(BaseModel):
         "GOVERNANCE_TRADEOFF_SELECTION",
         "DECISION_SUPPORT_TRADEOFF_SELECTION_VALIDATION",
         "DECISION_SUPPORT_TRADEOFF_SELECTION_CLAIM",
+        "GOVERNANCE_DRAFT_VERSION",
     ]
     outcome_code: Literal[
         "CORE_READY",
@@ -86,6 +87,11 @@ class AuditOccurrenceRequest(BaseModel):
         "TRADEOFF_SELECTION_ACCEPTED_IDEMPOTENT",
         "TRADEOFF_SELECTION_CONFLICT_ALREADY_RESOLVED",
         "TRADEOFF_SELECTION_ACCEPTED",
+        "DRAFT_CREATED",
+        "DRAFT_EDITED",
+        "DRAFT_APPROVAL_INTENT_RECORDED",
+        "DRAFT_REJECTED",
+        "DRAFT_INVESTIGATION_REQUESTED",
     ]
 
 
@@ -137,6 +143,7 @@ class AuditOccurrenceViewResponse(BaseModel):
         "DECISION_SUPPORT_TRADEOFF_SELECTION_CLAIM",
         "ANALYSIS_RUN_DELIVERY",
         "REFRESH_INVESTIGATION_SNAPSHOT",
+        "GOVERNANCE_DRAFT_VERSION",
     ]
     outcome_code: Literal[
         "CORE_READY",
@@ -210,6 +217,11 @@ class AuditOccurrenceViewResponse(BaseModel):
         "TRADEOFF_SELECTION_ACCEPTED_IDEMPOTENT",
         "TRADEOFF_SELECTION_CONFLICT_ALREADY_RESOLVED",
         "TRADEOFF_SELECTION_ACCEPTED",
+        "DRAFT_CREATED",
+        "DRAFT_EDITED",
+        "DRAFT_APPROVAL_INTENT_RECORDED",
+        "DRAFT_REJECTED",
+        "DRAFT_INVESTIGATION_REQUESTED",
     ]
     created_at: datetime
     source_role_ceiling: SourceRoleCeilingResponse | None = None
@@ -359,6 +371,18 @@ class DecisionSupportCurrentnessResponse(BaseModel):
 class DraftContextRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    idempotency_key: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+    )
+    manager_actor_ref: str = Field(
+        default="anonymous-demo-manager",
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+    )
     current_advice: DecisionSupportCurrentAdviceRenderRequest
 
 
@@ -373,6 +397,74 @@ class DraftContextPreviewResponse(BaseModel):
     artifact: dict[str, Any]
     checker: dict[str, Any]
     drafting: dict[str, Any] = Field(default_factory=dict)
+    draft: dict[str, Any] | None = None
+
+
+class DraftReferenceAndHash(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reference: str = Field(min_length=1, max_length=512)
+    content_hash: str = Field(min_length=1, max_length=128)
+
+
+class DraftEditRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    idempotency_key: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+    )
+    expected_head_ref_and_hash: DraftReferenceAndHash
+    manager_actor_ref: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+    )
+    subject: str = Field(min_length=1, max_length=512)
+    body: str = Field(min_length=1, max_length=16384)
+
+
+class DraftRejectionReason(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    code: Literal[
+        "DRAFT_CONTENT_INACCURATE",
+        "DRAFT_EVIDENCE_INSUFFICIENT",
+        "DRAFT_ACTION_NOT_FEASIBLE",
+        "DRAFT_TIMING_OR_CONSTRAINT_CONFLICT",
+        "DRAFT_NO_LONGER_NEEDED",
+        "DRAFT_OTHER_GOVERNED",
+    ]
+    detail: str = Field(min_length=1, max_length=2048)
+
+
+class DraftDispositionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    idempotency_key: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+    )
+    expected_head_ref_and_hash: DraftReferenceAndHash
+    manager_actor_ref: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+    )
+    disposition: Literal["APPROVE", "REJECT", "INVESTIGATE_FURTHER"]
+    rejection_reason: DraftRejectionReason | None = None
+
+    @model_validator(mode="after")
+    def validate_reason_shape(self) -> "DraftDispositionRequest":
+        if self.disposition == "REJECT" and self.rejection_reason is None:
+            raise ValueError("rejection requires a governed reason")
+        if self.disposition != "REJECT" and self.rejection_reason is not None:
+            raise ValueError("only rejection accepts a governed reason")
+        if self.rejection_reason is not None and not self.rejection_reason.detail.strip():
+            raise ValueError("rejection detail must contain text")
+        return self
 
 
 class DecisionSupportMonitoringObservationRequest(BaseModel):

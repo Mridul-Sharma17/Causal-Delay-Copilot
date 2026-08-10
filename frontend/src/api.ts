@@ -2,6 +2,7 @@ import {
   parseLineageSnapshot,
   parseDemoWorkspaceResponse,
   parseDraftContextPreview,
+  parseDraftMutationResponse,
   parseAuditOccurrenceResponse,
   parseDecisionBriefResponse,
   parseHealthResponse,
@@ -22,6 +23,7 @@ import {
   type DurableOperation,
   type DemoWorkspace,
   type DraftContextPreview,
+  type DraftMutationResponse,
   type HealthResponse,
   type OperationMutationResponse,
   type LineageSnapshot,
@@ -145,6 +147,10 @@ export function acceptTradeoffSelection(
 
 export function prepareDraftContext(
   currentAdvice: Record<string, unknown>,
+  options: {
+    idempotencyKey?: string;
+    managerActorRef?: string;
+  } = {},
 ): Promise<DraftContextPreview> {
   return requestJson(
     "/api/decision-support/draft-context",
@@ -155,9 +161,67 @@ export function prepareDraftContext(
         "content-type": "application/json",
       },
       credentials: "same-origin",
-      body: JSON.stringify({ current_advice: currentAdvice }),
+      body: JSON.stringify({
+        current_advice: currentAdvice,
+        ...(options.idempotencyKey === undefined
+          ? {}
+          : { idempotency_key: options.idempotencyKey }),
+        ...(options.managerActorRef === undefined
+          ? {}
+          : { manager_actor_ref: options.managerActorRef }),
+      }),
     },
     parseDraftContextPreview,
+  );
+}
+
+export function editDraft(
+  draftId: string,
+  request: {
+    idempotency_key: string;
+    expected_head_ref_and_hash: { reference: string; content_hash: string };
+    manager_actor_ref: string;
+    subject: string;
+    body: string;
+  },
+): Promise<DraftMutationResponse> {
+  return requestJson(
+    `/api/decision-support/drafts/${encodeURIComponent(draftId)}/edits`,
+    {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        "content-type": "application/json",
+      },
+      credentials: "same-origin",
+      body: JSON.stringify(request),
+    },
+    parseDraftMutationResponse,
+  );
+}
+
+export function disposeDraft(
+  draftId: string,
+  request: {
+    idempotency_key: string;
+    expected_head_ref_and_hash: { reference: string; content_hash: string };
+    manager_actor_ref: string;
+    disposition: "APPROVE" | "REJECT" | "INVESTIGATE_FURTHER";
+    rejection_reason?: { code: string; detail: string };
+  },
+): Promise<DraftMutationResponse> {
+  return requestJson(
+    `/api/decision-support/drafts/${encodeURIComponent(draftId)}/dispositions`,
+    {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        "content-type": "application/json",
+      },
+      credentials: "same-origin",
+      body: JSON.stringify(request),
+    },
+    parseDraftMutationResponse,
   );
 }
 

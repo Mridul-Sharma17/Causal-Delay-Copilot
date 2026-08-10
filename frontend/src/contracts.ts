@@ -135,6 +135,44 @@ export type DraftContextPreview = Record<string, unknown> & {
     state: "PASS";
     failure_codes: string[];
   };
+  draft?: DraftVersion;
+};
+
+export type DraftReferenceAndHash = {
+  reference: string;
+  content_hash: string;
+};
+
+export type DraftVersion = Record<string, unknown> & {
+  schema_identifier: "draft-version";
+  schema_version: "1";
+  draft_id: string;
+  version_number: number;
+  occurrence_id: string;
+  predecessor_ref_and_hash_or_null: DraftReferenceAndHash | null;
+  source: "DETERMINISTIC_ZERO_LLM" | "GEMINI_CHECKED";
+  source_artifact_ref_and_hash: DraftReferenceAndHash;
+  draft_context_ref_and_hash: DraftReferenceAndHash;
+  deterministic_sections: Record<string, unknown>;
+  generated_sections: Record<string, unknown> | null;
+  manager_edits: { changed_fields: string[] } & Record<string, unknown>;
+  manager_actor_ref: string;
+  available_at: string | Record<string, unknown>;
+  recommendation_ref_and_hash: DraftReferenceAndHash;
+  evidence_ref_and_hash: DraftReferenceAndHash;
+  subject: string;
+  recipient: string;
+  body: string;
+  disposition: "NOT_DISPOSED" | "APPROVE_INTENT" | "REJECTED" | "INVESTIGATE_FURTHER";
+  rejection_reason: Record<string, unknown> | null;
+  manager_operation: Record<string, unknown> | null;
+  authorization_state: "NOT_AUTHORIZED";
+  execution_state: "NOT_EXECUTED";
+  content_hash: string;
+};
+
+export type DraftMutationResponse = {
+  draft: DraftVersion;
 };
 
 export type TradeoffSelectionReference = {
@@ -1670,6 +1708,124 @@ export function parseTradeoffSelectionAcceptanceResponse(
   };
 }
 
+function parseDraftReference(value: unknown, label: string): DraftReferenceAndHash {
+  if (
+    !isRecord(value) ||
+    Array.isArray(value) ||
+    !isNonEmptyString(value.reference) ||
+    !isNonEmptyString(value.content_hash)
+  ) {
+    throw new Error(`invalid draft ${label}`);
+  }
+  return { reference: value.reference, content_hash: value.content_hash };
+}
+
+function parseOptionalDraftRecord(
+  value: unknown,
+  label: string,
+): Record<string, unknown> | null {
+  if (value === null) {
+    return null;
+  }
+  if (!isRecord(value) || Array.isArray(value)) {
+    throw new Error(`invalid draft ${label}`);
+  }
+  return value;
+}
+
+export function parseDraftVersion(value: unknown): DraftVersion {
+  if (
+    !isRecord(value) ||
+    Array.isArray(value) ||
+    value.schema_identifier !== "draft-version" ||
+    value.schema_version !== "1" ||
+    !isNonEmptyString(value.draft_id) ||
+    !isNonNegativeInteger(value.version_number) ||
+    value.version_number < 1 ||
+    !isNonEmptyString(value.occurrence_id) ||
+    !isNonEmptyString(value.source) ||
+    (value.source !== "DETERMINISTIC_ZERO_LLM" && value.source !== "GEMINI_CHECKED") ||
+    !isRecord(value.deterministic_sections) ||
+    (value.generated_sections !== null && !isRecord(value.generated_sections)) ||
+    !isRecord(value.manager_edits) ||
+    !Array.isArray(value.manager_edits.changed_fields) ||
+    !value.manager_edits.changed_fields.every((field) => typeof field === "string") ||
+    !isNonEmptyString(value.manager_actor_ref) ||
+    !(
+      typeof value.available_at === "string" ||
+      (isRecord(value.available_at) && !Array.isArray(value.available_at))
+    ) ||
+    !isNonEmptyString(value.subject) ||
+    !isNonEmptyString(value.recipient) ||
+    !isNonEmptyString(value.body) ||
+    ![
+      "NOT_DISPOSED",
+      "APPROVE_INTENT",
+      "REJECTED",
+      "INVESTIGATE_FURTHER",
+    ].includes(value.disposition as string) ||
+    !isNonEmptyString(value.content_hash) ||
+    value.authorization_state !== "NOT_AUTHORIZED" ||
+    value.execution_state !== "NOT_EXECUTED"
+  ) {
+    throw new Error("invalid draft version");
+  }
+  return {
+    ...value,
+    schema_identifier: "draft-version",
+    schema_version: "1",
+    draft_id: value.draft_id,
+    version_number: value.version_number,
+    occurrence_id: value.occurrence_id,
+    predecessor_ref_and_hash_or_null:
+      value.predecessor_ref_and_hash_or_null === null
+        ? null
+        : parseDraftReference(value.predecessor_ref_and_hash_or_null, "predecessor"),
+    source:
+      value.source === "GEMINI_CHECKED" ? "GEMINI_CHECKED" : "DETERMINISTIC_ZERO_LLM",
+    source_artifact_ref_and_hash: parseDraftReference(
+      value.source_artifact_ref_and_hash,
+      "source artifact",
+    ),
+    draft_context_ref_and_hash: parseDraftReference(
+      value.draft_context_ref_and_hash,
+      "context",
+    ),
+    deterministic_sections: value.deterministic_sections,
+    generated_sections:
+      value.generated_sections === null ? null : value.generated_sections,
+    manager_edits: {
+      ...value.manager_edits,
+      changed_fields: value.manager_edits.changed_fields,
+    },
+    manager_actor_ref: value.manager_actor_ref,
+    available_at: value.available_at,
+    recommendation_ref_and_hash: parseDraftReference(
+      value.recommendation_ref_and_hash,
+      "recommendation",
+    ),
+    evidence_ref_and_hash: parseDraftReference(value.evidence_ref_and_hash, "evidence"),
+    subject: value.subject,
+    recipient: value.recipient,
+    body: value.body,
+    disposition: value.disposition as DraftVersion["disposition"],
+    rejection_reason:
+      parseOptionalDraftRecord(value.rejection_reason, "rejection reason"),
+    manager_operation:
+      parseOptionalDraftRecord(value.manager_operation, "manager operation"),
+    authorization_state: "NOT_AUTHORIZED",
+    execution_state: "NOT_EXECUTED",
+    content_hash: value.content_hash,
+  } as DraftVersion;
+}
+
+export function parseDraftMutationResponse(value: unknown): DraftMutationResponse {
+  if (!isRecord(value) || Array.isArray(value)) {
+    throw new Error("invalid draft mutation response");
+  }
+  return { draft: parseDraftVersion(value.draft) };
+}
+
 export function parseDraftContextPreview(value: unknown): DraftContextPreview {
   if (
     !isRecord(value) ||
@@ -1712,6 +1868,9 @@ export function parseDraftContextPreview(value: unknown): DraftContextPreview {
       state: "PASS",
       failure_codes: value.checker.failure_codes,
     },
+    ...(value.draft === undefined || value.draft === null
+      ? {}
+      : { draft: parseDraftVersion(value.draft) }),
   } as DraftContextPreview;
 }
 

@@ -9,6 +9,8 @@ import {
   getWorkspace,
   acceptTradeoffSelection,
   createOperation,
+  disposeDraft,
+  editDraft,
   prepareDraftContext,
   publishDecisionBrief,
   publishTradeoffSelection,
@@ -28,6 +30,7 @@ import {
   type DecisionSupportOption,
   type DecisionSupportRegistryInspection,
   type DraftContextPreview,
+  type DraftVersion,
   type DiagnosticResult,
   type DiagnosticSummary,
   type DurableOperation,
@@ -812,6 +815,32 @@ export function DraftContextPreviewPanel({
 }: {
   preview: DraftContextPreview;
 }) {
+  const persistedDraft = preview.draft ?? null;
+  const [draft, setDraft] = useState<DraftVersion | null>(persistedDraft);
+  const [subject, setSubject] = useState(
+    persistedDraft?.subject ??
+      (typeof preview.artifact.subject === "string" ? preview.artifact.subject : ""),
+  );
+  const [body, setBody] = useState(persistedDraft?.body ?? preview.artifact.body);
+  const [rejectionCode, setRejectionCode] = useState("DRAFT_CONTENT_INACCURATE");
+  const [rejectionDetail, setRejectionDetail] = useState("");
+  const [mutationState, setMutationState] = useState<
+    "idle" | "saving" | "submitting" | "unavailable"
+  >("idle");
+  const [mutationMessage, setMutationMessage] = useState<string | null>(null);
+  const mutationKeys = useRef<Record<string, string>>({});
+
+  useEffect(() => {
+    setDraft(persistedDraft);
+    setSubject(
+      persistedDraft?.subject ??
+        (typeof preview.artifact.subject === "string" ? preview.artifact.subject : ""),
+    );
+    setBody(persistedDraft?.body ?? preview.artifact.body);
+    setMutationState("idle");
+    setMutationMessage(null);
+  }, [persistedDraft?.content_hash, preview.artifact.body, preview.artifact.subject]);
+
   const contextProvenance = asRecord(preview.draft_context.provenance);
   const recommendationBinding =
     contextProvenance === null ? null : referenceAndHash(contextProvenance.action_recommendation);
@@ -823,6 +852,107 @@ export function DraftContextPreviewPanel({
   const draftingSource =
     typeof drafting?.source === "string" ? drafting.source : preview.artifact.source;
   const fallback = asRecord(drafting?.fallback);
+  const mutationKey = (action: string): string => {
+    if (draft === null) {
+      throw new Error("draft is unavailable");
+    }
+    const identity = `${action}:${draft.draft_id}:${draft.content_hash}`;
+    const existing = mutationKeys.current[identity];
+    if (existing !== undefined) {
+      return existing;
+    }
+    const generated = clientOccurrenceId(`draft-${action.toLowerCase()}`);
+    if (generated === null) {
+      throw new Error("idempotency is unavailable");
+    }
+    mutationKeys.current[identity] = generated;
+    return generated;
+  };
+  const headBinding =
+    draft === null
+      ? null
+      : { reference: draft.occurrence_id, content_hash: draft.content_hash };
+  const hasUnsavedEdits =
+    draft !== null && (subject !== draft.subject || body !== draft.body);
+  const saveDraftEdit = async () => {
+    if (draft === null || headBinding === null) {
+      return;
+    }
+    if (subject === draft.subject && body === draft.body) {
+      setMutationMessage("No content change was submitted; the immutable head is unchanged.");
+      return;
+    }
+    setMutationState("saving");
+    setMutationMessage("Validating the edited draft and recording an immutable successor…");
+    try {
+      const result = await editDraft(draft.draft_id, {
+        idempotency_key: mutationKey("edit"),
+        expected_head_ref_and_hash: headBinding,
+        manager_actor_ref: draft.manager_actor_ref,
+        subject,
+        body,
+      });
+      setDraft(result.draft);
+      setSubject(result.draft.subject);
+      setBody(result.draft.body);
+      setMutationState("idle");
+      setMutationMessage(
+        `Immutable draft successor version ${result.draft.version_number} recorded. No authorization or execution occurred.`,
+      );
+    } catch {
+      setMutationState("unavailable");
+      setMutationMessage(
+        "The edited draft was unavailable or stale. Read the current draft head and retry; no content or authority was overwritten.",
+      );
+    }
+  };
+  const submitDisposition = async (
+    disposition: "APPROVE" | "REJECT" | "INVESTIGATE_FURTHER",
+  ) => {
+    if (draft === null || headBinding === null) {
+      return;
+    }
+    if (disposition === "REJECT" && rejectionDetail.trim() === "") {
+      setMutationState("unavailable");
+      setMutationMessage("Reject requires a governed reason code and a non-empty detail.");
+      return;
+    }
+    setMutationState("submitting");
+    setMutationMessage("Recording the manager disposition as a non-authorizing operation…");
+    try {
+      const result = await disposeDraft(draft.draft_id, {
+        idempotency_key: mutationKey(disposition.toLowerCase()),
+        expected_head_ref_and_hash: headBinding,
+        manager_actor_ref: draft.manager_actor_ref,
+        disposition,
+        ...(disposition === "REJECT"
+          ? {
+              rejection_reason: {
+                code: rejectionCode,
+                detail: rejectionDetail.trim(),
+              },
+            }
+          : {}),
+      });
+      setDraft(result.draft);
+      setSubject(result.draft.subject);
+      setBody(result.draft.body);
+      setMutationState("idle");
+      setMutationMessage(
+        disposition === "INVESTIGATE_FURTHER"
+          ? "Investigation further was recorded as an exact manager operation. Evidence and recommendation bindings were not changed."
+          : disposition === "REJECT"
+            ? "Rejection was recorded with its governed reason. The draft remains unsent and unauthorized."
+            : "Approval intent was recorded only. Separate authorization/currentness persistence remains required; nothing was sent or executed.",
+      );
+    } catch {
+      setMutationState("unavailable");
+      setMutationMessage(
+        "The disposition was unavailable or stale. Read the current draft head and retry; no authorization or execution occurred.",
+      );
+    }
+  };
+  const operation = draft === null ? null : asRecord(draft.manager_operation);
   return (
     <div className="draft-preview action-publication" role="status">
       <strong>
@@ -848,6 +978,153 @@ export function DraftContextPreviewPanel({
         This content is a preview only. It is not approval, authorization, sending, or execution.
       </span>
       <pre className="draft-preview-body">{preview.artifact.body}</pre>
+      {draft !== null && (
+        <section className="draft-governance" aria-labelledby="draft-governance-heading">
+          <div className="record-heading">
+            <div>
+              <p className="eyebrow">Manager draft ledger</p>
+              <h4 id="draft-governance-heading">Version {draft.version_number} · immutable draft</h4>
+            </div>
+            <span>{draft.disposition}</span>
+          </div>
+          <p>
+            Draft preparation is complete. Content editing creates a successor version; manager
+            selection records intent only. Authorization, sending, and execution are separate.
+          </p>
+          <dl className="draft-version-facts">
+            <div>
+              <dt>Actor</dt>
+              <dd><code>{draft.manager_actor_ref}</code></dd>
+            </div>
+            <div>
+              <dt>Available time</dt>
+              <dd><code>{formatValue(draft.available_at)}</code></dd>
+            </div>
+            <div>
+              <dt>Recommendation reference</dt>
+              <dd><code>{formatValue(draft.recommendation_ref_and_hash)}</code></dd>
+            </div>
+            <div>
+              <dt>Evidence reference</dt>
+              <dd><code>{formatValue(draft.evidence_ref_and_hash)}</code></dd>
+            </div>
+            <div>
+              <dt>Version hash</dt>
+              <dd><code>{draft.content_hash}</code></dd>
+            </div>
+            <div>
+              <dt>Authorization</dt>
+              <dd><code>{draft.authorization_state}</code></dd>
+            </div>
+          </dl>
+
+          <div className="draft-editing">
+            <strong>Content editing</strong>
+            <label htmlFor="draft-subject">Subject</label>
+            <input
+              id="draft-subject"
+              value={subject}
+              onChange={(event) => setSubject(event.target.value)}
+              disabled={mutationState === "saving" || mutationState === "submitting"}
+            />
+            <label htmlFor="draft-body">Draft body</label>
+            <textarea
+              id="draft-body"
+              value={body}
+              onChange={(event) => setBody(event.target.value)}
+              rows={12}
+              disabled={mutationState === "saving" || mutationState === "submitting"}
+            />
+            <button
+              type="button"
+              onClick={() => void saveDraftEdit()}
+              disabled={mutationState === "saving" || mutationState === "submitting"}
+            >
+              {mutationState === "saving" ? "Saving immutable edit…" : "Save immutable draft edit"}
+            </button>
+          </div>
+
+          <fieldset className="draft-disposition">
+            <legend>Manager selection and disposition</legend>
+            {hasUnsavedEdits && (
+              <span>Save the immutable content edit before recording a disposition.</span>
+            )}
+            <label htmlFor="draft-rejection-code">Governed rejection reason</label>
+            <select
+              id="draft-rejection-code"
+              value={rejectionCode}
+              onChange={(event) => setRejectionCode(event.target.value)}
+              disabled={mutationState === "saving" || mutationState === "submitting"}
+            >
+              <option value="DRAFT_CONTENT_INACCURATE">Content is inaccurate</option>
+              <option value="DRAFT_EVIDENCE_INSUFFICIENT">Evidence is insufficient</option>
+              <option value="DRAFT_ACTION_NOT_FEASIBLE">Action is not feasible</option>
+              <option value="DRAFT_TIMING_OR_CONSTRAINT_CONFLICT">Timing or constraint conflict</option>
+              <option value="DRAFT_NO_LONGER_NEEDED">No longer needed</option>
+              <option value="DRAFT_OTHER_GOVERNED">Other governed reason</option>
+            </select>
+            <label htmlFor="draft-rejection-detail">Rejection detail</label>
+            <textarea
+              id="draft-rejection-detail"
+              value={rejectionDetail}
+              onChange={(event) => setRejectionDetail(event.target.value)}
+              rows={3}
+              placeholder="Explain the governed rejection reason"
+              disabled={mutationState === "saving" || mutationState === "submitting"}
+            />
+            <div className="draft-disposition-actions">
+              <button
+                type="button"
+                onClick={() => void submitDisposition("APPROVE")}
+                disabled={
+                  hasUnsavedEdits ||
+                  mutationState === "saving" ||
+                  mutationState === "submitting"
+                }
+              >
+                Approve draft
+              </button>
+              <button
+                type="button"
+                onClick={() => void submitDisposition("REJECT")}
+                disabled={
+                  hasUnsavedEdits ||
+                  mutationState === "saving" ||
+                  mutationState === "submitting"
+                }
+              >
+                Reject with reason
+              </button>
+              <button
+                type="button"
+                onClick={() => void submitDisposition("INVESTIGATE_FURTHER")}
+                disabled={
+                  hasUnsavedEdits ||
+                  mutationState === "saving" ||
+                  mutationState === "submitting"
+                }
+              >
+                Investigate further
+              </button>
+            </div>
+            <span>
+              These controls record a manager operation. They never send a message, authorize an
+              action, or execute operational work.
+            </span>
+          </fieldset>
+          {operation !== null && (
+            <details>
+              <summary>Inspect investigate-further operation</summary>
+              <code>{formatValue(operation)}</code>
+            </details>
+          )}
+          {mutationMessage !== null && (
+            <p className="supporting-copy" role="status">
+              {mutationMessage}
+            </p>
+          )}
+        </section>
+      )}
       <details>
         <summary>
           Inspect complete {draftingSource === "GEMINI_CHECKED" ? "drafting" : "deterministic"} provenance
@@ -880,6 +1157,7 @@ export function DecisionSupportActionsStage({
     "idle" | "preparing" | "ready" | "unavailable"
   >("idle");
   const [draftPreviewMessage, setDraftPreviewMessage] = useState<string | null>(null);
+  const draftCreationKeys = useRef<Record<string, string>>({});
   const registry: Record<string, unknown> = registryInspection ?? {};
   const releaseBinding =
     typeof registry.release_binding === "object" && registry.release_binding !== null
@@ -1137,7 +1415,20 @@ export function DecisionSupportActionsStage({
     setDraftPreviewState("preparing");
     setDraftPreviewMessage("Re-proving currentness and preparing the deterministic preview…");
     try {
-      const prepared = await prepareDraftContext(request);
+      const draftIdentity = `${adviceChainKind}:${String(recommendation?.occurrence_id ?? "")}:${String(selectionClaim?.selection_claim_occurrence_id ?? "")}`;
+      let idempotencyKey = draftCreationKeys.current[draftIdentity];
+      if (idempotencyKey === undefined) {
+        const generatedIdempotencyKey = clientOccurrenceId("draft-create");
+        if (generatedIdempotencyKey === null) {
+          throw new Error("draft idempotency is unavailable");
+        }
+        idempotencyKey = generatedIdempotencyKey;
+        draftCreationKeys.current[draftIdentity] = idempotencyKey;
+      }
+      const prepared = await prepareDraftContext(request, {
+        idempotencyKey,
+        managerActorRef: "anonymous-demo-manager",
+      });
       setDraftPreview(prepared);
       setDraftPreviewState("ready");
       setDraftPreviewMessage("Deterministic DraftContext passed its checker; preview remains unsent.");
