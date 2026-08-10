@@ -2931,6 +2931,16 @@ def _option_result(
                 _FIXTURE_NAMESPACE + "constraint-rules:v1",
             )
         )
+    if option_code == "ACCEPT_AND_MONITOR":
+        monitoring_trigger = monitoring_triggers.get((option_code, trigger_mode))
+        base["monitoring_escalation_trigger_ref_and_hash"] = (
+            _synthetic_record_ref(monitoring_trigger)
+            if monitoring_trigger is not None
+            else None
+        )
+        base["monitoring_trigger_ref_and_hash"] = deepcopy(
+            base["monitoring_escalation_trigger_ref_and_hash"]
+        )
 
     def mark_advisories_not_evaluated(reason_code: str) -> None:
         base["advisory_results"] = []

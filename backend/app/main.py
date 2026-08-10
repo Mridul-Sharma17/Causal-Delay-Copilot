@@ -27,6 +27,9 @@ from .contracts import (
     DecisionSupportCurrentAdviceRenderRequest,
     DecisionSupportCurrentnessRequest,
     DecisionSupportCurrentnessResponse,
+    DecisionSupportMonitoringMatchRequest,
+    DecisionSupportMonitoringObservationRequest,
+    DecisionSupportMonitoringObservationResponse,
     DecisionSupportInvalidationRequest,
     DecisionSupportInvalidationResponse,
     DemoWorkspaceResponse,
@@ -90,6 +93,7 @@ from .decision_support_currentness import (
     DecisionSupportCurrentnessOperationMismatch,
     DecisionSupportCurrentnessUnavailable,
 )
+from .monitoring import MonitoringContractError, monitoring_observation_key_for
 from .ingestion import (
     DatasetVersionUnavailable,
     IngestionIdempotencyConflict,
@@ -1293,6 +1297,129 @@ def create_app(
                 status_code=200 if stored.result == "IDEMPOTENT_REPLAY" else 201,
                 content=response.model_dump(mode="json"),
             ),
+            resolution,
+        )
+
+    @app.post(
+        "/api/decision-support/monitoring-observations",
+        response_model=DecisionSupportMonitoringObservationResponse,
+    )
+    async def register_decision_support_monitoring_observation(
+        request_context: Request,
+        request: DecisionSupportMonitoringObservationRequest,
+    ) -> JSONResponse:
+        resolution = resolve_workspace(request_context)
+        existing_observation = None
+        try:
+            observation_key = monitoring_observation_key_for(request.observation)
+        except MonitoringContractError:
+            observation_key = None
+        if observation_key is not None:
+            existing_observation = next(
+                (
+                    item
+                    for item in core_store.list_decision_support_monitoring_observations(
+                        resolution.snapshot.workspace_id
+                    )
+                    if item.get("monitoring_observation_key") == observation_key
+                ),
+                None,
+            )
+        observation = core_store.register_monitoring_observation(
+            resolution.snapshot.workspace_id,
+            observation=request.observation,
+        )
+        result = "IDEMPOTENT_REPLAY" if existing_observation is not None else "CREATED"
+        response = DecisionSupportMonitoringObservationResponse(
+            result=result,
+            observation=observation,
+        )
+        return attach_workspace_cookie(
+            JSONResponse(
+                status_code=200 if result == "IDEMPOTENT_REPLAY" else 201,
+                content=response.model_dump(mode="json"),
+            ),
+            resolution,
+        )
+
+    @app.post(
+        "/api/decision-support/monitoring/match",
+        response_model=DecisionSupportCurrentnessResponse,
+    )
+    @app.post(
+        "/api/decision-support/monitoring-observations/match",
+        response_model=DecisionSupportCurrentnessResponse,
+    )
+    @app.post(
+        "/api/decision-support/evaluation-series/{evaluation_series_id}/monitoring/match",
+        response_model=DecisionSupportCurrentnessResponse,
+    )
+    async def match_decision_support_monitoring_observation(
+        request_context: Request,
+        request: DecisionSupportMonitoringMatchRequest,
+        evaluation_series_id: str | None = None,
+    ) -> JSONResponse:
+        if (
+            evaluation_series_id is not None
+            and request.evaluation_series_id is not None
+            and evaluation_series_id != request.evaluation_series_id
+        ):
+            raise DecisionSupportCurrentnessUnavailable(
+                "monitoring match series does not match its route"
+            )
+        resolution = resolve_workspace(request_context)
+        stored = core_store.match_monitoring_observation(
+            resolution.snapshot.workspace_id,
+            observation=request.observation,
+            evaluation_series_id=evaluation_series_id or request.evaluation_series_id,
+            accepted_selection_claim=request.accepted_selection_claim,
+        )
+        response = DecisionSupportCurrentnessResponse(
+            result=stored.result,
+            operation=stored.operation,
+            currentness=stored.currentness,
+            terminal_claim=stored.terminal_claim,
+            render=stored.render,
+            consuming_result=stored.consuming_result,
+            head=stored.head,
+        )
+        return attach_workspace_cookie(
+            JSONResponse(
+                status_code=200 if stored.result == "IDEMPOTENT_REPLAY" else 201,
+                content=response.model_dump(mode="json"),
+            ),
+            resolution,
+        )
+
+    @app.get(
+        "/api/decision-support/monitoring-observations",
+        response_model=list[dict[str, object]],
+    )
+    async def list_decision_support_monitoring_observations(
+        request: Request,
+    ) -> JSONResponse:
+        resolution = resolve_workspace(request)
+        observations = core_store.list_decision_support_monitoring_observations(
+            resolution.snapshot.workspace_id
+        )
+        return attach_workspace_cookie(
+            JSONResponse(status_code=200, content=observations),
+            resolution,
+        )
+
+    @app.get(
+        "/api/decision-support/monitoring-review-requests",
+        response_model=list[dict[str, object]],
+    )
+    async def list_decision_support_monitoring_review_requests(
+        request: Request,
+    ) -> JSONResponse:
+        resolution = resolve_workspace(request)
+        requests = core_store.list_decision_support_monitoring_review_requests(
+            resolution.snapshot.workspace_id
+        )
+        return attach_workspace_cookie(
+            JSONResponse(status_code=200, content=requests),
             resolution,
         )
 

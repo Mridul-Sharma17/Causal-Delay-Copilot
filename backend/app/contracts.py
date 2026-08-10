@@ -53,6 +53,7 @@ class AuditOccurrenceRequest(BaseModel):
         "DECISION_SUPPORT_CURRENT_ADVICE_RENDER",
         "DECISION_SUPPORT_CURRENTNESS_INVALIDATION",
         "DECISION_SUPPORT_CURRENTNESS_CONSUMING_RESULT",
+        "DECISION_SUPPORT_MONITORING_REVIEW_REQUEST",
         "GOVERNANCE_TRADEOFF_SELECTION",
         "DECISION_SUPPORT_TRADEOFF_SELECTION_VALIDATION",
         "DECISION_SUPPORT_TRADEOFF_SELECTION_CLAIM",
@@ -73,6 +74,7 @@ class AuditOccurrenceRequest(BaseModel):
         "TRADEOFF_SELECTION_ACCEPTANCE",
         "MANAGER_AUTHORIZATION",
         "MONITORING_TRIGGER_MATCH",
+        "REQUEST_MANAGER_REVIEW",
         "TRADEOFF_SELECTION_RECORDED",
         "TRADEOFF_SELECTION_SCHEMA_INVALID",
         "TRADEOFF_SELECTION_SCHEMA_UNSUPPORTED",
@@ -127,6 +129,7 @@ class AuditOccurrenceViewResponse(BaseModel):
         "DECISION_SUPPORT_CURRENT_ADVICE_RENDER",
         "DECISION_SUPPORT_CURRENTNESS_INVALIDATION",
         "DECISION_SUPPORT_CURRENTNESS_CONSUMING_RESULT",
+        "DECISION_SUPPORT_MONITORING_REVIEW_REQUEST",
         "DECISION_SUPPORT_CURRENTNESS_SOURCE_OCCURRENCE",
         "DECISION_SUPPORT_CURRENTNESS_AUTHORITY",
         "GOVERNANCE_TRADEOFF_SELECTION",
@@ -193,6 +196,7 @@ class AuditOccurrenceViewResponse(BaseModel):
         "TRADEOFF_SELECTION_ACCEPTANCE",
         "MANAGER_AUTHORIZATION",
         "MONITORING_TRIGGER_MATCH",
+        "REQUEST_MANAGER_REVIEW",
         "CURRENTNESS_SOURCE_REGISTERED",
         "CURRENTNESS_AUTHORITY_UPDATED",
         "TRADEOFF_SELECTION_RECORDED",
@@ -350,6 +354,27 @@ class DecisionSupportCurrentnessResponse(BaseModel):
     render: dict[str, Any] | None = None
     consuming_result: dict[str, Any] | None = None
     head: dict[str, Any]
+
+
+class DecisionSupportMonitoringObservationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    observation: dict[str, Any]
+
+
+class DecisionSupportMonitoringMatchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    observation: dict[str, Any]
+    evaluation_series_id: str | None = None
+    accepted_selection_claim: dict[str, Any] | None = None
+
+
+class DecisionSupportMonitoringObservationResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    result: Literal["CREATED", "IDEMPOTENT_REPLAY"]
+    observation: dict[str, Any]
 
 
 class TradeoffSelectionCandidateReference(BaseModel):

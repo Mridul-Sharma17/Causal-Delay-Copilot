@@ -558,6 +558,12 @@ def _recommendation(
         "presented_alternative": None,
         "comparison": deepcopy(dict(comparison)),
         "monitoring_fallback_reason": monitoring_fallback_reason,
+        "monitoring_escalation_trigger_ref_and_hash": deepcopy(
+            option.get("monitoring_escalation_trigger_ref_and_hash")
+        ),
+        "monitoring_trigger_ref_and_hash": deepcopy(
+            option.get("monitoring_trigger_ref_and_hash")
+        ),
         "action_effect_evidence": option.get(
             "action_effect_evidence", "INTERVENTION_EFFECT_NOT_ESTIMATED"
         ),

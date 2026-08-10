@@ -5,7 +5,11 @@ import App, {
   DecisionSupportActionsStage,
   DecisionSupportProjectionDetails,
 } from "./App";
-import type { DecisionSupportBoundary, DecisionSupportOption } from "./contracts";
+import type {
+  DecisionSupportBoundary,
+  DecisionSupportOption,
+  DecisionSupportRegistryInspection,
+} from "./contracts";
 
 const healthResponse = {
   service: "causal-delay-copilot",
@@ -868,6 +872,57 @@ describe("Decision Support publication states", () => {
     expect(screen.getByText("Two-candidate trade-off")).toBeInTheDocument();
     expect(screen.getByText(/No candidate is recommended/)).toBeInTheDocument();
     expect(screen.getByText("DIRECT_ACTION_COST")).toBeInTheDocument();
+  });
+
+  test("discloses a monitoring match as manager review without an action effect", () => {
+    const baseBoundary = decisionBriefSnapshotResponse.decision_support as unknown as DecisionSupportBoundary;
+    const monitoringBoundary = {
+      ...baseBoundary,
+      outcome: "RECOMMENDATION_AVAILABLE",
+      state: "recommendation_available",
+      action_recommendation: {
+        selected_option_code: "ACCEPT_AND_MONITOR",
+        selected_option_version: "1",
+        selection_basis: "MONITORING_FALLBACK_NO_POSITIVE_ACTIVE_OPTION",
+        trigger_mode: "PROACTIVE",
+        runner_up: null,
+      },
+      monitoring: { state: "ELIGIBLE_FALLBACK", suppression_reasons: [] },
+      evaluation_lifecycle: {
+        schema_version: "decision-support-evaluation-read-model.v1",
+        evaluation_series_id: "series-monitoring",
+        head: { head_kind: "EVALUATION", advice_state: "current" },
+        history: [],
+        currentness: {
+          consuming_results: [
+            {
+              schema_identifier: "monitoring-match-result",
+              match_outcome: "REQUEST_MANAGER_REVIEW",
+            },
+          ],
+        },
+      },
+    } as DecisionSupportBoundary;
+
+    render(
+      <DecisionSupportActionsStage
+        boundary={monitoringBoundary}
+        registryInspection={
+          {
+            monitoring_triggers: [
+              { trigger_mode: "REACTIVE", state: "APPROVED" },
+              { trigger_mode: "PROACTIVE", state: "APPROVED" },
+            ],
+          } as unknown as DecisionSupportRegistryInspection
+        }
+      />,
+    );
+
+    expect(screen.getByText("Governed monitoring fallback")).toBeInTheDocument();
+    expect(screen.getByText("REQUEST_MANAGER_REVIEW")).toBeInTheDocument();
+    expect(
+      screen.getByText(/does not select, authorize, send, or execute an action/),
+    ).toBeInTheDocument();
   });
 });
 

@@ -891,6 +891,70 @@ export function DecisionSupportActionsStage({
     },
     {},
   );
+  const monitoring = boundary.monitoring;
+  const monitoringState =
+    typeof monitoring.state === "string" ? monitoring.state : "UNAVAILABLE_OR_UNKNOWN";
+  const monitoringReasonCode =
+    typeof monitoring.reason_code === "string" ? monitoring.reason_code : null;
+  const monitoringSuppressionReasons = Array.isArray(monitoring.suppression_reasons)
+    ? monitoring.suppression_reasons
+        .map(asRecord)
+        .filter((item): item is Record<string, unknown> => item !== null)
+    : [];
+  const currentnessReasonCodes = currentnessChecks.flatMap((item) =>
+    Array.isArray(item.ordered_currentness_reasons)
+      ? item.ordered_currentness_reasons.filter(
+          (reason): reason is string => typeof reason === "string",
+        )
+      : [],
+  );
+  const monitoringTriggerMode =
+    actionRecommendation !== null && typeof actionRecommendation.trigger_mode === "string"
+      ? actionRecommendation.trigger_mode.toUpperCase()
+      : typeof asRecord(boundary.subject_driver_state)?.trigger_mode === "string"
+        ? String(asRecord(boundary.subject_driver_state)?.trigger_mode).toUpperCase()
+        : null;
+  const monitoringTrigger =
+    Array.isArray(registry.monitoring_triggers)
+      ? registry.monitoring_triggers
+          .map(asRecord)
+          .find((item) => {
+            if (item === null || monitoringTriggerMode === null) {
+              return item !== null;
+            }
+            const modes = Array.isArray(item.trigger_modes)
+              ? item.trigger_modes
+              : [item.trigger_mode];
+            return modes.some(
+              (mode): mode is string =>
+                typeof mode === "string" && mode.toUpperCase() === monitoringTriggerMode,
+            );
+          }) ?? null
+      : null;
+  const monitoringTriggerState =
+    monitoringTrigger === null
+      ? "UNAVAILABLE"
+      : [monitoringTrigger.state, monitoringTrigger.review_status, monitoringTrigger.lifecycle_status]
+          .filter((value): value is string => typeof value === "string")
+          .join("/") || "UNKNOWN";
+  const monitoringMatches =
+    lifecycleCurrentness !== null && Array.isArray(lifecycleCurrentness.consuming_results)
+      ? lifecycleCurrentness.consuming_results
+          .map(asRecord)
+          .filter(
+            (item): item is Record<string, unknown> =>
+              item !== null && item.schema_identifier === "monitoring-match-result",
+          )
+      : [];
+  const latestMonitoringMatch =
+    monitoringMatches.length > 0 ? monitoringMatches[monitoringMatches.length - 1] : null;
+  const monitoringMatchOutcome =
+    typeof latestMonitoringMatch?.match_outcome === "string"
+      ? latestMonitoringMatch.match_outcome
+      : currentnessStates.ADVICE_CURRENTNESS_INVALIDATION !== undefined ||
+          currentnessStates.CURRENTNESS_NOT_AUTHORITATIVE_HEAD !== undefined
+        ? "STALE_OR_UNAVAILABLE"
+        : "NO_CANONICAL_OBSERVATION";
   const lifecycleEvaluation = lifecycleHistory.find(
     (item) =>
       item.record_type === "evaluation" &&
@@ -1106,6 +1170,43 @@ export function DecisionSupportActionsStage({
           <span>This publication does not authorize or execute an action.</span>
         </div>
       )}
+
+      <div className="action-monitoring" role="status">
+        <strong>Governed monitoring fallback</strong>
+        <span>
+          Eligibility: <code>{formatValue(monitoringState)}</code>
+        </span>
+        <span>
+          Atomic trigger: <code>{formatValue(monitoringTriggerState)}</code>
+        </span>
+        <span>
+          Canonical observation match: <code>{formatValue(monitoringMatchOutcome)}</code>
+        </span>
+        {monitoringReasonCode !== null && (
+          <span>
+            Eligibility reason: <code>{monitoringReasonCode}</code>
+          </span>
+        )}
+        {monitoringSuppressionReasons.length > 0 && (
+          <span>
+            Suppression reasons: <code>{formatValue(monitoringSuppressionReasons)}</code>
+          </span>
+        )}
+        {currentnessReasonCodes.length > 0 && (
+          <span>
+            Currentness/audit reasons: <code>{formatValue(currentnessReasonCodes)}</code>
+          </span>
+        )}
+        {monitoringMatchOutcome === "REQUEST_MANAGER_REVIEW" ? (
+          <span>Manager review was requested; this state does not select, authorize, send, or execute an action.</span>
+        ) : monitoringMatchOutcome === "NO_REVIEW_REQUEST" ? (
+          <span>The typed predicate did not match; no manager review request was emitted.</span>
+        ) : monitoringMatchOutcome === "NO_CANONICAL_OBSERVATION" ? (
+          <span>No canonical source observation has been matched for this recommendation.</span>
+        ) : (
+          <span>The observation or currentness proof is unavailable/stale; no review request is emitted.</span>
+        )}
+      </div>
 
       {tradeoff !== null && (
         <div className="action-tradeoff" role="status">

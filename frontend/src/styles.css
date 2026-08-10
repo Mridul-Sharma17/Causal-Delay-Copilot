@@ -296,7 +296,8 @@ code {
 .action-evidence,
 .action-suppressions,
 .action-options,
-.governed-records {
+.governed-records,
+.action-monitoring {
   display: grid;
   gap: 12px;
   padding: 16px;

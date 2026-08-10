@@ -508,6 +508,32 @@ def _result_projection(
     result["decision_support_evaluation_id"] = evaluation_occurrence_id
     result["decision_support_evaluation_series_id"] = evaluation_series_id
     result["evaluation_published_at"] = published_at
+    recommendation = _mapping(result.get("action_recommendation"))
+    if recommendation is not None and recommendation.get("selected_option_code") == "ACCEPT_AND_MONITOR":
+        recommendation = deepcopy(dict(recommendation))
+        subject_identity = identity_binding.get("subject_identity")
+        trigger_mode = identity_binding.get("trigger_mode")
+        if isinstance(subject_identity, str) and subject_identity:
+            recommendation["subject_identity"] = subject_identity
+        if isinstance(trigger_mode, str) and trigger_mode:
+            recommendation["trigger_mode"] = trigger_mode.upper()
+        recommendation["monitoring_activated_at"] = published_at
+        recommendation.pop("content_hash", None)
+        recommendation["content_hash"] = _sha256(recommendation)
+        result["action_recommendation"] = recommendation
+        result["action_recommendation_ref_and_hash"] = {
+            "reference": recommendation["occurrence_id"],
+            "content_hash": recommendation["content_hash"],
+        }
+        evaluation_record = _mapping(result.get("decision_support_evaluation"))
+        if evaluation_record is not None:
+            evaluation_record = deepcopy(dict(evaluation_record))
+            evaluation_record["action_recommendation_ref_and_hash"] = deepcopy(
+                result["action_recommendation_ref_and_hash"]
+            )
+            evaluation_record.pop("content_hash", None)
+            evaluation_record["content_hash"] = _sha256(evaluation_record)
+            result["decision_support_evaluation"] = evaluation_record
     result["content_hash"] = _sha256(result)
     return result
 

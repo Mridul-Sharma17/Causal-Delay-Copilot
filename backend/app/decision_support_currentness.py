@@ -10,6 +10,23 @@ from uuid import NAMESPACE_URL, uuid5
 
 from .canonical import canonical_json as _canonical_json
 from .canonical import normalise_temporal, sha256 as _sha256
+from .monitoring import (
+    MONITORING_MATCH_RESULT_SCHEMA_IDENTIFIER,
+    MONITORING_OBSERVATION_SCHEMA_IDENTIFIER,
+    MONITORING_OPTION_CODE,
+    MONITORING_OUTCOMES,
+    MONITORING_REVIEW_REQUEST_SCHEMA_IDENTIFIER,
+    MONITORING_RESPONSE_CODE,
+    MonitoringContractError,
+    evaluate_monitoring_predicate,
+    monitoring_match_result_key_for,
+    monitoring_observation_key_for,
+    monitoring_review_request_key_for,
+    monitoring_time_compare,
+    normalize_monitoring_observation,
+    normalize_monitoring_trigger,
+    trigger_id_and_version,
+)
 from .tradeoff_selection import (
     GOVERNANCE_SELECTION_REFERENCE_FIELD,
     TRADEOFF_SELECTION_CLAIM_SCHEMA_IDENTIFIER,
@@ -345,6 +362,50 @@ CURRENTNESS_CONSUMING_RESULTS_COLUMNS = [
     "payload_json",
 ]
 
+MONITORING_OBSERVATIONS_TABLE = """
+    CREATE TABLE IF NOT EXISTS decision_support_monitoring_observations (
+        observation_occurrence_id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL REFERENCES demo_workspaces(workspace_id),
+        monitoring_observation_key TEXT NOT NULL,
+        content_hash TEXT NOT NULL,
+        available_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        UNIQUE (workspace_id, monitoring_observation_key)
+    )
+"""
+MONITORING_OBSERVATIONS_COLUMNS = [
+    "observation_occurrence_id",
+    "workspace_id",
+    "monitoring_observation_key",
+    "content_hash",
+    "available_at",
+    "created_at",
+    "payload_json",
+]
+
+MONITORING_REVIEW_REQUESTS_TABLE = """
+    CREATE TABLE IF NOT EXISTS decision_support_monitoring_review_requests (
+        review_request_occurrence_id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL REFERENCES demo_workspaces(workspace_id),
+        monitoring_review_request_key TEXT NOT NULL,
+        monitoring_match_result_key TEXT NOT NULL,
+        content_hash TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        UNIQUE (workspace_id, monitoring_review_request_key)
+    )
+"""
+MONITORING_REVIEW_REQUESTS_COLUMNS = [
+    "review_request_occurrence_id",
+    "workspace_id",
+    "monitoring_review_request_key",
+    "monitoring_match_result_key",
+    "content_hash",
+    "created_at",
+    "payload_json",
+]
+
 CURRENTNESS_AUTHORITIES_TABLE = """
     CREATE TABLE IF NOT EXISTS decision_support_currentness_authorities (
         workspace_id TEXT NOT NULL REFERENCES demo_workspaces(workspace_id),
@@ -423,6 +484,16 @@ def ensure_currentness_schema(connection: sqlite3.Connection, *, create: bool) -
             CURRENTNESS_CONSUMING_RESULTS_COLUMNS,
         ),
         (
+            "decision_support_monitoring_observations",
+            MONITORING_OBSERVATIONS_TABLE,
+            MONITORING_OBSERVATIONS_COLUMNS,
+        ),
+        (
+            "decision_support_monitoring_review_requests",
+            MONITORING_REVIEW_REQUESTS_TABLE,
+            MONITORING_REVIEW_REQUESTS_COLUMNS,
+        ),
+        (
             "decision_support_currentness_authorities",
             CURRENTNESS_AUTHORITIES_TABLE,
             CURRENTNESS_AUTHORITIES_COLUMNS,
@@ -439,6 +510,8 @@ def ensure_currentness_schema(connection: sqlite3.Connection, *, create: bool) -
             "decision_support_current_advice_render_requests",
             "decision_support_current_advice_render_results",
             "decision_support_currentness_consuming_results",
+            "decision_support_monitoring_observations",
+            "decision_support_monitoring_review_requests",
         ):
             connection.execute(
                 f"""
@@ -1163,6 +1236,135 @@ def _recommendation_ref(result: Mapping[str, Any]) -> dict[str, str] | None:
     return {"reference": occurrence_id, "content_hash": content_hash}
 
 
+def _monitoring_trigger_candidates(
+    result: Mapping[str, Any],
+    *,
+    recommendation: Mapping[str, Any] | None,
+    payload: Mapping[str, Any],
+    ignore_identity: bool = False,
+    ignore_reference: bool = False,
+) -> list[Mapping[str, Any]]:
+    registry = _mapping(result.get("registry_inspection"))
+    if registry is None or not isinstance(registry.get("monitoring_triggers"), list):
+        return []
+    trigger_mode = payload.get("trigger_mode")
+    if not isinstance(trigger_mode, str) and recommendation is not None:
+        trigger_mode = recommendation.get("trigger_mode")
+    if not isinstance(trigger_mode, str):
+        identity = _mapping(result.get("identity_binding"))
+        trigger_mode = None if identity is None else identity.get("trigger_mode")
+    if isinstance(trigger_mode, str):
+        trigger_mode = trigger_mode.upper()
+    expected_identity = _mapping(payload.get("trigger_id_and_version"))
+    expected_ref = _ref_and_hash(
+        payload.get("monitoring_trigger_ref_and_hash")
+        or (None if recommendation is None else recommendation.get("monitoring_escalation_trigger_ref_and_hash"))
+    )
+    candidates: list[Mapping[str, Any]] = []
+    for record in registry["monitoring_triggers"]:
+        candidate = _mapping(record)
+        if candidate is None:
+            continue
+        candidate_id = candidate.get("trigger_id", candidate.get("record_id"))
+        candidate_version = candidate.get("trigger_version", candidate.get("version", "1"))
+        if candidate.get("option_code") != MONITORING_OPTION_CODE or candidate.get("option_version") != "1":
+            continue
+        raw_candidate_modes = candidate.get("trigger_modes")
+        if isinstance(raw_candidate_modes, list):
+            candidate_modes = {
+                str(mode).upper() for mode in raw_candidate_modes if isinstance(mode, str)
+            }
+        else:
+            candidate_modes = {str(candidate.get("trigger_mode", "")).upper()}
+        if trigger_mode is not None and trigger_mode not in candidate_modes:
+            continue
+        if not ignore_identity and expected_identity is not None and (
+            candidate_id != expected_identity.get("id")
+            or candidate_version != expected_identity.get("version")
+        ):
+            continue
+        candidate_hash = candidate.get("content_hash")
+        if not ignore_reference and expected_ref is not None and (
+            candidate_id != expected_ref["reference"]
+            or candidate_hash != expected_ref["content_hash"]
+        ):
+            continue
+        candidates.append(candidate)
+    return candidates
+
+
+def _monitoring_trigger_is_superseded(
+    candidate: Mapping[str, Any],
+    *,
+    candidates: list[Mapping[str, Any]],
+    cutoff: object,
+) -> bool:
+    candidate_id = candidate.get("trigger_id", candidate.get("record_id"))
+    candidate_hash = candidate.get("content_hash")
+    candidate_ref = {
+        "reference": candidate_id,
+        "content_hash": candidate_hash,
+    }
+    explicit_successor = _ref_and_hash(candidate.get("supersession_ref"))
+    for successor in candidates:
+        if successor is candidate:
+            continue
+        try:
+            successor_normalized = normalize_monitoring_trigger(successor)
+        except MonitoringContractError:
+            continue
+        if monitoring_time_compare(successor_normalized.get("published_at"), cutoff) not in {
+            -1,
+            0,
+        }:
+            continue
+        predecessor = _ref_and_hash(successor.get("predecessor_version_ref"))
+        if predecessor is not None and _same_ref(predecessor, candidate_ref):
+            return True
+        if explicit_successor is not None and _same_ref(
+            explicit_successor,
+            {
+                "reference": successor_normalized["trigger_id"],
+                "content_hash": successor_normalized["content_hash"],
+            },
+        ):
+            return True
+    return False
+
+
+def _applicable_monitoring_trigger_candidates(
+    result: Mapping[str, Any],
+    *,
+    recommendation: Mapping[str, Any] | None,
+    payload: Mapping[str, Any],
+    cutoff: object,
+) -> list[Mapping[str, Any]]:
+    candidates = _monitoring_trigger_candidates(
+        result,
+        recommendation=recommendation,
+        payload=payload,
+        ignore_identity=True,
+        ignore_reference=True,
+    )
+    applicable: list[Mapping[str, Any]] = []
+    for candidate in candidates:
+        try:
+            normalized = normalize_monitoring_trigger(candidate)
+        except MonitoringContractError:
+            continue
+        comparison = monitoring_time_compare(normalized.get("published_at"), cutoff)
+        if comparison not in {-1, 0}:
+            continue
+        if _monitoring_trigger_is_superseded(
+            candidate,
+            candidates=candidates,
+            cutoff=cutoff,
+        ):
+            continue
+        applicable.append(candidate)
+    return applicable
+
+
 def _same_ref(left: object, right: object) -> bool:
     return _canonical_json(left) == _canonical_json(right)
 
@@ -1477,12 +1679,22 @@ def _operation_payload_error(
         return "currentness operation payload is unavailable"
     payload_hash = _record_content_hash(payload)
     expected_hash = fields["operation_payload_ref_and_hash"]["content_hash"]
-    if payload_hash != expected_hash:
+    monitoring_observation_ref = _ref_and_hash(
+        payload.get("monitoring_observation_ref_and_hash")
+    )
+    if fields["operation_kind"] == "MONITORING_TRIGGER_MATCH" and monitoring_observation_ref is not None:
+        if not _same_ref(monitoring_observation_ref, fields["operation_payload_ref_and_hash"]):
+            return "currentness monitoring observation binding does not match its operation"
+    elif payload_hash != expected_hash:
         return "currentness operation payload integrity does not match its binding"
     payload_reference = fields["operation_payload_ref_and_hash"]["reference"]
     identifiers = _payload_references(payload)
     identifiers.discard(None)
-    if payload_reference not in identifiers:
+    if payload_reference not in identifiers and not (
+        fields["operation_kind"] == "MONITORING_TRIGGER_MATCH"
+        and monitoring_observation_ref is not None
+        and monitoring_observation_ref["reference"] == payload_reference
+    ):
         return "currentness operation payload reference does not match its record"
     if not _time_equal(payload.get("available_at"), fields["currentness_checked_at"]):
         return "currentness operation time is not the payload availability time"
@@ -1608,8 +1820,22 @@ def _operation_payload_shape_error(
             return "monitoring observation chronology is incomplete"
         if payload.get("trigger_id_and_version") is None:
             return "monitoring trigger identity is missing"
-        if payload.get("match_outcome", "NO_REVIEW_REQUEST") != "NO_REVIEW_REQUEST":
-            return "Core 31 does not publish monitoring review requests"
+        if payload.get("match_outcome", "NO_REVIEW_REQUEST") not in MONITORING_OUTCOMES:
+            return "monitoring match outcome is unsupported"
+        is_strict_observation = any(
+            key in payload
+            for key in (
+                "observation_registry_id",
+                "observation_registry_version",
+                "observation_code",
+                "observation_registry",
+            )
+        )
+        if is_strict_observation:
+            try:
+                normalize_monitoring_observation(payload)
+            except MonitoringContractError:
+                return "monitoring observation is not a canonical registered occurrence"
     return None
 
 
@@ -1627,6 +1853,8 @@ def _payload_references(payload: Mapping[str, Any]) -> set[str]:
         payload.get("selected_candidate_ref"),
         payload.get("observation_ref"),
         payload.get("monitoring_observation_ref"),
+        _mapping(payload.get("monitoring_observation_ref_and_hash"))
+        and _mapping(payload.get("monitoring_observation_ref_and_hash")).get("reference"),
     }
     render_request_occurrence_id = payload.get("render_request_occurrence_id")
     if isinstance(render_request_occurrence_id, str) and render_request_occurrence_id:
@@ -1821,37 +2049,198 @@ def _chain_errors(
         ):
             errors.append("GOVERNED_DEPENDENCY_NOT_CURRENT")
     elif operation_kind == "MONITORING_TRIGGER_MATCH":
-        observation_ref = payload.get("observation_ref") or _record_id(payload)
-        if not isinstance(observation_ref, str) or not observation_ref:
-            errors.append("GOVERNED_DEPENDENCY_NOT_CURRENT")
-        recommendation_record = _mapping(result.get("action_recommendation"))
-        selection_basis = (
-            None
-            if recommendation_record is None
-            else recommendation_record.get("selection_basis")
+        strict_observation = any(
+            key in payload
+            for key in (
+                "observation_registry_id",
+                "observation_registry_version",
+                "observation_code",
+                "observation_registry",
+            )
         )
-        if (
-            selection_basis == "MANAGER_TRADEOFF_SELECTION"
-            and selection_claim_ref is None
-        ) or (
-            selection_basis != "MANAGER_TRADEOFF_SELECTION"
-            and selection_claim_ref is not None
-        ):
-            errors.append("GOVERNED_DEPENDENCY_NOT_CURRENT")
-        if (
-            _time_compare(payload.get("monitoring_activated_at"), payload.get("observed_at"))
-            is None
-            or _time_compare(payload.get("observed_at"), available_at) is None
-        ):
-            errors.append("CURRENTNESS_COMPARISON_UNRESOLVED")
-        elif _time_compare(payload.get("monitoring_activated_at"), payload.get("observed_at")) > 0 or _time_compare(
-            payload.get("observed_at"), available_at
-        ) > 0:
-            errors.append("GOVERNED_DEPENDENCY_NOT_CURRENT")
-        if selection_claim is not None and not _time_equal(
-            payload.get("advice_chain_published_at"), selection_claim.get("published_at")
-        ):
-            errors.append("GOVERNED_DEPENDENCY_NOT_CURRENT")
+        if strict_observation:
+            try:
+                normalized_observation = normalize_monitoring_observation(payload)
+                canonical_fields = normalized_observation["canonical_fields"]
+                if not isinstance(canonical_fields, Mapping):
+                    raise MonitoringContractError("monitoring observation is legacy")
+                recommendation_record = _mapping(result.get("action_recommendation"))
+                if recommendation_record is None:
+                    errors.append("GOVERNED_DEPENDENCY_NOT_CURRENT")
+                elif (
+                    recommendation_record.get("selected_option_code") != MONITORING_OPTION_CODE
+                    or recommendation_record.get("selected_option_version") != "1"
+                ):
+                    errors.append("GOVERNED_DEPENDENCY_NOT_CURRENT")
+                recommendation_trigger_ref = _ref_and_hash(
+                    None
+                    if recommendation_record is None
+                    else recommendation_record.get(
+                        "monitoring_escalation_trigger_ref_and_hash"
+                    )
+                )
+                if recommendation_trigger_ref is None:
+                    errors.append("GOVERNED_DEPENDENCY_NOT_CURRENT")
+                selection_basis = (
+                    None
+                    if recommendation_record is None
+                    else recommendation_record.get("selection_basis")
+                )
+                if (
+                    selection_basis == "MANAGER_TRADEOFF_SELECTION"
+                    and selection_claim_ref is None
+                ) or (
+                    selection_basis != "MANAGER_TRADEOFF_SELECTION"
+                    and selection_claim_ref is not None
+                ):
+                    errors.append("GOVERNED_DEPENDENCY_NOT_CURRENT")
+                if recommendation_record is not None:
+                    if canonical_fields["canonical_subject_identity"] != recommendation_record.get(
+                        "subject_identity"
+                    ):
+                        errors.append("GOVERNED_DEPENDENCY_NOT_CURRENT")
+                    activation = recommendation_record.get("monitoring_activated_at")
+                else:
+                    activation = None
+                if activation in {None, "NOT_APPLICABLE"}:
+                    errors.append("GOVERNED_DEPENDENCY_NOT_CURRENT")
+                if (
+                    activation is not None
+                    and _time_compare(activation, payload.get("observed_at")) is None
+                ):
+                    errors.append("CURRENTNESS_COMPARISON_UNRESOLVED")
+                elif (
+                    activation is not None
+                    and _time_compare(activation, payload.get("observed_at")) > 0
+                ):
+                    errors.append("GOVERNED_DEPENDENCY_NOT_CURRENT")
+                if (
+                    _time_compare(payload.get("observed_at"), available_at) is None
+                ):
+                    errors.append("CURRENTNESS_COMPARISON_UNRESOLVED")
+                elif _time_compare(payload.get("observed_at"), available_at) > 0:
+                    errors.append("GOVERNED_DEPENDENCY_NOT_CURRENT")
+                if recommendation_record is not None and not _time_equal(
+                    payload.get("monitoring_activated_at"),
+                    recommendation_record.get("monitoring_activated_at"),
+                ):
+                    errors.append("GOVERNED_DEPENDENCY_NOT_CURRENT")
+                if not _time_equal(
+                    payload.get("advice_chain_published_at"),
+                    evaluation.get("evaluation_published_at"),
+                ):
+                    errors.append("GOVERNED_DEPENDENCY_NOT_CURRENT")
+
+                exact_trigger_candidates = _monitoring_trigger_candidates(
+                    result,
+                    recommendation=recommendation_record,
+                    payload=payload,
+                )
+                applicable_trigger_candidates = _applicable_monitoring_trigger_candidates(
+                    result,
+                    recommendation=recommendation_record,
+                    payload=payload,
+                    cutoff=available_at,
+                )
+                if (
+                    len(exact_trigger_candidates) != 1
+                    or len(applicable_trigger_candidates) != 1
+                    or recommendation_trigger_ref is None
+                    or not _same_ref(
+                        recommendation_trigger_ref,
+                        {
+                            "reference": applicable_trigger_candidates[0].get(
+                                "trigger_id",
+                                applicable_trigger_candidates[0].get("record_id"),
+                            ),
+                            "content_hash": applicable_trigger_candidates[0].get(
+                                "content_hash"
+                            ),
+                        },
+                    )
+                ):
+                    errors.append("GOVERNED_DEPENDENCY_NOT_CURRENT")
+                else:
+                    try:
+                        normalized_trigger = normalize_monitoring_trigger(
+                            applicable_trigger_candidates[0]
+                        )
+                        expected_trigger_identity = trigger_id_and_version(
+                            normalized_trigger
+                        )
+                        if payload.get("trigger_id_and_version") != expected_trigger_identity:
+                            errors.append("GOVERNED_DEPENDENCY_NOT_CURRENT")
+                        payload_trigger_ref = _ref_and_hash(
+                            payload.get("monitoring_trigger_ref_and_hash")
+                        )
+                        if payload_trigger_ref is None or not _same_ref(
+                            payload_trigger_ref,
+                            recommendation_trigger_ref,
+                        ):
+                            errors.append("GOVERNED_DEPENDENCY_NOT_CURRENT")
+                        trigger_published_at = normalized_trigger.get("published_at")
+                        if (
+                            trigger_published_at is None
+                            or _time_compare(trigger_published_at, available_at) is None
+                        ):
+                            errors.append("CURRENTNESS_COMPARISON_UNRESOLVED")
+                        elif _time_compare(trigger_published_at, available_at) > 0:
+                            errors.append("GOVERNED_DEPENDENCY_NOT_CURRENT")
+                        if recommendation_trigger_ref is None or (
+                            recommendation_trigger_ref["reference"]
+                            != normalized_trigger["trigger_id"]
+                            or recommendation_trigger_ref["content_hash"]
+                            != normalized_trigger["content_hash"]
+                        ):
+                            errors.append("GOVERNED_DEPENDENCY_NOT_CURRENT")
+                        predicate_result = evaluate_monitoring_predicate(
+                            normalized_trigger,
+                            normalized_observation,
+                        )
+                        claimed_outcome = payload.get("match_outcome")
+                        expected_outcome = (
+                            MONITORING_RESPONSE_CODE
+                            if predicate_result
+                            else "NO_REVIEW_REQUEST"
+                        )
+                        if claimed_outcome is not None and claimed_outcome != expected_outcome:
+                            errors.append("GOVERNED_DEPENDENCY_NOT_CURRENT")
+                    except MonitoringContractError:
+                        errors.append("GOVERNED_DEPENDENCY_NOT_CURRENT")
+            except MonitoringContractError:
+                errors.append("GOVERNED_DEPENDENCY_NOT_CURRENT")
+        else:
+            observation_ref = payload.get("observation_ref") or _record_id(payload)
+            if not isinstance(observation_ref, str) or not observation_ref:
+                errors.append("GOVERNED_DEPENDENCY_NOT_CURRENT")
+            recommendation_record = _mapping(result.get("action_recommendation"))
+            selection_basis = (
+                None
+                if recommendation_record is None
+                else recommendation_record.get("selection_basis")
+            )
+            if (
+                selection_basis == "MANAGER_TRADEOFF_SELECTION"
+                and selection_claim_ref is None
+            ) or (
+                selection_basis != "MANAGER_TRADEOFF_SELECTION"
+                and selection_claim_ref is not None
+            ):
+                errors.append("GOVERNED_DEPENDENCY_NOT_CURRENT")
+            if (
+                _time_compare(payload.get("monitoring_activated_at"), payload.get("observed_at"))
+                is None
+                or _time_compare(payload.get("observed_at"), available_at) is None
+            ):
+                errors.append("CURRENTNESS_COMPARISON_UNRESOLVED")
+            elif _time_compare(payload.get("monitoring_activated_at"), payload.get("observed_at")) > 0 or _time_compare(
+                payload.get("observed_at"), available_at
+            ) > 0:
+                errors.append("GOVERNED_DEPENDENCY_NOT_CURRENT")
+            if selection_claim is not None and not _time_equal(
+                payload.get("advice_chain_published_at"), selection_claim.get("published_at")
+            ):
+                errors.append("GOVERNED_DEPENDENCY_NOT_CURRENT")
     return errors
 
 
@@ -2161,7 +2550,7 @@ class DecisionSupportCurrentnessMixin:
             value: key
             for key, value in CURRENTNESS_CONSUMING_RESULT_BY_OPERATION_KIND.items()
         }.get(result_kind)
-        valid_monitoring_outcomes = {"NO_REVIEW_REQUEST"}
+        valid_monitoring_outcomes = MONITORING_OUTCOMES
         if (
             record.get("schema_identifier") != result_kind
             or record.get("schema_version") != CURRENTNESS_CONSUMING_RESULT_SCHEMA_VERSION
@@ -2298,10 +2687,48 @@ class DecisionSupportCurrentnessMixin:
                 raise DecisionSupportCurrentnessUnavailable(
                     "stored monitoring consuming result has an unsupported outcome"
                 )
-            if record.get("monitoring_review_request_ref_and_hash") is not None:
+            request_ref = record.get("monitoring_review_request_ref_and_hash")
+            if record.get("match_outcome") == "NO_REVIEW_REQUEST" and request_ref is not None:
                 raise DecisionSupportCurrentnessUnavailable(
-                    "Core 31 cannot own a monitoring review request"
+                    "a false monitoring predicate cannot carry a review request"
                 )
+            if record.get("match_outcome") == MONITORING_RESPONSE_CODE and _ref_and_hash(
+                request_ref
+            ) is None:
+                raise DecisionSupportCurrentnessUnavailable(
+                    "a true monitoring predicate must carry a review request"
+                )
+            if record.get("match_outcome") == MONITORING_RESPONSE_CODE and connection is not None:
+                normalized_request_ref = _ref_and_hash(request_ref)
+                if normalized_request_ref is None:
+                    raise DecisionSupportCurrentnessUnavailable(
+                        "monitoring consuming result review request binding is invalid"
+                    )
+                request_occurrence_id = normalized_request_ref["reference"]
+                if request_occurrence_id.startswith("monitoring-review-request:"):
+                    request_occurrence_id = request_occurrence_id.split(":", 1)[1]
+                request_row = connection.execute(
+                    """
+                    SELECT * FROM decision_support_monitoring_review_requests
+                    WHERE workspace_id = ? AND review_request_occurrence_id = ?
+                    """,
+                    (row["workspace_id"], request_occurrence_id),
+                ).fetchone()
+                if request_row is None:
+                    raise DecisionSupportCurrentnessUnavailable(
+                        "monitoring consuming result references a missing review request"
+                    )
+                request_record = self._monitoring_review_request_from_row(request_row)
+                if (
+                    normalized_request_ref["reference"]
+                    != f"monitoring-review-request:{request_record['review_request_occurrence_id']}"
+                    or normalized_request_ref["content_hash"] != request_record["content_hash"]
+                    or request_record["monitoring_match_result_key"]
+                    != record["consuming_result_key"]
+                ):
+                    raise DecisionSupportCurrentnessUnavailable(
+                        "monitoring consuming result review request binding is invalid"
+                    )
         return record
 
     def _currentness_head_locked(
@@ -2321,6 +2748,127 @@ class DecisionSupportCurrentnessMixin:
             return None
         validated = self._validated_head_read_model(connection, row)  # type: ignore[attr-defined]
         return row, validated
+
+    def _monitoring_observation_from_row(
+        self,
+        row: sqlite3.Row,
+    ) -> dict[str, Any]:
+        record = _json_mapping(
+            row["payload_json"],
+            "stored monitoring observation is invalid",
+        )
+        try:
+            normalized = normalize_monitoring_observation(record)
+        except MonitoringContractError as error:
+            raise DecisionSupportCurrentnessUnavailable(
+                "stored monitoring observation failed its closed contract"
+            ) from error
+        if (
+            normalized["occurrence_id"] != str(row["observation_occurrence_id"])
+            or normalized["monitoring_observation_key"]
+            != str(row["monitoring_observation_key"])
+            or normalized["content_hash"] != str(row["content_hash"])
+            or _canonical_json(record.get("available_at")) != str(row["available_at"])
+        ):
+            raise DecisionSupportCurrentnessUnavailable(
+                "stored monitoring observation failed its integrity binding"
+            )
+        return record
+
+    def _monitoring_review_request_from_row(
+        self,
+        row: sqlite3.Row,
+    ) -> dict[str, Any]:
+        record = _json_mapping(
+            row["payload_json"],
+            "stored monitoring review request is invalid",
+        )
+        if (
+            record.get("schema_identifier") != MONITORING_REVIEW_REQUEST_SCHEMA_IDENTIFIER
+            or record.get("schema_version") != CURRENTNESS_SCHEMA_VERSION
+            or record.get("review_request_occurrence_id")
+            != str(row["review_request_occurrence_id"])
+            or record.get("monitoring_review_request_key")
+            != str(row["monitoring_review_request_key"])
+            or record.get("monitoring_match_result_key")
+            != str(row["monitoring_match_result_key"])
+            or record.get("content_hash") != str(row["content_hash"])
+            or _hash_without_content_hash(record) != str(row["content_hash"])
+            or record.get("response_code") != MONITORING_RESPONSE_CODE
+            or "monitoring_match_result_ref_and_hash" in record
+            or _ref_and_hash(record.get("recommendation_ref_and_hash")) is None
+            or record.get("recommendation_occurrence_id")
+            != _ref_and_hash(record.get("recommendation_ref_and_hash"))["reference"]
+            or _ref_and_hash(record.get("monitoring_trigger_ref_and_hash")) is None
+            or _ref_and_hash(record.get("monitoring_observation_ref_and_hash")) is None
+        ):
+            raise DecisionSupportCurrentnessUnavailable(
+                "stored monitoring review request failed its closed contract"
+            )
+        return record
+
+    def list_decision_support_monitoring_observations(
+        self,
+        workspace_id: str,
+    ) -> list[dict[str, Any]]:
+        with self._lock:  # type: ignore[attr-defined]
+            connection = self._currentness_connection()
+            rows = connection.execute(
+                """
+                SELECT * FROM decision_support_monitoring_observations
+                WHERE workspace_id = ?
+                ORDER BY created_at, observation_occurrence_id
+                """,
+                (workspace_id,),
+            ).fetchall()
+            return [self._monitoring_observation_from_row(row) for row in rows]
+
+    def list_decision_support_monitoring_review_requests(
+        self,
+        workspace_id: str,
+    ) -> list[dict[str, Any]]:
+        with self._lock:  # type: ignore[attr-defined]
+            connection = self._currentness_connection()
+            rows = connection.execute(
+                """
+                SELECT * FROM decision_support_monitoring_review_requests
+                WHERE workspace_id = ?
+                ORDER BY created_at, review_request_occurrence_id
+                """,
+                (workspace_id,),
+            ).fetchall()
+            return [self._monitoring_review_request_from_row(row) for row in rows]
+
+    def register_monitoring_observation(
+        self,
+        workspace_id: str,
+        *,
+        observation: Mapping[str, Any],
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Register one strict canonical Monitoring Observation occurrence."""
+
+        if not isinstance(observation, Mapping):
+            raise DecisionSupportCurrentnessUnavailable(
+                "monitoring observation is invalid"
+            )
+        record = deepcopy(dict(observation))
+        try:
+            normalized = normalize_monitoring_observation(record)
+        except MonitoringContractError as error:
+            raise DecisionSupportCurrentnessUnavailable(
+                "monitoring observation is invalid"
+            ) from error
+        if record.get("monitoring_observation_key") is None:
+            record["monitoring_observation_key"] = normalized[
+                "monitoring_observation_key"
+            ]
+            record["content_hash"] = _hash_without_content_hash(record)
+        return self.register_decision_support_currentness_source(
+            workspace_id,
+            payload=record,
+            now=now,
+        )
 
     def register_decision_support_currentness_source(
         self,
@@ -2369,6 +2917,75 @@ class DecisionSupportCurrentnessMixin:
             connection = self._currentness_connection()
             try:
                 connection.execute("BEGIN IMMEDIATE")
+                monitoring_normalized: dict[str, Any] | None = None
+                if schema_identifier == MONITORING_OBSERVATION_SCHEMA_IDENTIFIER:
+                    try:
+                        monitoring_normalized = normalize_monitoring_observation(
+                            record,
+                            allow_legacy=True,
+                        )
+                    except MonitoringContractError as error:
+                        raise DecisionSupportCurrentnessUnavailable(
+                            "monitoring observation is invalid"
+                        ) from error
+                    if not monitoring_normalized["legacy"]:
+                        existing_observation = connection.execute(
+                            """
+                            SELECT * FROM decision_support_monitoring_observations
+                            WHERE workspace_id = ? AND monitoring_observation_key = ?
+                            """,
+                            (
+                                workspace_id,
+                                monitoring_normalized["monitoring_observation_key"],
+                            ),
+                        ).fetchone()
+                        if existing_observation is not None:
+                            existing_record = self._monitoring_observation_from_row(
+                                existing_observation
+                            )
+                            if (
+                                str(existing_observation["content_hash"])
+                                != supplied_hash
+                                or str(existing_observation["observation_occurrence_id"])
+                                != monitoring_normalized["occurrence_id"]
+                            ):
+                                raise DecisionSupportCurrentnessConflict(
+                                    "monitoring observation logical key was reused with different content"
+                                )
+                            if _canonical_json(existing_record) != _canonical_json(record):
+                                raise DecisionSupportCurrentnessConflict(
+                                    "monitoring observation occurrence was reused with different content"
+                                )
+                        else:
+                            existing_occurrence = connection.execute(
+                                """
+                                SELECT 1 FROM decision_support_monitoring_observations
+                                WHERE workspace_id = ? AND observation_occurrence_id = ?
+                                """,
+                                (workspace_id, monitoring_normalized["occurrence_id"]),
+                            ).fetchone()
+                            if existing_occurrence is not None:
+                                raise DecisionSupportCurrentnessConflict(
+                                    "monitoring observation occurrence was reused with different content"
+                                )
+                            connection.execute(
+                                """
+                                INSERT INTO decision_support_monitoring_observations (
+                                    observation_occurrence_id, workspace_id,
+                                    monitoring_observation_key, content_hash,
+                                    available_at, created_at, payload_json
+                                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                                """,
+                                (
+                                    monitoring_normalized["occurrence_id"],
+                                    workspace_id,
+                                    monitoring_normalized["monitoring_observation_key"],
+                                    supplied_hash,
+                                    _canonical_json(record["available_at"]),
+                                    created_at,
+                                    _canonical_json(record),
+                                ),
+                            )
                 existing = connection.execute(
                     """
                     SELECT occurrence_kind, outcome_code, content_hash
@@ -2439,6 +3056,16 @@ class DecisionSupportCurrentnessMixin:
         else:
             expected_kind = CURRENTNESS_SOURCE_OCCURRENCE_AUDIT_KIND
             expected_outcome = CURRENTNESS_SOURCE_OCCURRENCE_AUDIT_OUTCOME
+        authoritative_payload_ref = payload_ref
+        if operation_kind == "MONITORING_TRIGGER_MATCH":
+            source_ref = _ref_and_hash(
+                payload.get("monitoring_observation_ref_and_hash")
+            )
+            if source_ref is not None:
+                authoritative_payload_ref = source_ref
+                source_reference = source_ref["reference"]
+                if source_reference.startswith("monitoring-observation:"):
+                    occurrence_id = source_reference.split(":", 1)[1]
         row = connection.execute(
             """
             SELECT occurrence_kind, outcome_code, content_hash
@@ -2451,7 +3078,7 @@ class DecisionSupportCurrentnessMixin:
             row is None
             or str(row["occurrence_kind"]) != expected_kind
             or str(row["outcome_code"]) != expected_outcome
-            or str(row["content_hash"]) != str(payload_ref["content_hash"])
+            or str(row["content_hash"]) != str(authoritative_payload_ref["content_hash"])
         ):
             raise DecisionSupportCurrentnessUnavailable(
                 "currentness operation payload is not an authoritative source occurrence"
@@ -2469,12 +3096,27 @@ class DecisionSupportCurrentnessMixin:
             raise DecisionSupportCurrentnessUnavailable("currentness operation payload is invalid")
         payload = deepcopy(dict(payload))
         payload_hash = _record_content_hash(payload)
-        if payload_hash != fields["operation_payload_ref_and_hash"]["content_hash"]:
+        monitoring_source_ref = _ref_and_hash(
+            payload.get("monitoring_observation_ref_and_hash")
+        )
+        if fields["operation_kind"] == "MONITORING_TRIGGER_MATCH" and monitoring_source_ref is not None:
+            if not _same_ref(
+                monitoring_source_ref,
+                fields["operation_payload_ref_and_hash"],
+            ):
+                raise DecisionSupportCurrentnessUnavailable(
+                    "currentness monitoring observation binding does not match its reference"
+                )
+        elif payload_hash != fields["operation_payload_ref_and_hash"]["content_hash"]:
             raise DecisionSupportCurrentnessUnavailable(
                 "currentness operation payload hash does not match its reference"
             )
         payload_ref = fields["operation_payload_ref_and_hash"]["reference"]
-        if payload_ref not in _payload_references(payload):
+        if payload_ref not in _payload_references(payload) and not (
+            fields["operation_kind"] == "MONITORING_TRIGGER_MATCH"
+            and monitoring_source_ref is not None
+            and monitoring_source_ref["reference"] == payload_ref
+        ):
             raise DecisionSupportCurrentnessUnavailable(
                 "currentness operation payload reference does not match its record"
             )
@@ -3870,6 +4512,7 @@ class DecisionSupportCurrentnessMixin:
         recommendation = _recommendation_ref(terminal_result)
         claim = operation["accepted_selection_claim_ref_and_hash_or_null"]
         payload_ref = operation["operation_payload_ref_and_hash"]
+        monitoring_review_request: dict[str, Any] | None = None
         if operation_kind == "MANAGER_AUTHORIZATION":
             result_key_fields = {
                 "authorization_attempt_ref_and_hash": deepcopy(dict(payload_ref)),
@@ -3880,26 +4523,96 @@ class DecisionSupportCurrentnessMixin:
                 "currentness_check_ref_and_hash": check_ref,
             }
         elif operation_kind == "MONITORING_TRIGGER_MATCH":
-            match_outcome = payload.get("match_outcome", "NO_REVIEW_REQUEST")
-            if match_outcome != "NO_REVIEW_REQUEST":
-                raise DecisionSupportCurrentnessUnavailable(
-                    "Core 31 does not publish monitoring review requests"
+            observation_ref = _ref_and_hash(
+                payload.get("monitoring_observation_ref_and_hash")
+            ) or deepcopy(dict(payload_ref))
+            normalized_observation: dict[str, Any] | None = None
+            normalized_trigger: dict[str, Any] | None = None
+            strict_observation = any(
+                key in payload
+                for key in (
+                    "observation_registry_id",
+                    "observation_registry_version",
+                    "observation_code",
+                    "observation_registry",
                 )
+            )
+            if strict_observation:
+                try:
+                    normalized_observation = normalize_monitoring_observation(payload)
+                    candidates = _monitoring_trigger_candidates(
+                        terminal_result,
+                        recommendation=_mapping(terminal_result.get("action_recommendation")),
+                        payload=payload,
+                    )
+                    if len(candidates) != 1:
+                        raise MonitoringContractError(
+                            "monitoring trigger is not unique at the match cutoff"
+                        )
+                    normalized_trigger = normalize_monitoring_trigger(candidates[0])
+                    match_outcome = (
+                        MONITORING_RESPONSE_CODE
+                        if evaluate_monitoring_predicate(
+                            normalized_trigger,
+                            normalized_observation,
+                        )
+                        else "NO_REVIEW_REQUEST"
+                    )
+                except MonitoringContractError as error:
+                    raise DecisionSupportCurrentnessUnavailable(
+                        "monitoring predicate could not be evaluated"
+                    ) from error
+            else:
+                match_outcome = payload.get("match_outcome", "NO_REVIEW_REQUEST")
+            if match_outcome not in MONITORING_OUTCOMES:
+                raise DecisionSupportCurrentnessUnavailable(
+                    "monitoring match outcome is unsupported"
+                )
+            trigger_identity = deepcopy(payload.get("trigger_id_and_version"))
+            if not isinstance(trigger_identity, Mapping):
+                raise DecisionSupportCurrentnessUnavailable(
+                    "monitoring trigger identity is unavailable"
+                )
+            observation_key = payload.get("monitoring_observation_key")
+            if normalized_observation is not None:
+                observation_key = normalized_observation["monitoring_observation_key"]
+            if not isinstance(observation_key, str) or not observation_key:
+                observation_key = observation_ref["reference"]
             result_key_fields = {
                 "recommendation_ref_and_hash": deepcopy(recommendation),
-                "trigger_id_and_version": deepcopy(
-                    payload.get("trigger_id_and_version")
-                ),
-                "monitoring_observation_key": payload.get(
-                    "monitoring_observation_key", payload_ref["reference"]
-                ),
-                "monitoring_observation_ref_and_hash": deepcopy(dict(payload_ref)),
+                "trigger_id_and_version": trigger_identity,
+                "monitoring_observation_key": observation_key,
+                "monitoring_observation_ref_and_hash": observation_ref,
                 "accepted_selection_claim_ref_and_hash_or_null": deepcopy(claim),
                 "currentness_operation_ref_and_hash": operation_ref,
                 "currentness_check_ref_and_hash": check_ref,
                 "match_outcome": match_outcome,
                 "monitoring_review_request_key_or_null": None,
             }
+            if match_outcome == MONITORING_RESPONSE_CODE:
+                if recommendation is None:
+                    raise DecisionSupportCurrentnessUnavailable(
+                        "monitoring review request recommendation is unavailable"
+                    )
+                if normalized_trigger is None:
+                    raise DecisionSupportCurrentnessUnavailable(
+                        "monitoring review request trigger is unavailable"
+                    )
+                request_key_fields = {
+                    "evaluation_series_id": operation["evaluation_series_id"],
+                    "recommendation_occurrence_id": recommendation["reference"],
+                    "trigger_id_and_version": deepcopy(trigger_identity),
+                    "monitoring_observation_key": observation_key,
+                    "monitoring_observation_ref_and_hash": deepcopy(observation_ref),
+                    "accepted_selection_claim_ref_and_hash_or_null": deepcopy(claim),
+                    "currentness_operation_ref_and_hash": operation_ref,
+                    "currentness_check_ref_and_hash": check_ref,
+                    "response_code": MONITORING_RESPONSE_CODE,
+                }
+                request_key = monitoring_review_request_key_for(request_key_fields)
+                result_key_fields["monitoring_review_request_key_or_null"] = request_key
+            else:
+                request_key = None
         else:
             result_key_fields = {
                 "tradeoff_selection_attempt_ref_and_hash": deepcopy(dict(payload_ref)),
@@ -3907,7 +4620,11 @@ class DecisionSupportCurrentnessMixin:
                 "currentness_check_ref_and_hash": check_ref,
                 "selection_result": "CURRENTNESS_PROVEN_AT_CHECK",
             }
-        result_key = _sha256(result_key_fields)
+        result_key = (
+            monitoring_match_result_key_for(result_key_fields)
+            if operation_kind == "MONITORING_TRIGGER_MATCH"
+            else _sha256(result_key_fields)
+        )
         existing = connection.execute(
             """
             SELECT * FROM decision_support_currentness_consuming_results
@@ -3917,6 +4634,85 @@ class DecisionSupportCurrentnessMixin:
         ).fetchone()
         if existing is not None:
             return self._consuming_result_from_row(existing, connection=connection)
+        if operation_kind == "MONITORING_TRIGGER_MATCH" and match_outcome == MONITORING_RESPONSE_CODE:
+            request_occurrence_id = uuid5(
+                NAMESPACE_URL,
+                f"causal-delay-copilot:{MONITORING_REVIEW_REQUEST_SCHEMA_IDENTIFIER}:{request_key}",
+            ).hex
+            request_record = {
+                "schema_identifier": MONITORING_REVIEW_REQUEST_SCHEMA_IDENTIFIER,
+                "schema_version": CURRENTNESS_SCHEMA_VERSION,
+                "review_request_occurrence_id": request_occurrence_id,
+                "monitoring_review_request_key": request_key,
+                "monitoring_match_result_key": result_key,
+                "evaluation_series_id": operation["evaluation_series_id"],
+                "recommendation_occurrence_id": recommendation["reference"]
+                if recommendation is not None
+                else None,
+                "recommendation_ref_and_hash": deepcopy(recommendation),
+                "trigger_id_and_version": deepcopy(result_key_fields["trigger_id_and_version"]),
+                "monitoring_trigger_ref_and_hash": {
+                    "reference": normalized_trigger["trigger_id"],
+                    "content_hash": normalized_trigger["content_hash"],
+                },
+                "monitoring_observation_key": result_key_fields["monitoring_observation_key"],
+                "monitoring_observation_ref_and_hash": deepcopy(
+                    result_key_fields["monitoring_observation_ref_and_hash"]
+                ),
+                "accepted_selection_claim_ref_and_hash_or_null": deepcopy(claim),
+                "currentness_operation_ref_and_hash": operation_ref,
+                "currentness_check_ref_and_hash": check_ref,
+                "response_code": MONITORING_RESPONSE_CODE,
+            }
+            request_record["content_hash"] = _hash_without_content_hash(request_record)
+            existing_request = connection.execute(
+                """
+                SELECT * FROM decision_support_monitoring_review_requests
+                WHERE workspace_id = ? AND monitoring_review_request_key = ?
+                """,
+                (workspace_id, request_key),
+            ).fetchone()
+            if existing_request is not None:
+                existing_request_record = self._monitoring_review_request_from_row(
+                    existing_request
+                )
+                if _canonical_json(existing_request_record) != _canonical_json(request_record):
+                    raise DecisionSupportCurrentnessConflict(
+                        "monitoring review request key was reused with different content"
+                    )
+                monitoring_review_request = existing_request_record
+            else:
+                _audit_locked(
+                    connection,
+                    workspace_id=workspace_id,
+                    occurrence_id=request_occurrence_id,
+                    idempotency_key=(
+                        f"decision-support-monitoring-review-request:{request_key}"
+                    ),
+                    occurrence_kind="DECISION_SUPPORT_MONITORING_REVIEW_REQUEST",
+                    outcome_code=MONITORING_RESPONSE_CODE,
+                    content_hash=str(request_record["content_hash"]),
+                    created_at=created_at,
+                )
+                connection.execute(
+                    """
+                    INSERT INTO decision_support_monitoring_review_requests (
+                        review_request_occurrence_id, workspace_id,
+                        monitoring_review_request_key, monitoring_match_result_key,
+                        content_hash, created_at, payload_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        request_occurrence_id,
+                        workspace_id,
+                        request_key,
+                        result_key,
+                        request_record["content_hash"],
+                        created_at,
+                        _canonical_json(request_record),
+                    ),
+                )
+                monitoring_review_request = request_record
         occurrence_id = uuid5(
             NAMESPACE_URL,
             f"causal-delay-copilot:{result_kind}:{result_key}",
@@ -3961,8 +4757,16 @@ class DecisionSupportCurrentnessMixin:
         else:
             record.update(
                 {
-                    "match_outcome": payload.get("match_outcome", "NO_REVIEW_REQUEST"),
-                    "monitoring_review_request_ref_and_hash": None,
+                    "match_outcome": match_outcome,
+                    "monitoring_review_request_ref_and_hash": (
+                        {
+                            "reference": "monitoring-review-request:"
+                            + str(monitoring_review_request["review_request_occurrence_id"]),
+                            "content_hash": monitoring_review_request["content_hash"],
+                        }
+                        if monitoring_review_request is not None
+                        else None
+                    ),
                 }
             )
         record["content_hash"] = _hash_without_content_hash(record)
@@ -6036,6 +6840,230 @@ class DecisionSupportCurrentnessMixin:
             except Exception:
                 connection.rollback()
                 raise
+
+    def match_monitoring_observation(
+        self,
+        workspace_id: str,
+        *,
+        observation: Mapping[str, Any],
+        evaluation_series_id: str | None = None,
+        accepted_selection_claim: Mapping[str, Any] | None = None,
+        currentness_context: Mapping[str, Any] | None = None,
+        now: datetime | None = None,
+    ) -> StoredCurrentnessResult:
+        """Match one immutable observation against the current monitor recommendation."""
+
+        try:
+            normalized = normalize_monitoring_observation(observation)
+        except MonitoringContractError as error:
+            raise DecisionSupportCurrentnessUnavailable(
+                "monitoring observation is invalid"
+            ) from error
+        stored_observation = self.register_monitoring_observation(
+            workspace_id,
+            observation=observation,
+            now=now,
+        )
+        try:
+            normalized = normalize_monitoring_observation(stored_observation)
+        except MonitoringContractError as error:
+            raise DecisionSupportCurrentnessUnavailable(
+                "registered monitoring observation is invalid"
+            ) from error
+        series_id = evaluation_series_id or stored_observation.get("evaluation_series_id")
+        if not isinstance(series_id, str) or not series_id:
+            raise DecisionSupportCurrentnessUnavailable(
+                "monitoring match evaluation series is missing"
+            )
+        source_ref = {
+            "reference": f"{MONITORING_OBSERVATION_SCHEMA_IDENTIFIER}:{normalized['occurrence_id']}",
+            "content_hash": normalized["content_hash"],
+        }
+        with self._lock:  # type: ignore[attr-defined]
+            connection = self._currentness_connection()
+            current_head = self._currentness_head_locked(
+                connection,
+                workspace_id,
+                series_id,
+            )
+            if current_head is None:
+                raise DecisionSupportCurrentnessUnavailable(
+                    "monitoring match evaluation series is unavailable"
+                )
+            _, head = current_head
+            if head["head_kind"] != "EVALUATION":
+                raise DecisionSupportCurrentnessUnavailable(
+                    "monitoring match requires an authoritative evaluation head"
+                )
+            _, evaluation, terminal_result = self._load_evaluation_locked(
+                connection,
+                workspace_id=workspace_id,
+                evaluation_series_id=series_id,
+                evaluation_occurrence_id=head["head_occurrence_id"],
+                evaluation_digest=head["head_digest"],
+                terminal_binding={
+                    "reference": f"decision-support-result:{head['head_occurrence_id']}",
+                    "content_hash": head["head_result_hash"],
+                },
+            )
+            recommendation = _mapping(terminal_result.get("action_recommendation"))
+            recommendation_ref = _recommendation_ref(terminal_result)
+            if recommendation is None or recommendation_ref is None:
+                raise DecisionSupportCurrentnessUnavailable(
+                    "monitoring match requires an Action Recommendation"
+                )
+            if (
+                recommendation.get("selected_option_code") != MONITORING_OPTION_CODE
+                or recommendation.get("selected_option_version") != "1"
+            ):
+                raise DecisionSupportCurrentnessUnavailable(
+                    "monitoring match requires an Accept and Monitor recommendation"
+                )
+            recommendation_trigger_ref = _ref_and_hash(
+                recommendation.get("monitoring_escalation_trigger_ref_and_hash")
+            )
+            if recommendation_trigger_ref is None:
+                raise DecisionSupportCurrentnessUnavailable(
+                    "monitoring recommendation does not reference an exact trigger"
+                )
+            selection_basis = recommendation.get("selection_basis")
+            if (
+                selection_basis == "MANAGER_TRADEOFF_SELECTION"
+                and accepted_selection_claim is None
+            ) or (
+                selection_basis != "MANAGER_TRADEOFF_SELECTION"
+                and accepted_selection_claim is not None
+            ):
+                raise DecisionSupportCurrentnessUnavailable(
+                    "monitoring selection claim cardinality is invalid"
+                )
+            exact_trigger_candidates = _monitoring_trigger_candidates(
+                terminal_result,
+                recommendation=recommendation,
+                payload=observation,
+            )
+            applicable_trigger_candidates = _applicable_monitoring_trigger_candidates(
+                terminal_result,
+                recommendation=recommendation,
+                payload=observation,
+                cutoff=normalized["record"]["available_at"],
+            )
+            if (
+                len(exact_trigger_candidates) != 1
+                or len(applicable_trigger_candidates) != 1
+                or not _same_ref(
+                    recommendation_trigger_ref,
+                    {
+                        "reference": applicable_trigger_candidates[0].get(
+                            "trigger_id",
+                            applicable_trigger_candidates[0].get("record_id"),
+                        ),
+                        "content_hash": applicable_trigger_candidates[0].get(
+                            "content_hash"
+                        ),
+                    },
+                )
+            ):
+                raise DecisionSupportCurrentnessUnavailable(
+                    "monitoring escalation trigger is not unique for the recommendation"
+                )
+            try:
+                normalized_trigger = normalize_monitoring_trigger(
+                    applicable_trigger_candidates[0]
+                )
+            except MonitoringContractError as error:
+                raise DecisionSupportCurrentnessUnavailable(
+                    "monitoring escalation trigger is not fully specified and approved"
+                ) from error
+            trigger_identity = trigger_id_and_version(normalized_trigger)
+            claim_ref: dict[str, str] | None = None
+            claim_record: dict[str, Any] | None = None
+            if accepted_selection_claim is not None:
+                claim_record = deepcopy(dict(accepted_selection_claim))
+                claim_hash = _record_content_hash(claim_record)
+                claim_id = _record_id(claim_record)
+                if claim_hash is None or claim_id is None:
+                    raise DecisionSupportCurrentnessUnavailable(
+                        "accepted monitoring selection claim is invalid"
+                    )
+                claim_ref = {
+                    "reference": claim_id,
+                    "content_hash": claim_hash,
+                }
+            payload = deepcopy(dict(stored_observation))
+            payload.update(
+                {
+                    "evaluation_series_id": evaluation["evaluation_series_id"],
+                    "evaluation_occurrence_id": evaluation["evaluation_occurrence_id"],
+                    "evaluation_digest": evaluation["evaluation_digest"],
+                    "terminal_result_ref_and_hash": deepcopy(
+                        evaluation["terminal_result_ref_and_hash"]
+                    ),
+                    "recommendation_ref_and_hash": deepcopy(recommendation_ref),
+                    "monitoring_observation_ref_and_hash": deepcopy(source_ref),
+                    "observation_ref": source_ref["reference"],
+                    "trigger_id_and_version": trigger_identity,
+                    "monitoring_trigger_ref_and_hash": {
+                        "reference": normalized_trigger["trigger_id"],
+                        "content_hash": normalized_trigger["content_hash"],
+                    },
+                    "trigger_mode": str(
+                        recommendation.get("trigger_mode")
+                        or (_mapping(evaluation.get("identity_binding")) or {}).get(
+                            "trigger_mode", ""
+                        )
+                    ).upper(),
+                    "monitoring_activated_at": recommendation.get(
+                        "monitoring_activated_at"
+                    ),
+                    "advice_chain_published_at": evaluation.get(
+                        "evaluation_published_at"
+                    ),
+                }
+            )
+            payload["content_hash"] = _hash_without_content_hash(payload)
+            operation: dict[str, Any] = {
+                "schema_identifier": CURRENTNESS_OPERATION_SCHEMA_IDENTIFIER,
+                "schema_version": CURRENTNESS_SCHEMA_VERSION,
+                "currentness_policy_identifier_and_version": deepcopy(
+                    CURRENTNESS_POLICY_IDENTIFIER_AND_VERSION
+                ),
+                "operation_kind": "MONITORING_TRIGGER_MATCH",
+                "evaluation_series_id": evaluation["evaluation_series_id"],
+                "evaluation_occurrence_id": evaluation["evaluation_occurrence_id"],
+                "evaluation_digest": evaluation["evaluation_digest"],
+                "terminal_result_ref_and_hash": deepcopy(
+                    evaluation["terminal_result_ref_and_hash"]
+                ),
+                "recommendation_ref_and_hash_or_null": deepcopy(recommendation_ref),
+                "accepted_selection_claim_ref_and_hash_or_null": deepcopy(claim_ref),
+                "operation_payload_ref_and_hash": deepcopy(source_ref),
+                "operation_payload": payload,
+                "currentness_checked_at": deepcopy(payload["available_at"]),
+            }
+            if claim_record is not None:
+                operation["accepted_selection_claim"] = claim_record
+            fields = _key_fields(operation)
+            operation_key = currentness_operation_key_for(fields)
+            operation_record = _operation_record_for(fields, payload, operation_key)
+            operation.update(
+                {
+                    "currentness_operation_key": operation_key,
+                    "operation_occurrence_id": operation_record[
+                        "operation_occurrence_id"
+                    ],
+                    "content_hash": operation_record["content_hash"],
+                }
+            )
+        return self.check_decision_support_currentness(
+            workspace_id,
+            operation=operation,
+            currentness_context=currentness_context,
+            now=now,
+        )
+
+    # Explicit aliases keep the public seam discoverable for delivery adapters.
+    match_monitoring_trigger = match_monitoring_observation
 
     def accept_tradeoff_selection(
         self,
