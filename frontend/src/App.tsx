@@ -40,6 +40,7 @@ import {
   type EvidenceVerdict,
   type HealthState,
   type HealthResponse,
+  type HistoricalReplayState,
   type LineageRecord,
   type LineageSnapshot,
   type PredictiveRiskStatus,
@@ -789,6 +790,107 @@ function subjectApplicabilityLabel(
     case "unavailable":
       return "Subject applicability unavailable";
   }
+}
+
+function HistoricalReplayPanel({ state }: { state: HistoricalReplayState }) {
+  const evidence = state.evidence;
+  const recommendation = state.recommendation;
+  const selection = state.tradeoff_selection;
+  const draft = state.draft;
+  const disposition = state.disposition;
+  const decision = state.decision;
+  const recommendationReference =
+    typeof recommendation.reference === "object" && recommendation.reference !== null
+      ? (recommendation.reference as Record<string, unknown>)
+      : null;
+  const draftRecord =
+    typeof draft.head === "object" && draft.head !== null
+      ? (draft.head as Record<string, unknown>)
+      : null;
+  const decisionRecord =
+    typeof decision.record === "object" && decision.record !== null
+      ? (decision.record as Record<string, unknown>)
+      : null;
+  const occurrenceCount = Array.isArray(state.occurrences) ? state.occurrences.length : 0;
+
+  return (
+    <section className="historical-replay" aria-labelledby="historical-replay-heading">
+      <div className="record-heading">
+        <div>
+          <p className="eyebrow">Historical manager timeline</p>
+          <h4 id="historical-replay-heading">
+            Exact read-only state at event {state.cutoff_event_seq}
+          </h4>
+        </div>
+        <span>Read-only</span>
+      </div>
+      <p className="supporting-copy">
+        This projection is reconstructed from stored occurrences at the cutoff. Current policy,
+        currentness, source adapters, and provider output were not consulted.
+      </p>
+      <dl className="verdict-facts">
+        <div>
+          <dt>What was known</dt>
+          <dd>Request, ingress, lineage, validated reference, and the immutable brief snapshot</dd>
+        </div>
+        <div>
+          <dt>Evidence / verdict</dt>
+          <dd>
+            {formatValue(
+              evidence.subject_verdict === null ? "No subject verdict" : "Stored subject verdict",
+            )}
+            {" · "}
+            {formatValue(
+              evidence.evaluation === null ? "No evaluation published" : "Stored evaluation",
+            )}
+          </dd>
+        </div>
+        <div>
+          <dt>Recommendation</dt>
+          <dd>
+            {formatValue(recommendation.state)}
+            {recommendationReference !== null && (
+              <code>{formatValue(recommendationReference.reference)}</code>
+            )}
+          </dd>
+        </div>
+        <div>
+          <dt>Trade-off selection</dt>
+          <dd>{formatValue(selection.state)}</dd>
+        </div>
+        <div>
+          <dt>Draft source / fallback</dt>
+          <dd>
+            {formatValue(draft.source)}{" / "}{formatValue(draft.fallback)}
+            {draftRecord !== null && <code>{formatValue(draftRecord.occurrence_id)}</code>}
+          </dd>
+        </div>
+        <div>
+          <dt>Edits / disposition</dt>
+          <dd>
+            {Array.isArray(draft.edits) ? draft.edits.length : 0} recorded edit(s)
+            {" · "}
+            {formatValue(disposition.state)}
+          </dd>
+        </div>
+        <div>
+          <dt>Manager Decision</dt>
+          <dd>
+            {formatValue(decision.state)}
+            {decisionRecord !== null && <code>{formatValue(decisionRecord.disposition)}</code>}
+          </dd>
+        </div>
+        <div>
+          <dt>Verified occurrences</dt>
+          <dd>{occurrenceCount} through event {state.cutoff_event_seq}</dd>
+        </div>
+      </dl>
+      <p className="audit-status">
+        Exact content-addressed references and the event prefix remain available in this read-only
+        record.
+      </p>
+    </section>
+  );
 }
 
 function decisionSupportStateLabel(state: DecisionSupportBoundary["state"]): string {
@@ -2192,6 +2294,9 @@ function DecisionBriefPanel({
           boundary={snapshot.decision_support}
           registryInspection={snapshot.decision_support_registry}
         />
+      )}
+      {replay?.status === "REPLAYED" && replay.historical_state !== null && (
+        <HistoricalReplayPanel state={replay.historical_state} />
       )}
       <p className="audit-status">
         Immutable snapshot {snapshot.snapshot_id} · event {snapshot.event_seq}

@@ -15,6 +15,17 @@ from backend.app.diagnostics import evaluate_primary_interval
 from backend.app.main import create_app
 from backend.app.settings import Settings
 from backend.app.validity import derive_evidence_verdict
+from backend.tests.test_decision_support_currentness import (
+    _identity_binding,
+    _render_request,
+)
+from backend.tests.test_manager_decision import _rich_evaluation
+from backend.tests.test_tradeoff_selection import (
+    _attempt as _tradeoff_attempt,
+    _identity_binding as _tradeoff_identity_binding,
+    _selection as _tradeoff_selection,
+    _tradeoff_evaluation,
+)
 
 
 IDENTITY = {
@@ -219,6 +230,298 @@ def test_decision_brief_snapshot_is_immutable_and_replay_does_not_read_current_r
     assert replay.json()["status"] == "REPLAYED"
     assert replay.json()["snapshot"] == snapshot
     assert replay.json()["requested_event_seq"] == replay_event_seq
+    historical = replay.json()["historical_state"]
+    assert historical["schema_version"] == "historical-replay.v1"
+    assert historical["read_only"] is True
+    assert historical["cutoff_event_seq"] == replay_event_seq
+    assert historical["known"]["investigation_request"] == snapshot[
+        "investigation_request"
+    ]
+    assert historical["recommendation"]["state"] == "NOT_PUBLISHED"
+    assert historical["tradeoff_selection"]["state"] == "NOT_PUBLISHED"
+    assert historical["draft"]["state"] == "NOT_PUBLISHED"
+    assert historical["decision"]["state"] == "NOT_RECORDED"
+
+
+def test_historical_replay_projects_manager_lifecycle_at_each_cutoff(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with TestClient(create_app(Settings(database_path=tmp_path / "core.sqlite3"))) as client:
+        imported = client.post(
+            "/api/ingestion-runs",
+            json={
+                "idempotency_key": "historical-lifecycle-import",
+                "dataset_key": "semi-synthetic-hero",
+                "mapping_manifest_id": "semi-synthetic-hero.mapping.v1",
+            },
+        )
+        assert imported.status_code == 201
+        dataset_version_id = imported.json()["dataset_version_id"]
+        ingress = client.post(
+            "/api/investigations/reactive/fixtures",
+            json={
+                "dataset_version_id": dataset_version_id,
+                "fixture_id": "hero-reactive-risk-v1",
+            },
+        )
+        assert ingress.status_code == 201
+        request_id = ingress.json()["attempt"]["investigation_request_id"]
+        reference = _reference()
+        reference.dataset_version_id = dataset_version_id
+        client.app.state.reference_store.read_model = lambda *args, **kwargs: reference
+        published_brief = client.post(
+            f"/api/investigations/{request_id}/decision-brief",
+            json={
+                "idempotency_key": "historical-brief-publication",
+                "reference_id": "ordinary-demo",
+            },
+        )
+        assert published_brief.status_code == 201
+        snapshot = published_brief.json()["snapshot"]
+        workspace_id = client.get("/api/workspace").json()["workspace_id"]
+
+        identity = _identity_binding()
+        identity["investigation_request"] = {
+            "record_id": request_id,
+            "content_hash": snapshot["investigation_request"]["content_hash"],
+        }
+        evaluation = client.app.state.audit_store.publish_decision_support_evaluation(
+            workspace_id,
+            idempotency_key="historical-evaluation",
+            evaluation=_rich_evaluation(),
+            identity_binding=identity,
+            now=datetime(2026, 8, 10, 10, 1, tzinfo=timezone.utc),
+        )
+        render_request = _render_request(
+            evaluation,
+            available_at="2026-08-10T10:02:00+00:00",
+        )
+        created = client.post(
+            "/api/decision-support/draft-context",
+            json={
+                "idempotency_key": "historical-draft",
+                "manager_actor_ref": "anonymous-demo-manager",
+                "current_advice": render_request,
+            },
+        )
+        assert created.status_code == 200
+        draft = created.json()["draft"]
+        edited = client.post(
+            f"/api/decision-support/drafts/{draft['draft_id']}/edits",
+            json={
+                "idempotency_key": "historical-draft-edit",
+                "expected_head_ref_and_hash": {
+                    "reference": draft["occurrence_id"],
+                    "content_hash": draft["content_hash"],
+                },
+                "manager_actor_ref": "anonymous-demo-manager",
+                "subject": draft["subject"],
+                "body": draft["body"] + "\n\nHistorical review note.",
+            },
+        )
+        assert edited.status_code == 201
+        edited_head = edited.json()["draft"]
+        intent = client.post(
+            f"/api/decision-support/drafts/{draft['draft_id']}/dispositions",
+            json={
+                "idempotency_key": "historical-draft-approve-intent",
+                "expected_head_ref_and_hash": {
+                    "reference": edited_head["occurrence_id"],
+                    "content_hash": edited_head["content_hash"],
+                },
+                "manager_actor_ref": "anonymous-demo-manager",
+                "disposition": "APPROVE",
+            },
+        )
+        assert intent.status_code == 201
+        intent_head = intent.json()["draft"]
+        decision = client.post(
+            f"/api/decision-support/drafts/{draft['draft_id']}/decisions",
+            json={
+                "idempotency_key": "historical-manager-decision",
+                "expected_head_ref_and_hash": {
+                    "reference": intent_head["occurrence_id"],
+                    "content_hash": intent_head["content_hash"],
+                },
+                "manager_actor_ref": "anonymous-demo-manager",
+                "disposition": "APPROVE",
+            },
+        )
+        assert decision.status_code == 201
+
+        occurrences = client.get("/api/audit/occurrences").json()["items"]
+        evaluation_event = next(
+            item["event_seq"]
+            for item in occurrences
+            if item["occurrence_kind"] == "DECISION_SUPPORT_EVALUATION"
+        )
+        draft_event = next(
+            item["event_seq"]
+            for item in occurrences
+            if item["occurrence_kind"] == "GOVERNANCE_DRAFT_VERSION"
+            and item["outcome_code"] == "DRAFT_CREATED"
+        )
+        intent_event = next(
+            item["event_seq"]
+            for item in occurrences
+            if item["occurrence_kind"] == "GOVERNANCE_DRAFT_VERSION"
+            and item["outcome_code"] == "DRAFT_APPROVAL_INTENT_RECORDED"
+        )
+        final_event = max(item["event_seq"] for item in occurrences)
+
+        monkeypatch.setattr(
+            governance,
+            "evaluate_decision_support",
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                AssertionError("historical replay must not evaluate current policy")
+            ),
+        )
+        client.app.state.reference_store.read_model = lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("historical replay must not read the current reference")
+        )
+
+        evaluation_replay = client.get(
+            "/api/audit/replay",
+            params={"investigation_request_id": request_id, "event_seq": evaluation_event},
+        )
+        assert evaluation_replay.status_code == 200
+        evaluation_state = evaluation_replay.json()["historical_state"]
+        assert evaluation_state["recommendation"]["state"] == "PUBLISHED"
+        assert evaluation_state["draft"]["state"] == "NOT_PUBLISHED"
+        assert evaluation_state["decision"]["state"] == "NOT_RECORDED"
+
+        draft_replay = client.get(
+            "/api/audit/replay",
+            params={"investigation_request_id": request_id, "event_seq": draft_event},
+        )
+        assert draft_replay.json()["historical_state"]["draft"]["state"] == "PUBLISHED"
+        assert draft_replay.json()["historical_state"]["draft"]["source"] == (
+            "DETERMINISTIC_ZERO_LLM"
+        )
+        assert draft_replay.json()["historical_state"]["decision"]["state"] == (
+            "NOT_RECORDED"
+        )
+
+        intent_replay = client.get(
+            "/api/audit/replay",
+            params={"investigation_request_id": request_id, "event_seq": intent_event},
+        )
+        intent_state = intent_replay.json()["historical_state"]
+        assert len(intent_state["draft"]["edits"]) == 2
+        assert intent_state["disposition"]["state"] == "APPROVE_INTENT"
+        assert intent_state["decision"]["state"] == "NOT_RECORDED"
+
+        final_replay = client.get(
+            "/api/audit/replay",
+            params={"investigation_request_id": request_id, "event_seq": final_event},
+        )
+        final_state = final_replay.json()["historical_state"]
+        assert final_state["decision"]["state"] == "RECORDED"
+        assert final_state["decision"]["record"]["disposition"] == "APPROVE"
+        assert all(item["event_seq"] <= final_event for item in final_state["occurrences"])
+
+
+def test_historical_replay_projects_tradeoff_selection_without_currentness_reads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with TestClient(create_app(Settings(database_path=tmp_path / "core.sqlite3"))) as client:
+        imported = client.post(
+            "/api/ingestion-runs",
+            json={
+                "idempotency_key": "historical-selection-import",
+                "dataset_key": "semi-synthetic-hero",
+                "mapping_manifest_id": "semi-synthetic-hero.mapping.v1",
+            },
+        )
+        dataset_version_id = imported.json()["dataset_version_id"]
+        ingress = client.post(
+            "/api/investigations/reactive/fixtures",
+            json={
+                "dataset_version_id": dataset_version_id,
+                "fixture_id": "hero-reactive-risk-v1",
+            },
+        )
+        request_id = ingress.json()["attempt"]["investigation_request_id"]
+        reference = _reference()
+        reference.dataset_version_id = dataset_version_id
+        client.app.state.reference_store.read_model = lambda *args, **kwargs: reference
+        published_brief = client.post(
+            f"/api/investigations/{request_id}/decision-brief",
+            json={
+                "idempotency_key": "historical-selection-brief",
+                "reference_id": "ordinary-demo",
+            },
+        )
+        assert published_brief.status_code == 201
+        snapshot = published_brief.json()["snapshot"]
+        workspace_id = client.get("/api/workspace").json()["workspace_id"]
+        identity = _tradeoff_identity_binding()
+        identity["investigation_request"] = {
+            "record_id": request_id,
+            "content_hash": snapshot["investigation_request"]["content_hash"],
+        }
+        evaluation_input, metadata = _tradeoff_evaluation()
+        published = client.app.state.audit_store.publish_decision_support_evaluation(
+            workspace_id,
+            idempotency_key="historical-selection-evaluation",
+            evaluation=evaluation_input,
+            identity_binding=identity,
+            now=datetime(2026, 8, 10, 11, 1, tzinfo=timezone.utc),
+            evaluation_occurrence_id=str(metadata["evaluation_occurrence_id"]),
+        )
+        selection = _tradeoff_selection(
+            published,
+            metadata,
+            code="A",
+            selection_id="historical-selection-a",
+        )
+        client.app.state.audit_store.publish_tradeoff_selection(
+            workspace_id,
+            selection=selection,
+            now=datetime(2026, 8, 10, 11, 2, tzinfo=timezone.utc),
+        )
+        accepted = client.app.state.audit_store.accept_tradeoff_selection(
+            workspace_id,
+            delivery_attempt=_tradeoff_attempt(selection, attempt_id="historical-attempt-a"),
+            currentness_context={"governed_dependency_resolutions": []},
+            now=datetime(2026, 8, 10, 11, 3, tzinfo=timezone.utc),
+        )
+        assert accepted.selection_claim is not None
+        occurrences = client.get("/api/audit/occurrences").json()["items"]
+        claim_event = next(
+            item["event_seq"]
+            for item in occurrences
+            if item["occurrence_kind"] == "DECISION_SUPPORT_TRADEOFF_SELECTION_CLAIM"
+        )
+        monkeypatch.setattr(
+            governance,
+            "evaluate_decision_support",
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                AssertionError("historical replay must not evaluate current policy")
+            ),
+        )
+        monkeypatch.setattr(
+            governance,
+            "verify_evidence_verdict",
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                AssertionError("historical replay must not verify current evidence")
+            ),
+        )
+        replay = client.get(
+            "/api/audit/replay",
+            params={"investigation_request_id": request_id, "event_seq": claim_event},
+        )
+        assert replay.status_code == 200
+        state = replay.json()["historical_state"]
+        assert state["tradeoff_selection"]["state"] == "PUBLISHED"
+        assert state["tradeoff_selection"]["claim"]["selection_is_not_authorization"] is True
+        assert state["recommendation"]["state"] == "PUBLISHED"
+        assert state["recommendation"]["source"] == (
+            "DECISION_SUPPORT_TRADEOFF_SELECTION_CLAIM"
+        )
+        assert state["recommendation"]["record"]["selected_option_code"] == "A"
 
 
 def test_decision_brief_publishes_successors_and_permission_invalidation(

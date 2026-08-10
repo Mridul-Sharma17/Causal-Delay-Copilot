@@ -439,6 +439,24 @@ export type DecisionBriefResponse = {
   snapshot: DecisionBriefSnapshot;
 };
 
+export type HistoricalReplayState = Record<string, unknown> & {
+  schema_version: "historical-replay.v1";
+  investigation_request_id: string;
+  cutoff_event_seq: number;
+  historical: true;
+  read_only: true;
+  known: Record<string, unknown>;
+  evidence: Record<string, unknown>;
+  recommendation: Record<string, unknown>;
+  tradeoff_selection: Record<string, unknown>;
+  draft: Record<string, unknown>;
+  disposition: Record<string, unknown>;
+  decision: Record<string, unknown>;
+  references: Record<string, unknown>;
+  occurrences: Array<Record<string, unknown>>;
+  presentation: Record<string, unknown>;
+};
+
 export type ReplayResponse = {
   schema_version: "replay.v1";
   status: "REPLAYED" | "REPLAY_UNAVAILABLE";
@@ -446,6 +464,7 @@ export type ReplayResponse = {
   requested_event_seq: number;
   last_verified_event_seq: number;
   snapshot: DecisionBriefSnapshot | null;
+  historical_state: HistoricalReplayState | null;
   unresolved_references: string[];
   recovery_action: string;
 };
@@ -2611,6 +2630,33 @@ export function parseReplayResponse(value: unknown): ReplayResponse {
   ) {
     throw new Error("invalid replay response");
   }
+  const historicalState =
+    value.historical_state === undefined || value.historical_state === null
+      ? null
+      : value.historical_state;
+  if (
+    historicalState !== null &&
+    (!isRecord(historicalState) ||
+      historicalState.schema_version !== "historical-replay.v1" ||
+      typeof historicalState.investigation_request_id !== "string" ||
+      !isNonNegativeInteger(historicalState.cutoff_event_seq) ||
+      historicalState.cutoff_event_seq < 1 ||
+      historicalState.historical !== true ||
+      historicalState.read_only !== true ||
+      !isRecord(historicalState.known) ||
+      !isRecord(historicalState.evidence) ||
+      !isRecord(historicalState.recommendation) ||
+      !isRecord(historicalState.tradeoff_selection) ||
+      !isRecord(historicalState.draft) ||
+      !isRecord(historicalState.disposition) ||
+      !isRecord(historicalState.decision) ||
+      !isRecord(historicalState.references) ||
+      !Array.isArray(historicalState.occurrences) ||
+      !historicalState.occurrences.every(isRecord) ||
+      !isRecord(historicalState.presentation))
+  ) {
+    throw new Error("invalid historical replay state");
+  }
   return {
     schema_version: "replay.v1",
     status: value.status,
@@ -2619,6 +2665,7 @@ export function parseReplayResponse(value: unknown): ReplayResponse {
     last_verified_event_seq: value.last_verified_event_seq,
     snapshot:
       value.snapshot === null ? null : parseDecisionBriefSnapshot(value.snapshot),
+    historical_state: historicalState as HistoricalReplayState | null,
     unresolved_references: value.unresolved_references,
     recovery_action: value.recovery_action,
   };

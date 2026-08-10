@@ -17,6 +17,10 @@ from .decision_support_currentness import (
     DecisionSupportCurrentnessConflict,
     DecisionSupportCurrentnessUnavailable,
 )
+from .historical_replay import (
+    HistoricalReplayUnavailable,
+    project_historical_replay,
+)
 from .decision_support_heads import (
     DecisionSupportEvaluationUnavailable,
     ensure_decision_support_schema,
@@ -93,6 +97,7 @@ class ReplayDecisionBrief:
     requested_event_seq: int
     last_verified_event_seq: int
     snapshot: dict[str, Any] | None
+    historical_state: dict[str, Any] | None
     unresolved_references: list[str]
     recovery_action: str
 
@@ -1447,54 +1452,60 @@ class GovernanceMixin:
         investigation_request_id: str,
         event_seq: int,
     ) -> ReplayDecisionBrief:
+        if event_seq <= 0:
+            return ReplayDecisionBrief(
+                status="REPLAY_UNAVAILABLE",
+                investigation_request_id=investigation_request_id,
+                requested_event_seq=event_seq,
+                last_verified_event_seq=0,
+                snapshot=None,
+                historical_state=None,
+                unresolved_references=[
+                    f"decision-brief:{investigation_request_id}:{event_seq}"
+                ],
+                recovery_action="REQUEST_A_POSITIVE_GLOBAL_EVENT_SEQUENCE",
+            )
         with self._lock:
             connection = self._connection_or_raise()
             try:
-                rows = connection.execute(
-                    """
-                    SELECT snapshots.*
-                    FROM decision_brief_snapshots AS snapshots
-                    JOIN audit_events AS audit
-                      ON audit.workspace_id = snapshots.workspace_id
-                     AND audit.occurrence_id = snapshots.occurrence_id
-                     AND audit.event_seq = snapshots.event_seq
-                     AND audit.content_hash = snapshots.content_hash
-                     AND audit.occurrence_kind = 'DECISION_BRIEF_SNAPSHOT'
-                    WHERE snapshots.workspace_id = ?
-                      AND snapshots.investigation_request_id = ?
-                      AND snapshots.event_seq <= ?
-                    ORDER BY snapshots.event_seq DESC
-                    """,
-                    (workspace_id, investigation_request_id, event_seq),
-                ).fetchall()
+                projection = project_historical_replay(
+                    connection,
+                    workspace_id=workspace_id,
+                    investigation_request_id=investigation_request_id,
+                    cutoff_event_seq=event_seq,
+                    snapshot_loader=_snapshot_from_row,
+                    evaluation_loader=self._evaluation_from_row,
+                    manager_snapshot_loader=(
+                        lambda row: self._manager_snapshot_from_row(connection, row)
+                    ),
+                    manager_decision_loader=(
+                        lambda row: self._manager_decision_from_row(connection, row)
+                    ),
+                    draft_loader=self._draft_row_to_payload,
+                )
             except sqlite3.Error as error:
                 raise AuditStoreUnavailable from error
-
-        last_verified = 0
-        for row in rows:
-            try:
-                snapshot = _snapshot_from_row(row)
-            except DecisionBriefUnavailable:
-                continue
-            last_verified = int(row["event_seq"])
+            except HistoricalReplayUnavailable as error:
+                return ReplayDecisionBrief(
+                    status="REPLAY_UNAVAILABLE",
+                    investigation_request_id=investigation_request_id,
+                    requested_event_seq=event_seq,
+                    last_verified_event_seq=0,
+                    snapshot=None,
+                    historical_state=None,
+                    unresolved_references=[error.reference],
+                    recovery_action=(
+                        "RESTORE_EXACT_REFERENCED_CONTENT_OR_REQUEST_AN_EARLIER_"
+                        "VERIFIED_EVENT_SEQUENCE"
+                    ),
+                )
             return ReplayDecisionBrief(
                 status="REPLAYED",
                 investigation_request_id=investigation_request_id,
                 requested_event_seq=event_seq,
-                last_verified_event_seq=last_verified,
-                snapshot=snapshot,
+                last_verified_event_seq=projection.last_verified_event_seq,
+                snapshot=projection.snapshot,
+                historical_state=projection.state,
                 unresolved_references=[],
                 recovery_action="NONE",
             )
-
-        return ReplayDecisionBrief(
-            status="REPLAY_UNAVAILABLE",
-            investigation_request_id=investigation_request_id,
-            requested_event_seq=event_seq,
-            last_verified_event_seq=last_verified,
-            snapshot=None,
-            unresolved_references=[
-                f"decision-brief:{investigation_request_id}:{event_seq}"
-            ],
-            recovery_action="PUBLISH_DECISION_BRIEF_OR_REQUEST_AN_EARLIER_VERIFIED_EVENT_SEQUENCE",
-        )

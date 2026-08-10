@@ -1867,6 +1867,7 @@ def create_app(
                 if replay.snapshot is None
                 else DecisionBriefSnapshotResponse.model_validate(replay.snapshot)
             ),
+            historical_state=replay.historical_state,
             unresolved_references=replay.unresolved_references,
             recovery_action=replay.recovery_action,
         )

@@ -822,6 +822,7 @@ class ReplayResponse(BaseModel):
     requested_event_seq: int = Field(gt=0)
     last_verified_event_seq: int = Field(ge=0)
     snapshot: DecisionBriefSnapshotResponse | None
+    historical_state: dict[str, Any] | None
     unresolved_references: list[str]
     recovery_action: str
 

@@ -332,6 +332,23 @@ const replayResponse = {
   requested_event_seq: 4,
   last_verified_event_seq: 4,
   snapshot: decisionBriefSnapshotResponse,
+  historical_state: {
+    schema_version: "historical-replay.v1",
+    investigation_request_id: "ir-1",
+    cutoff_event_seq: 4,
+    historical: true,
+    read_only: true,
+    known: {},
+    evidence: { subject_verdict: null, evaluation: null },
+    recommendation: { state: "NOT_PUBLISHED", reference: null },
+    tradeoff_selection: { state: "NOT_PUBLISHED" },
+    draft: { state: "NOT_PUBLISHED", source: null, fallback: null, head: null, edits: [] },
+    disposition: { state: "NOT_RECORDED" },
+    decision: { state: "NOT_RECORDED", record: null },
+    references: {},
+    occurrences: [],
+    presentation: { mode: "HISTORICAL_READ_ONLY" },
+  },
   unresolved_references: [],
   recovery_action: "NONE",
 };
@@ -1585,6 +1602,8 @@ describe("Core health journey", () => {
     expect(screen.getByText("INTERVENTION_EFFECT_NOT_ESTIMATED")).toBeInTheDocument();
     expect(screen.getByText("Insufficient subject support — abstained")).toBeInTheDocument();
     expect(screen.getByText(/Replay verified from stored state at event 4/)).toBeInTheDocument();
+    expect(screen.getByText("Exact read-only state at event 4")).toBeInTheDocument();
+    expect(screen.getByText("Trade-off selection")).toBeInTheDocument();
     expect(await screen.findByText("Proactive preview accepted")).toBeInTheDocument();
     expect(screen.getAllByText("Eligibility stage")).toHaveLength(2);
     expect(screen.getAllByText("CALENDAR_DAY")).toHaveLength(3);

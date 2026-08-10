@@ -270,6 +270,26 @@ code {
   font-weight: 500;
 }
 
+.historical-replay {
+  display: grid;
+  gap: 16px;
+  padding: 20px;
+  background: #f4f4f4;
+  border-left: 4px solid #0f62fe;
+}
+
+.historical-replay h4 {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 500;
+}
+
+.historical-replay code {
+  display: block;
+  margin-top: 6px;
+  overflow-wrap: anywhere;
+}
+
 .support-gates,
 .action-lane {
   display: grid;
