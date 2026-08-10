@@ -17,6 +17,7 @@ $spaDistDir = Join-Path $root "frontend\dist"
 $pythonPath = Join-Path $root ".venv\Scripts\python.exe"
 $lifecycleLock = $null
 $server = $null
+$serverReady = $false
 
 Push-Location $root
 try {
@@ -36,6 +37,7 @@ try {
     Write-LocalFallbackProcessMarker -StateRoot $stateRoot -Process $server.Process
     $health = Wait-LocalFallbackReady -Process $server.Process
     Assert-LocalFallbackSpa
+    $serverReady = $true
 
     if ($health.readiness.state -eq "degraded") {
         Write-Host "Causal Delay Copilot is live; Core is ready with Gemini-only drafting unavailable."
@@ -57,7 +59,11 @@ try {
     Write-Error $_.Exception.Message
     exit 1
 } finally {
-    Stop-LocalFallbackServer -Server $server
+    if ($serverReady) {
+        Stop-LocalFallbackServer -Server $server -Graceful -StateRoot $stateRoot
+    } else {
+        Stop-LocalFallbackServer -Server $server
+    }
     Remove-LocalFallbackProcessMarker -StateRoot $stateRoot
     Close-LocalFallbackLifecycleLock -LockStream $lifecycleLock
     Pop-Location

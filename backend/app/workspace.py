@@ -283,6 +283,7 @@ class WorkspaceStore:
         self._quotas = quotas
         self._connection: sqlite3.Connection | None = None
         self._lock = RLock()
+        self._fresh_admission_open = True
 
     @property
     def quotas(self) -> QuotaPolicy:
@@ -301,6 +302,7 @@ class WorkspaceStore:
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA foreign_keys = ON")
             connection.execute("PRAGMA busy_timeout = 5000")
+            connection.execute("PRAGMA synchronous = FULL")
             ensure_workspace_schema(connection, create=False)
         except sqlite3.Error:
             try:
@@ -313,8 +315,18 @@ class WorkspaceStore:
     def close(self) -> None:
         with self._lock:
             if self._connection is not None:
+                self._connection.commit()
                 self._connection.close()
                 self._connection = None
+
+    def flush(self) -> None:
+        """Durably flush the authoritative SQLite ledger before lifecycle exit."""
+
+        with self._lock:
+            connection = self._connection_or_raise()
+            connection.commit()
+            connection.execute("PRAGMA synchronous = FULL")
+            connection.execute("SELECT 1").fetchone()
 
     def check_ready(self) -> bool:
         with self._lock:

@@ -22,6 +22,7 @@ from .canonical import timestamp as _timestamp
 from .artifacts import quarantine_operation_material
 from .errors import SafeErrorCode, WorkspaceRequestError
 from .settings import QuotaPolicy
+from .technical_log import TechnicalLog, TechnicalLogError
 
 
 DURABLE_OPERATION_SCHEMA_VERSION = "durable-operation.v1"
@@ -189,6 +190,15 @@ class OperationReceipt:
     replayed: bool
 
 
+@dataclass(frozen=True, slots=True)
+class OperationStopReceipt:
+    stop_id: str
+    outcome: str
+    interrupted_operation_ids: tuple[str, ...]
+    cancellation_timeout_operation_ids: tuple[str, ...]
+    quarantine_failed_operation_ids: tuple[str, ...]
+
+
 def _parse_timestamp(value: str | None) -> datetime | None:
     if value is None:
         return None
@@ -240,6 +250,18 @@ class DurableOperationsMixin:
 
     def initialize_operations(self) -> None:
         ensure_operation_schema(self._connection_or_raise(), create=False)
+
+    def close_fresh_admission(self) -> bool:
+        """Close fresh-operation admission for this process exactly once."""
+
+        with self._lock:
+            was_open = bool(getattr(self, "_fresh_admission_open", True))
+            self._fresh_admission_open = False
+            return was_open
+
+    def fresh_admission_is_open(self) -> bool:
+        with self._lock:
+            return bool(getattr(self, "_fresh_admission_open", True))
 
     def _operation_from_row(
         self,
@@ -360,6 +382,16 @@ class DurableOperationsMixin:
                     operation = self._operation_from_row(connection, existing)
                     connection.commit()
                     return OperationReceipt(operation=operation, replayed=True)
+
+                if (
+                    operation_kind in {"FRESH_ANALYSIS", "FRESH_REPRODUCTION"}
+                    and not bool(getattr(self, "_fresh_admission_open", True))
+                ):
+                    raise WorkspaceRequestError(
+                        SafeErrorCode.CORE_STOPPING,
+                        "WAIT_FOR_STOP_TO_FINISH",
+                        503,
+                    )
 
                 workspace_row = self._active_row_locked(workspace_id, current_time)
                 if (
@@ -496,6 +528,17 @@ class DurableOperationsMixin:
                 workspace_id=workspace_id,
                 operation_id=operation_id,
             )
+            return None if row is None else self._operation_from_row(connection, row)
+
+    def get_operation_for_stop(self, operation_id: str) -> DurableOperation | None:
+        """Read one operation by identity for lifecycle shutdown bookkeeping."""
+
+        with self._lock:
+            connection = self._connection_or_raise()
+            row = connection.execute(
+                "SELECT * FROM durable_operations WHERE operation_id = ?",
+                (operation_id,),
+            ).fetchone()
             return None if row is None else self._operation_from_row(connection, row)
 
     def get_operation_by_idempotency_key(
@@ -931,6 +974,80 @@ class DurableOperationsMixin:
                 connection.rollback()
                 raise
 
+    def mark_quarantine_recovered(self, operation_id: str) -> DurableOperation | None:
+        """Record that terminal partial material was quarantined after a retry."""
+
+        with self._lock:
+            connection = self._connection_or_raise()
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                row = connection.execute(
+                    "SELECT * FROM durable_operations WHERE operation_id = ?",
+                    (operation_id,),
+                ).fetchone()
+                if row is None:
+                    connection.rollback()
+                    return None
+                if (
+                    str(row["state"]) in TERMINAL_OPERATION_STATES
+                    and str(row["artifact_state"]) == "QUARANTINE_UNAVAILABLE"
+                ):
+                    connection.execute(
+                        """
+                        UPDATE durable_operations
+                        SET artifact_state = 'QUARANTINED',
+                            recovery_action = 'EXPLICIT_RETRY_AS_NEW_OPERATION'
+                        WHERE operation_id = ?
+                        """,
+                        (operation_id,),
+                    )
+                updated = connection.execute(
+                    "SELECT * FROM durable_operations WHERE operation_id = ?",
+                    (operation_id,),
+                ).fetchone()
+                connection.commit()
+                return None if updated is None else self._operation_from_row(connection, updated)
+            except Exception:
+                connection.rollback()
+                raise
+
+    def mark_quarantine_failed(self, operation_id: str) -> DurableOperation | None:
+        """Keep terminal work suppressed when quarantine remains unavailable."""
+
+        with self._lock:
+            connection = self._connection_or_raise()
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                row = connection.execute(
+                    "SELECT * FROM durable_operations WHERE operation_id = ?",
+                    (operation_id,),
+                ).fetchone()
+                if row is None:
+                    connection.rollback()
+                    return None
+                if (
+                    str(row["state"]) in TERMINAL_OPERATION_STATES
+                    and str(row["artifact_state"]) == "QUARANTINE_UNAVAILABLE"
+                ):
+                    connection.execute(
+                        """
+                        UPDATE durable_operations
+                        SET failure_code = 'OPERATION_ARTIFACT_QUARANTINE_FAILED',
+                            recovery_action = 'RESTORE_CORE_STATE_AND_RETRY'
+                        WHERE operation_id = ?
+                        """,
+                        (operation_id,),
+                    )
+                updated = connection.execute(
+                    "SELECT * FROM durable_operations WHERE operation_id = ?",
+                    (operation_id,),
+                ).fetchone()
+                connection.commit()
+                return None if updated is None else self._operation_from_row(connection, updated)
+            except Exception:
+                connection.rollback()
+                raise
+
     def operation_is_cancelling(self, operation_id: str) -> bool:
         with self._lock:
             row = self._connection_or_raise().execute(
@@ -939,6 +1056,62 @@ class DurableOperationsMixin:
             ).fetchone()
         return row is not None and str(row["state"]) in {"CANCELLING", "CANCELLED"}
 
+    def outstanding_operation_ids(self) -> list[str]:
+        with self._lock:
+            rows = self._connection_or_raise().execute(
+                """
+                SELECT operation_id FROM durable_operations
+                WHERE state IN ('QUEUED', 'RUNNING', 'CANCELLING')
+                ORDER BY queued_at, operation_id
+                """
+            ).fetchall()
+        return [str(row["operation_id"]) for row in rows]
+
+    def interrupt_queued_operations(
+        self,
+        *,
+        now: datetime | None = None,
+    ) -> list[str]:
+        current_time = _as_utc(now or datetime.now(timezone.utc))
+        timestamp = _timestamp(current_time)
+        with self._lock:
+            connection = self._connection_or_raise()
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                rows = connection.execute(
+                    """
+                    SELECT operation_id, workspace_id FROM durable_operations
+                    WHERE state = 'QUEUED'
+                    ORDER BY queued_at, operation_id
+                    """
+                ).fetchall()
+                operation_ids = [str(row["operation_id"]) for row in rows]
+                for row in rows:
+                    connection.execute(
+                        """
+                        UPDATE durable_operations
+                        SET state = 'INTERRUPTED', finished_at = ?,
+                            failure_code = 'RUN_EXECUTION_INTERRUPTED',
+                            recovery_action = 'EXPLICIT_RETRY_AS_NEW_OPERATION',
+                            artifact_state = 'NOT_STARTED'
+                        WHERE workspace_id = ? AND operation_id = ? AND state = 'QUEUED'
+                        """,
+                        (timestamp, str(row["workspace_id"]), str(row["operation_id"])),
+                    )
+                    connection.execute(
+                        """
+                        UPDATE workspace_operations
+                        SET status = 'TERMINAL', finished_at = ?
+                        WHERE workspace_id = ? AND operation_id = ?
+                        """,
+                        (timestamp, str(row["workspace_id"]), str(row["operation_id"])),
+                    )
+                connection.commit()
+                return operation_ids
+            except Exception:
+                connection.rollback()
+                raise
+
     def recover_interrupted_operations(self, layout: Any) -> list[str]:
         with self._lock:
             connection = self._connection_or_raise()
@@ -946,24 +1119,41 @@ class DurableOperationsMixin:
                 """
                 SELECT operation_id FROM durable_operations
                 WHERE state IN ('RUNNING', 'CANCELLING')
+                   OR (
+                        state = 'INTERRUPTED'
+                        AND artifact_state = 'QUARANTINE_UNAVAILABLE'
+                   )
                 ORDER BY operation_id
                 """
             ).fetchall()
         recovered: list[str] = []
         for row in rows:
             operation_id = str(row["operation_id"])
-            _quarantine_operation_material(
-                layout,
-                operation_id,
-                reason_code="RUN_EXECUTION_INTERRUPTED",
-            )
-            self.finish_operation(
-                operation_id,
-                state="INTERRUPTED",
-                failure_code="RUN_EXECUTION_INTERRUPTED",
-                recovery_action="EXPLICIT_RETRY_AS_NEW_OPERATION",
-                artifact_state="QUARANTINED",
-            )
+            try:
+                _quarantine_operation_material(
+                    layout,
+                    operation_id,
+                    reason_code="RUN_EXECUTION_INTERRUPTED",
+                )
+            except Exception:
+                if self.get_operation_for_stop(operation_id) is not None:
+                    self.mark_quarantine_failed(operation_id)
+                self.finish_operation(
+                    operation_id,
+                    state="INTERRUPTED",
+                    failure_code="OPERATION_ARTIFACT_QUARANTINE_FAILED",
+                    recovery_action="RESTORE_CORE_STATE_AND_RETRY",
+                    artifact_state="QUARANTINE_UNAVAILABLE",
+                )
+            else:
+                self.finish_operation(
+                    operation_id,
+                    state="INTERRUPTED",
+                    failure_code="RUN_EXECUTION_INTERRUPTED",
+                    recovery_action="EXPLICIT_RETRY_AS_NEW_OPERATION",
+                    artifact_state="QUARANTINED",
+                )
+                self.mark_quarantine_recovered(operation_id)
             recovered.append(operation_id)
         return recovered
 
@@ -1052,16 +1242,22 @@ class OperationRunner:
         *,
         worker_command_factory: Callable[[DurableOperation, Path], list[str]] | None = None,
         poll_interval_seconds: float = 0.1,
+        technical_log: TechnicalLog | None = None,
     ) -> None:
         self._store = store
         self._layout = layout
         self._worker_command_factory = worker_command_factory or self._default_worker_command
         self._poll_interval_seconds = poll_interval_seconds
+        self._technical_log = technical_log
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
+        self._stop_lock = threading.RLock()
+        self._stop_result: OperationStopReceipt | None = None
 
     def start(self) -> None:
-        if self._thread is not None and self._thread.is_alive():
+        if self._stop_result is not None or (
+            self._thread is not None and self._thread.is_alive()
+        ):
             return
         self._stop_event.clear()
         self._thread = threading.Thread(
@@ -1071,11 +1267,135 @@ class OperationRunner:
         )
         self._thread.start()
 
-    def stop(self) -> None:
-        self._stop_event.set()
-        if self._thread is not None:
-            self._thread.join(timeout=10)
-            self._thread = None
+    def stop(
+        self,
+        *,
+        stop_id: str | None = None,
+        timeout_seconds: float = 30.0,
+    ) -> OperationStopReceipt:
+        if timeout_seconds <= 0:
+            raise ValueError("stop timeout must be positive")
+        with self._stop_lock:
+            if self._stop_result is not None:
+                thread = self._thread
+                if thread is not None and thread.is_alive():
+                    thread.join(timeout=timeout_seconds)
+                    if not thread.is_alive():
+                        self._thread = None
+                return OperationStopReceipt(
+                    stop_id=self._stop_result.stop_id,
+                    outcome="ALREADY_STOPPED",
+                    interrupted_operation_ids=self._stop_result.interrupted_operation_ids,
+                    cancellation_timeout_operation_ids=(
+                        self._stop_result.cancellation_timeout_operation_ids
+                    ),
+                    quarantine_failed_operation_ids=(
+                        self._stop_result.quarantine_failed_operation_ids
+                    ),
+                )
+            actual_stop_id = stop_id or f"stop-{uuid4()}"
+            self._store.close_fresh_admission()
+            pending_before_stop = self._store.outstanding_operation_ids()
+            interrupted = self._store.interrupt_queued_operations()
+            self._stop_event.set()
+            thread = self._thread
+            if thread is None or not thread.is_alive():
+                recovered = self._store.recover_interrupted_operations(self._layout)
+                interrupted.extend(recovered)
+                quarantine_failed_ids = []
+                for operation_id in dict.fromkeys(recovered):
+                    operation = self._store.get_operation_for_stop(operation_id)
+                    if (
+                        operation is not None
+                        and operation.artifact_state == "QUARANTINE_UNAVAILABLE"
+                    ):
+                        quarantine_failed_ids.append(operation_id)
+                result = OperationStopReceipt(
+                    stop_id=actual_stop_id,
+                    outcome="STOPPED",
+                    interrupted_operation_ids=tuple(dict.fromkeys(interrupted)),
+                    cancellation_timeout_operation_ids=(),
+                    quarantine_failed_operation_ids=tuple(quarantine_failed_ids),
+                )
+                self._stop_result = result
+                self._log(
+                    actual_stop_id,
+                    "STOPPED",
+                    "NONE",
+                )
+                return result
+
+            thread.join(timeout=timeout_seconds)
+            cancellation_timeout_ids: list[str] = []
+            quarantine_failed_ids: list[str] = []
+            if thread.is_alive():
+                for operation_id in self._store.outstanding_operation_ids():
+                    completed = self._store.finish_operation(
+                        operation_id,
+                        state="INTERRUPTED",
+                        failure_code="OPERATION_CANCELLATION_TIMEOUT",
+                        recovery_action="RESTORE_CORE_STATE_AND_RETRY",
+                        artifact_state="QUARANTINE_UNAVAILABLE",
+                    )
+                    if completed is not None:
+                        cancellation_timeout_ids.append(operation_id)
+                        quarantine_failed_ids.append(operation_id)
+                outcome = "STOP_TIMEOUT"
+                self._log(
+                    actual_stop_id,
+                    "STOP_TIMEOUT",
+                    "RESTORE_CORE_STATE_AND_RETRY",
+                )
+            else:
+                self._thread = None
+                outcome = "STOPPED"
+            for operation_id in pending_before_stop:
+                completed = self._store.get_operation_for_stop(operation_id)
+                if completed is not None and completed.state == "INTERRUPTED":
+                    interrupted.append(operation_id)
+                    if completed.artifact_state == "QUARANTINE_UNAVAILABLE":
+                        quarantine_failed_ids.append(operation_id)
+            result = OperationStopReceipt(
+                stop_id=actual_stop_id,
+                outcome=outcome,
+                interrupted_operation_ids=tuple(dict.fromkeys(interrupted)),
+                cancellation_timeout_operation_ids=tuple(dict.fromkeys(cancellation_timeout_ids)),
+                quarantine_failed_operation_ids=tuple(dict.fromkeys(quarantine_failed_ids)),
+            )
+            self._stop_result = result
+            self._log(
+                actual_stop_id,
+                outcome,
+                "RESTORE_CORE_STATE_AND_RETRY"
+                if outcome == "STOP_TIMEOUT"
+                else "NONE",
+            )
+            for operation_id in result.interrupted_operation_ids:
+                self._log(
+                    operation_id,
+                    "OPERATION_INTERRUPTED",
+                    "EXPLICIT_RETRY_AS_NEW_OPERATION",
+                )
+            for operation_id in result.quarantine_failed_operation_ids:
+                self._log(
+                    operation_id,
+                    "OPERATION_ARTIFACT_QUARANTINE_FAILED",
+                    "RESTORE_CORE_STATE_AND_RETRY",
+                )
+            return result
+
+    def _log(self, correlation_id: str, lifecycle_code: str, recovery_action: str) -> None:
+        if self._technical_log is None:
+            return
+        try:
+            self._technical_log.emit(
+                component="operation_runner",
+                correlation_id=correlation_id,
+                lifecycle_code=lifecycle_code,
+                recovery_action=recovery_action,
+            )
+        except TechnicalLogError:
+            return
 
     def _default_worker_command(
         self,
@@ -1242,6 +1562,7 @@ class OperationRunner:
             recovery_action="EXPLICIT_RETRY_AS_NEW_OPERATION",
             artifact_state="QUARANTINED",
         )
+        self._store.mark_quarantine_recovered(operation.operation_id)
 
     def _publish_success(self, operation: DurableOperation, temporary_root: Path) -> None:
         _write_json_durable(

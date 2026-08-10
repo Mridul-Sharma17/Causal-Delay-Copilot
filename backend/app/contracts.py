@@ -1438,6 +1438,30 @@ class OperationMutationResponse(BaseModel):
     operation: OperationResponse
 
 
+class LifecycleStopResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["lifecycle-stop.v1"]
+    stop_id: str = Field(
+        min_length=10,
+        max_length=72,
+        pattern=r"^stop-[0-9a-f-]{8,64}$",
+    )
+    outcome: Literal["STOPPED", "ALREADY_STOPPED", "STOP_TIMEOUT", "STOP_FAILED"]
+    fresh_admission_state: Literal["CLOSED"]
+    interrupted_operation_ids: list[str]
+    cancellation_timeout_operation_ids: list[str]
+    quarantine_failed_operation_ids: list[str]
+    ledger_flush_state: Literal["FLUSHED", "UNAVAILABLE"]
+    technical_log_flush_state: Literal["FLUSHED", "UNAVAILABLE"]
+    recovery_action: Literal[
+        "NONE",
+        "WAIT_FOR_STOP_TO_FINISH",
+        "EXPLICIT_RETRY_AS_NEW_OPERATION",
+        "RESTORE_CORE_STATE_AND_RETRY",
+    ]
+
+
 class ErrorResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

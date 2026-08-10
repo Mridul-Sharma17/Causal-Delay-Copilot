@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 
 import pytest
@@ -149,6 +150,7 @@ def test_preflight_rejects_source_changes_after_setup(tmp_path: Path) -> None:
 def test_launcher_contracts_are_explicit_and_startup_is_install_free() -> None:
     setup = (ROOT / "scripts" / "setup.ps1").read_text(encoding="utf-8")
     start = (ROOT / "scripts" / "start.ps1").read_text(encoding="utf-8")
+    stop = (ROOT / "scripts" / "stop.ps1").read_text(encoding="utf-8")
     common = (ROOT / "scripts" / "local-fallback-common.ps1").read_text(encoding="utf-8")
 
     assert "npm.cmd ci" in setup
@@ -173,3 +175,29 @@ def test_launcher_contracts_are_explicit_and_startup_is_install_free() -> None:
     assert "npm.cmd" not in common
     assert "uv.exe sync" not in common
     assert "playwright install" not in common
+    assert "/api/lifecycle/stop" in stop + common
+    assert "No local fallback process is running." in stop
+    assert "Get-LocalFallbackProcessFromMarker" in stop
+    assert "Request-LocalFallbackStop" in common
+    assert "-Graceful" in start
+    assert "process.Kill()" in stop
+
+
+def test_stop_command_is_deterministic_when_no_process_exists(tmp_path: Path) -> None:
+    state_root = tmp_path / "state"
+    command = [
+        "powershell.exe",
+        "-NoProfile",
+        "-NonInteractive",
+        "-File",
+        str(ROOT / "scripts" / "stop.ps1"),
+        "-StateRoot",
+        str(state_root),
+    ]
+    first = subprocess.run(command, capture_output=True, text=True, check=False)
+    second = subprocess.run(command, capture_output=True, text=True, check=False)
+
+    assert first.returncode == 0
+    assert second.returncode == 0
+    assert "No local fallback process is running." in first.stdout
+    assert "No local fallback process is running." in second.stdout

@@ -161,6 +161,55 @@ function Remove-LocalFallbackProcessMarker {
     }
 }
 
+function Get-LocalFallbackProcessFromMarker {
+    param([Parameter(Mandatory = $true)][string]$StateRoot)
+
+    $markerPath = Get-LocalFallbackProcessMarkerPath -StateRoot $StateRoot
+    if (-not (Test-Path -LiteralPath $markerPath -PathType Leaf)) {
+        return $null
+    }
+    try {
+        $marker = (Get-Content -LiteralPath $markerPath -Raw) | ConvertFrom-Json
+        $processId = [int]$marker.process_id
+        $expectedStart = [string]$marker.process_start_time_utc
+    } catch {
+        throw "Local fallback lifecycle state is invalid; inspect the prepared runtime and retry."
+    }
+    try {
+        $process = Get-Process -Id $processId -ErrorAction Stop
+        $observedStart = $process.StartTime.ToUniversalTime().ToString("o")
+        if ($process.ProcessName -notlike "python*" -or $observedStart -ne $expectedStart) {
+            throw "The local fallback process marker does not identify the prepared server."
+        }
+        return $process
+    } catch [System.Management.Automation.ItemNotFoundException] {
+        Remove-LocalFallbackProcessMarker -StateRoot $StateRoot
+        return $null
+    } catch [System.ArgumentException] {
+        Remove-LocalFallbackProcessMarker -StateRoot $StateRoot
+        return $null
+    }
+}
+
+function Request-LocalFallbackStop {
+    try {
+        $response = Invoke-WebRequest `
+            -UseBasicParsing `
+            -TimeoutSec 35 `
+            -Method Post `
+            -ContentType "application/json" `
+            -Body "{}" `
+            -Uri "http://127.0.0.1:8000/api/lifecycle/stop"
+        $payload = $response.Content | ConvertFrom-Json
+        if ($null -eq $payload -or $payload.schema_version -ne "lifecycle-stop.v1") {
+            throw "The local fallback stop response was not typed."
+        }
+        return $payload
+    } catch {
+        throw "The local fallback could not confirm a safe stop; the process was left running."
+    }
+}
+
 function Start-LocalFallbackServer {
     param(
         [Parameter(Mandatory = $true)][string]$Root,
@@ -189,7 +238,11 @@ function Start-LocalFallbackServer {
 }
 
 function Stop-LocalFallbackServer {
-    param([AllowNull()][pscustomobject]$Server)
+    param(
+        [AllowNull()][pscustomobject]$Server,
+        [switch]$Graceful,
+        [string]$StateRoot = ""
+    )
 
     if ($null -eq $Server) {
         return
@@ -197,12 +250,26 @@ function Stop-LocalFallbackServer {
     $process = $Server.Process
     try {
         if (-not $process.HasExited) {
+            if ($Graceful) {
+                if ([string]::IsNullOrWhiteSpace($StateRoot)) {
+                    throw "The local fallback state root is required for a safe stop."
+                }
+                $stopResult = Request-LocalFallbackStop
+                if ($stopResult.outcome -eq "STOP_FAILED") {
+                    throw "The local fallback reported that safe stop could not be completed."
+                }
+            }
+        }
+        if (-not $process.HasExited) {
             $process.Kill()
             $process.WaitForExit()
         }
         $null = $Server.StandardOutput.GetAwaiter().GetResult()
         $null = $Server.StandardError.GetAwaiter().GetResult()
     } catch {
+        if ($Graceful) {
+            throw
+        }
         # Cleanup is best effort after the server has stopped or failed.
     } finally {
         $process.Dispose()

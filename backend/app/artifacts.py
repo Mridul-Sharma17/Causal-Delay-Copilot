@@ -232,7 +232,19 @@ def quarantine_operation_material(
     _require_identifier(operation_id, "operation id")
     temporary_root = Path(layout.temporary_root) / operation_id
     published_root = Path(layout.run_root) / operation_id
-    quarantine_root = _quarantine_target(Path(layout.quarantine_root), operation_id)
+    quarantine_parent = Path(layout.quarantine_root)
+    direct_quarantine_root = quarantine_parent / operation_id
+    if direct_quarantine_root.exists() and not temporary_root.exists() and not published_root.exists():
+        manifest = _read_json(direct_quarantine_root / "quarantine-manifest.json")
+        if (
+            isinstance(manifest, Mapping)
+            and manifest.get("schema_version") == QUARANTINE_MANIFEST_SCHEMA_VERSION
+            and manifest.get("operation_id") == operation_id
+            and manifest.get("material_kind") == "durable-operation"
+        ):
+            return
+        raise ArtifactLifecycleError("QUARANTINE_INTEGRITY_UNAVAILABLE")
+    quarantine_root = _quarantine_target(quarantine_parent, operation_id)
     quarantine_root.mkdir(parents=True, exist_ok=False)
     _move_if_present(temporary_root, quarantine_root / "temporary")
     _move_if_present(published_root, quarantine_root / "published")

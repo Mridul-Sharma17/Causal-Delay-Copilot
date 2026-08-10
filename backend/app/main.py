@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+import sqlite3
+import threading
 from typing import AsyncIterator, Awaitable, Callable
+from uuid import uuid4
 
 from fastapi import FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
@@ -45,6 +49,7 @@ from .contracts import (
     HealthResponse,
     IngestionRunRequest,
     IngestionRunResponse,
+    LifecycleStopResponse,
     LineageSnapshotResponse,
     OperationAdmissionRequest,
     OperationActionRequest,
@@ -124,9 +129,10 @@ from .risk import (
     RiskSignalFixtureUnavailable,
 )
 from .security import apply_public_response_headers
-from .settings import Settings
+from .settings import DeliveryProfile, Settings
 from .state import StateRoot
-from .operations import DurableOperation, OperationRunner
+from .operations import DurableOperation, OperationRunner, OperationStopReceipt
+from .technical_log import TechnicalLog, TechnicalLogError
 from .references import (
     DEFAULT_REFERENCE_INTENDED_ROLE,
     DEFAULT_REFERENCE_SLOT_ID,
@@ -362,15 +368,19 @@ def create_app(
         release_candidate_id=resolved_settings.release_candidate_id,
         runtime_fingerprint=resolved_settings.runtime_fingerprint.model_dump(mode="json"),
     )
+    stop_lock = threading.RLock()
+    stop_response: LifecycleStopResponse | None = None
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         state_layout = state_root.initialize()
         core_store.initialize()
         core_store.recover_interrupted_operations(state_layout)
+        technical_log = TechnicalLog(state_layout.runtime_root / "technical.log")
+        app.state.technical_log = technical_log
         app.state.state_layout = state_layout
         operation_runner = (
-            OperationRunner(core_store, state_layout)
+            OperationRunner(core_store, state_layout, technical_log=technical_log)
             if start_operation_runner
             else None
         )
@@ -380,9 +390,18 @@ def create_app(
         try:
             yield
         finally:
-            if operation_runner is not None:
-                operation_runner.stop()
-            core_store.close()
+            try:
+                if operation_runner is not None:
+                    operation_runner.stop()
+            finally:
+                try:
+                    core_store.flush()
+                finally:
+                    core_store.close()
+                    try:
+                        technical_log.flush()
+                    except TechnicalLogError:
+                        pass
 
     app = FastAPI(
         title="Causal Delay Copilot Core",
@@ -398,6 +417,159 @@ def create_app(
         provider=gemini_provider,
     )
     app.state.operation_runner = None
+    app.state.technical_log = None
+
+    def _stop_response_from_receipt(
+        receipt: OperationStopReceipt,
+        *,
+        ledger_flush_state: str,
+        technical_log_flush_state: str,
+    ) -> LifecycleStopResponse:
+        outcome = receipt.outcome
+        if (
+            receipt.quarantine_failed_operation_ids
+            or ledger_flush_state != "FLUSHED"
+            or technical_log_flush_state != "FLUSHED"
+        ):
+            outcome = "STOP_FAILED"
+        if outcome in {"STOP_TIMEOUT", "STOP_FAILED"}:
+            recovery_action = "RESTORE_CORE_STATE_AND_RETRY"
+        elif receipt.interrupted_operation_ids:
+            recovery_action = "EXPLICIT_RETRY_AS_NEW_OPERATION"
+        else:
+            recovery_action = "NONE"
+        return LifecycleStopResponse(
+            schema_version="lifecycle-stop.v1",
+            stop_id=receipt.stop_id,
+            outcome=outcome,
+            fresh_admission_state="CLOSED",
+            interrupted_operation_ids=list(receipt.interrupted_operation_ids),
+            cancellation_timeout_operation_ids=list(
+                receipt.cancellation_timeout_operation_ids
+            ),
+            quarantine_failed_operation_ids=list(
+                receipt.quarantine_failed_operation_ids
+            ),
+            ledger_flush_state=ledger_flush_state,
+            technical_log_flush_state=technical_log_flush_state,
+            recovery_action=recovery_action,
+        )
+
+    def _perform_lifecycle_stop() -> LifecycleStopResponse:
+        nonlocal stop_response
+        with stop_lock:
+            if stop_response is not None:
+                return stop_response.model_copy(update={"outcome": "ALREADY_STOPPED"})
+
+            stop_id = f"stop-{uuid4()}"
+            technical_log = getattr(app.state, "technical_log", None)
+            if isinstance(technical_log, TechnicalLog):
+                try:
+                    technical_log.emit(
+                        component="lifecycle",
+                        correlation_id=stop_id,
+                        lifecycle_code="STOP_REQUESTED",
+                        recovery_action="WAIT_FOR_STOP_TO_FINISH",
+                    )
+                except TechnicalLogError:
+                    pass
+
+            operation_runner = getattr(app.state, "operation_runner", None)
+            if isinstance(operation_runner, OperationRunner):
+                receipt = operation_runner.stop(stop_id=stop_id)
+            else:
+                core_store.close_fresh_admission()
+                interrupted = core_store.interrupt_queued_operations()
+                recovered = core_store.recover_interrupted_operations(
+                    app.state.state_layout
+                )
+                interrupted.extend(recovered)
+                failed_quarantine = tuple(
+                    operation_id
+                    for operation_id in dict.fromkeys(recovered)
+                    if (
+                        (operation := core_store.get_operation_for_stop(operation_id))
+                        is not None
+                        and operation.artifact_state == "QUARANTINE_UNAVAILABLE"
+                    )
+                )
+                receipt = OperationStopReceipt(
+                    stop_id=stop_id,
+                    outcome="STOPPED",
+                    interrupted_operation_ids=tuple(dict.fromkeys(interrupted)),
+                    cancellation_timeout_operation_ids=(),
+                    quarantine_failed_operation_ids=failed_quarantine,
+                )
+
+            if isinstance(technical_log, TechnicalLog):
+                for operation_id in receipt.interrupted_operation_ids:
+                    try:
+                        technical_log.emit(
+                            component="operation_runner",
+                            correlation_id=operation_id,
+                            lifecycle_code="OPERATION_INTERRUPTED",
+                            recovery_action="EXPLICIT_RETRY_AS_NEW_OPERATION",
+                        )
+                    except TechnicalLogError:
+                        pass
+                for operation_id in receipt.quarantine_failed_operation_ids:
+                    try:
+                        technical_log.emit(
+                            component="operation_runner",
+                            correlation_id=operation_id,
+                            lifecycle_code="OPERATION_ARTIFACT_QUARANTINE_FAILED",
+                            recovery_action="RESTORE_CORE_STATE_AND_RETRY",
+                        )
+                    except TechnicalLogError:
+                        pass
+
+            ledger_flush_state = "FLUSHED"
+            try:
+                core_store.flush()
+            except (OSError, RuntimeError, sqlite3.Error):
+                ledger_flush_state = "UNAVAILABLE"
+            if isinstance(technical_log, TechnicalLog):
+                if ledger_flush_state == "FLUSHED":
+                    try:
+                        technical_log.emit(
+                            component="lifecycle",
+                            correlation_id=stop_id,
+                            lifecycle_code="LEDGER_FLUSHED",
+                            recovery_action="NONE",
+                        )
+                    except TechnicalLogError:
+                        pass
+                try:
+                    technical_log.emit(
+                        component="lifecycle",
+                        correlation_id=stop_id,
+                        lifecycle_code=receipt.outcome,
+                        recovery_action=(
+                            "RESTORE_CORE_STATE_AND_RETRY"
+                            if receipt.outcome == "STOP_TIMEOUT"
+                            else "NONE"
+                        ),
+                    )
+                    technical_log.emit(
+                        component="lifecycle",
+                        correlation_id=stop_id,
+                        lifecycle_code="TECHNICAL_LOG_FLUSHED",
+                        recovery_action="NONE",
+                    )
+                except TechnicalLogError:
+                    pass
+            technical_log_flush_state = "FLUSHED"
+            if isinstance(technical_log, TechnicalLog):
+                try:
+                    technical_log.flush()
+                except TechnicalLogError:
+                    technical_log_flush_state = "UNAVAILABLE"
+            stop_response = _stop_response_from_receipt(
+                receipt,
+                ledger_flush_state=ledger_flush_state,
+                technical_log_flush_state=technical_log_flush_state,
+            )
+            return stop_response
 
     @app.exception_handler(RequestValidationError)
     async def handle_request_validation(
@@ -658,6 +830,18 @@ def create_app(
         _: Request,
         error: WorkspaceRequestError,
     ) -> JSONResponse:
+        if error.code == SafeErrorCode.CORE_STOPPING:
+            technical_log = getattr(app.state, "technical_log", None)
+            if isinstance(technical_log, TechnicalLog):
+                try:
+                    technical_log.emit(
+                        component="operation_store",
+                        correlation_id=f"stop-{uuid4()}",
+                        lifecycle_code="FRESH_OPERATION_REFUSED_STOPPING",
+                        recovery_action="WAIT_FOR_STOP_TO_FINISH",
+                    )
+                except TechnicalLogError:
+                    pass
         return _error_response(error.status_code, error.code.value, error.recovery_action)
 
     @app.exception_handler(IngestionIdempotencyConflict)
@@ -897,6 +1081,23 @@ def create_app(
         return attach_workspace_cookie(response, resolution)
 
     @app.post(
+        "/api/lifecycle/stop",
+        response_model=LifecycleStopResponse,
+    )
+    async def stop_lifecycle() -> JSONResponse:
+        if resolved_settings.profile is DeliveryProfile.HOSTED:
+            return _error_response(
+                405,
+                SafeErrorCode.LIFECYCLE_STOP_UNAVAILABLE.value,
+                "CANCEL_ACTIVE_OPERATION_THROUGH_API",
+            )
+        response = await asyncio.to_thread(_perform_lifecycle_stop)
+        return JSONResponse(
+            status_code=200,
+            content=response.model_dump(mode="json"),
+        )
+
+    @app.post(
         "/api/operations",
         response_model=OperationMutationResponse,
         status_code=202,
@@ -1072,6 +1273,21 @@ def create_app(
             result="IDEMPOTENT_REPLAY" if stored.replayed else "CREATED",
             operation=operation_response(stored.operation),
         )
+        technical_log = getattr(app.state, "technical_log", None)
+        if not stored.replayed and isinstance(technical_log, TechnicalLog):
+            try:
+                technical_log.emit(
+                    component="operation_store",
+                    correlation_id=operation_id,
+                    lifecycle_code=(
+                        "OPERATION_CANCEL_REQUESTED"
+                        if stored.operation.state == "CANCELLING"
+                        else "OPERATION_CANCELLED"
+                    ),
+                    recovery_action="EXPLICIT_RETRY_AS_NEW_OPERATION",
+                )
+            except TechnicalLogError:
+                pass
         return attach_workspace_cookie(
             JSONResponse(
                 status_code=200 if stored.replayed else 202,
