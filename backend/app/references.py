@@ -1055,6 +1055,8 @@ class ValidatedReferenceStore:
     def _verify_run(
         self,
         analysis_run_id: str,
+        *,
+        quarantine_on_failure: bool = True,
     ) -> tuple[Mapping[str, Any], dict[str, object | list[object] | None]]:
         if self._runtime_fingerprint.get("release_candidate_id") != self._release_candidate_id:
             raise ReferenceVerificationError("runtime release does not match current release")
@@ -1068,14 +1070,23 @@ class ValidatedReferenceStore:
                 self._runtime_fingerprint,
             )
         except ReferenceVerificationError:
-            _quarantine_verification_failure(
-                self._artifact_root,
-                analysis_run_id,
-            )
+            if quarantine_on_failure:
+                _quarantine_verification_failure(
+                    self._artifact_root,
+                    analysis_run_id,
+                )
             raise
 
-    def _verify_entry(self, entry: Mapping[str, Any]) -> ValidatedReference:
-        manifest, payloads = self._verify_run(str(entry["analysis_run_id"]))
+    def _verify_entry(
+        self,
+        entry: Mapping[str, Any],
+        *,
+        quarantine_on_failure: bool = True,
+    ) -> ValidatedReference:
+        manifest, payloads = self._verify_run(
+            str(entry["analysis_run_id"]),
+            quarantine_on_failure=quarantine_on_failure,
+        )
         if is_synthetic_fixture_identity(payloads) or is_synthetic_fixture_identity(entry):
             raise ReferenceVerificationError(
                 "synthetic conformance fixtures cannot enter the reference registry"
@@ -1192,6 +1203,23 @@ class ValidatedReferenceStore:
             robustness_grade=validity_results["robustness_grade"],
             evidence_verdict=validity_results["evidence_verdict"],
         )
+
+    def validate_current_release_manifest(self) -> tuple[ValidatedReference, ...]:
+        """Verify every active current-release reference before local startup."""
+
+        with self._lock:
+            if not self.registry_present:
+                return ()
+            entries = _registry_entries(self._artifact_root, self._release_candidate_id)
+            verified = tuple(
+                self._verify_entry(entry, quarantine_on_failure=False)
+                for entry in entries
+            )
+            if not verified:
+                raise ReferenceVerificationError(
+                    "validated reference registry has no active verified entries"
+                )
+            return tuple(sorted(verified, key=lambda item: (item.completed_at, item.analysis_run_id)))
 
     def list_verified_references(self) -> list[ValidatedReference]:
         with self._lock:

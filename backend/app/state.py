@@ -124,6 +124,12 @@ class StateRoot:
     def layout(self) -> StateLayout:
         return self._layout
 
+    def validate_sealed(self) -> StateLayout:
+        """Validate an existing state root without creating or repairing it."""
+
+        self._validate_sealed_state()
+        return self._layout
+
     def initialize(self) -> StateLayout:
         root = self._layout.state_root
         try:
