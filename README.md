@@ -36,6 +36,44 @@ After setup, start the application offline:
 
 Startup performs no package-manager, synchronization, repair, or download operation. It validates the prepared interpreter, SPA, current-release reference registry (or an explicit unavailable reference state), sealed state, writable runtime locations, fixed `127.0.0.1:8000` port, and exclusive lifecycle state before it opens the browser. Liveness, Core readiness, and Gemini-only degradation remain separate health states. Use `-NoBrowser` for a local smoke without opening the system browser; use `-StateRoot <path>` only when selecting a separate prepared state root.
 
+## Local recovery and reference fallback
+
+Recovery commands operate only on the `LOCAL_FALLBACK` profile. Set the same profile and state root used by the prepared launcher before invoking them:
+
+```powershell
+$env:CORE_PROFILE = "LOCAL_FALLBACK"
+$env:CORE_STATE_ROOT = (Resolve-Path .\state).Path
+$env:CORE_PUBLIC_ORIGIN = "http://127.0.0.1:8000"
+$env:CORE_BIND_HOST = "127.0.0.1"
+$env:CORE_OFFLINE_STARTUP = "true"
+
+uv --cache-dir .uv-cache run --locked --no-sync python -m backend.app.recovery verify
+uv --cache-dir .uv-cache run --locked --no-sync python -m backend.app.recovery archive
+uv --cache-dir .uv-cache run --locked --no-sync python -m backend.app.recovery reset
+uv --cache-dir .uv-cache run --locked --no-sync python -m backend.app.recovery restore --archive-id <archive-id>
+uv --cache-dir .uv-cache run --locked --no-sync python -m backend.app.recovery restore-baseline
+```
+
+`reset` refuses an active or recovery-pending state, records an archive of the complete SQLite-plus-artifact root, restores the sealed baseline, and reports preflight status. Restore replaces the whole root; it does not merge audit histories. Corrupt current, archive, baseline, database, manifest, or referenced artifact state fails closed and preserves the affected bytes in quarantine with `RESTORE_CORE_STATE_AND_RETRY`.
+
+The static reference fallback is a separate read-only package. Prepare it only after the interactive path has returned a declared failure, then launch it on its own loopback origin:
+
+```powershell
+uv --cache-dir .uv-cache run --locked --no-sync python -m backend.app.reference_fallback prepare `
+  --root .\reference-fallback `
+  --capture-id capture-20260811-01 `
+  --run-id analysis-run-12345678-1234-4234-8234-123456789abc `
+  --release-candidate-id release-20260811 `
+  --interactive-failure-code INTERACTIVE_PATH_FAILED
+
+uv --cache-dir .uv-cache run --locked --no-sync python -m backend.app.reference_fallback launch `
+  --root .\reference-fallback `
+  --interactive-failure-code INTERACTIVE_PATH_FAILED `
+  --port 8001
+```
+
+The fallback displays `reference fallback`, capture/run/release identity, and its declared failure. It is not fresh computation, has no write/API route, and is never injected into the live UI or counted as hosted availability.
+
 For manual development, run the backend and frontend in separate PowerShell sessions:
 
 ```powershell

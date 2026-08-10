@@ -79,7 +79,7 @@ from .contracts import (
     WorkspaceSelectionViewResponse,
     WorkspaceResultViewResponse,
 )
-from .errors import SafeErrorCode, WorkspaceRequestError
+from .errors import CoreSafeError, SafeErrorCode, WorkspaceRequestError
 from .canonical import sha256
 from .analysis_runs import (
     AnalysisRunRequestError,
@@ -131,6 +131,7 @@ from .risk import (
 from .security import apply_public_response_headers
 from .settings import DeliveryProfile, Settings
 from .state import StateRoot
+from .recovery import StateRecovery, StateRecoveryError
 from .operations import DurableOperation, OperationRunner, OperationStopReceipt
 from .technical_log import TechnicalLog, TechnicalLogError
 from .references import (
@@ -368,12 +369,36 @@ def create_app(
         release_candidate_id=resolved_settings.release_candidate_id,
         runtime_fingerprint=resolved_settings.runtime_fingerprint.model_dump(mode="json"),
     )
+    state_recovery = StateRecovery(resolved_settings)
     stop_lock = threading.RLock()
     stop_response: LifecycleStopResponse | None = None
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-        state_layout = state_root.initialize()
+        try:
+            state_layout = state_root.initialize()
+            if resolved_settings.profile is not DeliveryProfile.HOSTED:
+                state_recovery.verify_current_state()
+                state_recovery.ensure_baseline()
+        except StateRecoveryError as error:
+            try:
+                safe_code = SafeErrorCode(error.code)
+            except ValueError:
+                safe_code = SafeErrorCode.STATE_CORRUPT
+            raise CoreSafeError(safe_code, error.recovery_action) from error
+        except CoreSafeError as error:
+            if (
+                error.code is SafeErrorCode.STATE_CORRUPT
+                and resolved_settings.profile is not DeliveryProfile.HOSTED
+            ):
+                try:
+                    state_recovery.verify_current_state()
+                except StateRecoveryError as recovery_error:
+                    raise CoreSafeError(
+                        SafeErrorCode.STATE_CORRUPT,
+                        recovery_error.recovery_action,
+                    ) from recovery_error
+            raise
         core_store.initialize()
         core_store.recover_interrupted_operations(state_layout)
         technical_log = TechnicalLog(state_layout.runtime_root / "technical.log")

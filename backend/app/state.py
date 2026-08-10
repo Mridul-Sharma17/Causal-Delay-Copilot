@@ -243,7 +243,8 @@ class StateRoot:
             )
         created_files.append(database_path)
         metadata = self._database_metadata()
-        with sqlite3.connect(database_path, timeout=5.0) as connection:
+        connection = sqlite3.connect(database_path, timeout=5.0)
+        try:
             connection.execute("PRAGMA foreign_keys = ON")
             connection.execute("BEGIN IMMEDIATE")
             ensure_workspace_schema(connection, create=True)
@@ -273,6 +274,8 @@ class StateRoot:
                 metadata.items(),
             )
             connection.commit()
+        finally:
+            connection.close()
 
     def _write_json(
         self,
@@ -358,8 +361,12 @@ class StateRoot:
             ) from error
 
     def _validate_database(self) -> None:
-        with sqlite3.connect(self._layout.database_path, timeout=5.0) as connection:
+        connection = sqlite3.connect(self._layout.database_path, timeout=5.0)
+        try:
             connection.execute("PRAGMA foreign_keys = ON")
+            integrity = connection.execute("PRAGMA integrity_check").fetchone()
+            if integrity != ("ok",):
+                raise sqlite3.DatabaseError("SQLite integrity check failed")
             ensure_workspace_schema(connection, create=False)
             ensure_audit_schema(connection, create=False)
             ensure_ingestion_schema(connection, create=False)
@@ -387,6 +394,8 @@ class StateRoot:
             ).fetchall()
             if dict(rows) != self._database_metadata():
                 raise sqlite3.DatabaseError("state metadata does not match the sealed contract")
+        finally:
+            connection.close()
 
     def _read_json(self, path: Path) -> object:
         with path.open("r", encoding="utf-8") as handle:

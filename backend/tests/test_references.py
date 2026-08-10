@@ -16,6 +16,7 @@ from backend.app.artifacts import (
     build_artifact_pin_set,
     cleanup_artifacts,
 )
+from backend.app.errors import CoreSafeError
 from backend.app.main import create_app
 from backend.app.references import (
     ARTIFACT_CONTRACT_VERSION,
@@ -37,6 +38,7 @@ from backend.app.references import (
     read_verified_analysis_bundle,
 )
 from backend.app.settings import DeliveryProfile, Settings
+from backend.app.recovery import StateRecovery
 
 
 RELEASE_ID = "local-test"
@@ -746,10 +748,21 @@ def test_reference_delivery_endpoint_fails_closed_on_an_unexpected_intended_role
         ],
     )
 
-    with TestClient(create_app(settings)) as client:
-        response = client.get("/api/evidence/reference")
+    with pytest.raises(CoreSafeError):
+        with TestClient(create_app(settings)):
+            pass
 
-    assert response.status_code == 404
+    assert not settings.state_root.exists()
+    quarantines = list(StateRecovery(settings).quarantine_root.iterdir())
+    assert len(quarantines) == 1
+    assert (
+        quarantines[0]
+        / "state"
+        / "artifacts"
+        / "releases"
+        / RELEASE_ID
+        / "validated-references.json"
+    ).is_file()
 
 
 def test_reference_delivery_endpoint_falls_back_to_the_earliest_verified_reference(

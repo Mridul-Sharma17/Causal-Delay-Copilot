@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from backend.app.errors import CoreSafeError, SafeErrorCode
 from backend.app.main import create_app
+from backend.app.recovery import StateRecovery
 from backend.app.settings import DeliveryProfile, Settings
 
 
@@ -108,7 +109,12 @@ def test_startup_rejects_corrupt_sealed_state_without_repairing_it(
             pass
 
     assert failure.value.code is SafeErrorCode.STATE_CORRUPT
-    assert quota_path.read_text(encoding="utf-8") == "{}"
+    assert not state_root.exists()
+    quarantines = list(StateRecovery(settings).quarantine_root.iterdir())
+    assert len(quarantines) == 1
+    assert (
+        quarantines[0] / "state" / "runtime" / "quota_policy.json"
+    ).read_text(encoding="utf-8") == "{}"
 
 
 def test_startup_rejects_pre_tradeoff_storage_version_without_repairing_it(
@@ -130,9 +136,14 @@ def test_startup_rejects_pre_tradeoff_storage_version_without_repairing_it(
             pass
 
     assert failure.value.code is SafeErrorCode.STATE_CORRUPT
-    assert json.loads(manifest_path.read_text(encoding="utf-8"))["schema_version"] == (
-        "core-state.v11"
-    )
+    assert not state_root.exists()
+    quarantines = list(StateRecovery(settings).quarantine_root.iterdir())
+    assert len(quarantines) == 1
+    assert json.loads(
+        (quarantines[0] / "state" / "state_manifest.json").read_text(
+            encoding="utf-8"
+        )
+    )["schema_version"] == "core-state.v11"
 
 
 def test_startup_rejects_tampered_tradeoff_storage_metadata_without_repairing_it(
@@ -206,4 +217,9 @@ def test_unsealed_state_is_not_repaired_silently(tmp_path: Path) -> None:
             pass
 
     assert failure.value.code is SafeErrorCode.STATE_CORRUPT
-    assert orphan.read_text(encoding="utf-8") == "interrupted"
+    assert not state_root.exists()
+    quarantines = list(StateRecovery(local_settings(state_root)).quarantine_root.iterdir())
+    assert len(quarantines) == 1
+    assert (quarantines[0] / "state" / "orphan.txt").read_text(
+        encoding="utf-8"
+    ) == "interrupted"

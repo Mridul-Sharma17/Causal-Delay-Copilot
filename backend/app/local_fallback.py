@@ -16,6 +16,7 @@ from uuid import uuid4
 
 from .errors import CoreSafeError
 from .references import ReferenceVerificationError, ValidatedReferenceStore
+from .recovery import StateRecovery
 from .settings import DeliveryProfile, Settings
 from .state import StateRoot
 
@@ -433,6 +434,7 @@ def record_setup_success(
         "recorded_at": datetime.now(timezone.utc).isoformat(),
     }
     _write_atomic_json(layout.runtime_root / SETUP_SUCCESS_FILENAME, payload)
+    StateRecovery(settings).finalize_baseline_after_setup()
     return payload
 
 
@@ -442,6 +444,7 @@ def initialize_local_fallback(settings: Settings) -> None:
     if settings.profile is not DeliveryProfile.LOCAL_FALLBACK:
         _fail("DELIVERY_PROFILE_INVALID", "USE_LOCAL_FALLBACK_CONFIGURATION")
     StateRoot(settings).initialize()
+    StateRecovery(settings).ensure_baseline()
 
 
 def _settings_from_environment() -> Settings:

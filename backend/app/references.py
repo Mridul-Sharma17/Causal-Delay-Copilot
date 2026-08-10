@@ -1407,6 +1407,26 @@ class ValidatedReferenceStore:
                 bundle_manifest_hash=bundle_manifest_hash,
             )
 
+    def verify_analysis_run(self, analysis_run_id: str) -> str:
+        """Verify one sealed run for operator recovery without exposing artifact bytes."""
+
+        with self._lock:
+            try:
+                manifest, _ = self._verify_run(
+                    analysis_run_id,
+                    quarantine_on_failure=False,
+                )
+            except (ReferenceVerificationError, OSError, TypeError, ValueError) as error:
+                raise ReferenceVerificationError(
+                    "analysis run failed recovery verification"
+                ) from error
+            bundle_manifest_hash = manifest.get("bundle_manifest_hash")
+            if not isinstance(bundle_manifest_hash, str):
+                raise ReferenceVerificationError(
+                    "analysis run bundle identity is unavailable"
+                )
+            return bundle_manifest_hash
+
     def promote_reference(
         self,
         analysis_run_id: str,
