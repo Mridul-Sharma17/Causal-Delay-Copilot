@@ -273,6 +273,9 @@ jobs:
         shell: bash
         env:
           RAILWAY_PUBLIC_ORIGIN: ${{ vars.RAILWAY_PUBLIC_ORIGIN }}
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_USE_CLI_CURL: "1"
         run: |
           set -euo pipefail
           python scripts/release_candidate.py verify-match \

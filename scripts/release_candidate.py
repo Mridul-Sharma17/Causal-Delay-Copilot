@@ -4,9 +4,11 @@ import argparse
 from datetime import datetime, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import shutil
+import subprocess
 import sys
 import time
 from typing import Any, Callable
@@ -324,6 +326,49 @@ def _fetch_json(url: str, timeout_seconds: float) -> dict[str, Any]:
     return payload
 
 
+def _fetch_vercel_json(url: str, timeout_seconds: float) -> dict[str, Any]:
+    """Fetch a protected Vercel preview through the authenticated Vercel CLI."""
+
+    if os.environ.get("VERCEL_USE_CLI_CURL") != "1":
+        return _fetch_json(url, timeout_seconds)
+    token = os.environ.get("VERCEL_TOKEN")
+    scope = os.environ.get("VERCEL_ORG_ID")
+    version = os.environ.get("VERCEL_CLI_VERSION", "58.9.3")
+    if not token or not scope:
+        raise ReleaseContractError("RELEASE_REMOTE_UNAVAILABLE")
+    npx = "npx.cmd" if os.name == "nt" else "npx"
+    try:
+        result = subprocess.run(
+            [
+                npx,
+                "--yes",
+                f"vercel@{version}",
+                "curl",
+                url,
+                "--scope",
+                scope,
+                "--yes",
+                "--json",
+            ],
+            capture_output=True,
+            check=True,
+            text=True,
+            timeout=timeout_seconds,
+        )
+        payload = json.loads(result.stdout)
+    except (
+        OSError,
+        subprocess.SubprocessError,
+        json.JSONDecodeError,
+        TypeError,
+        ValueError,
+    ) as error:
+        raise ReleaseContractError("RELEASE_REMOTE_UNAVAILABLE") from error
+    if not isinstance(payload, dict):
+        raise ReleaseContractError("RELEASE_REMOTE_INVALID")
+    return payload
+
+
 def _assert_identity(payload: dict[str, Any], expected: dict[str, str]) -> None:
     if (
         payload.get("schema_version") != RELEASE_IDENTITY_SCHEMA_VERSION
@@ -421,11 +466,11 @@ def verify_match(args: argparse.Namespace) -> None:
             expected,
         )
         _assert_identity(
-            _fetch_json(f"{vercel_origin}/release.json", args.timeout_seconds),
+            _fetch_vercel_json(f"{vercel_origin}/release.json", args.timeout_seconds),
             expected,
         )
         _assert_identity(
-            _fetch_json(f"{vercel_origin}/api/release", args.timeout_seconds),
+            _fetch_vercel_json(f"{vercel_origin}/api/release", args.timeout_seconds),
             expected,
         )
 
