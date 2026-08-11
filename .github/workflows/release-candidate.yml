@@ -164,6 +164,7 @@ jobs:
           name: release-${{ steps.identity.outputs.release_candidate_id }}
           path: .release
           if-no-files-found: error
+          include-hidden-files: true
           retention-days: 90
 
   deploy_railway:
