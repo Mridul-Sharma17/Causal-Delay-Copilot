@@ -18,6 +18,16 @@ npm.cmd run test:e2e
 
 The Playwright smoke starts one Uvicorn worker and one Vite development server. The prepared local fallback uses the compiled SPA and one loopback Uvicorn worker instead.
 
+## Complete Core browser-to-ledger verification
+
+Issue #64 has one bounded command for the full prepared seam:
+
+```powershell
+.\scripts\verify-core-journey.ps1
+```
+
+The command runs the TypeScript check, frontend tests, the complete Python suite, and the compiled SPA build. It then prepares a real `LOCAL_FALLBACK` state through the versioned API, SQLite transactions, and content-addressed artifacts, starts the compiled SPA from the same Uvicorn origin, and invokes the repository-local Playwright CLI against that origin. The prepared state is left under `.tmp\core-journey-*` for inspection and is not a shipped reference or a synthetic fixture. Hosted identity parity is covered by the parametrized API contract test in `backend/tests/test_core_journey.py`; the production hosted profile requires an HTTPS origin and Railway volume path.
+
 ## Prepared local fallback
 
 Run the one-time setup while online from Windows PowerShell 5.1:

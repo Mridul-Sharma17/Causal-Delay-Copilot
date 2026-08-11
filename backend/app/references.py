@@ -570,6 +570,37 @@ def _verify_role_payload(
         raise ReferenceVerificationError(f"{role} payload schema does not match")
 
 
+def _expected_runtime_for_bundle(
+    expected_runtime: Mapping[str, Any],
+    request: Mapping[str, Any],
+    observed_runtime: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """Expand the delivery identity when a fresh bundle carries a full fingerprint."""
+
+    if (
+        expected_runtime.get("schema_version") != "runtime-fingerprint.v1"
+        or observed_runtime.get("schema_version")
+        != "analysis-runtime-fingerprint.v1"
+        or request.get("engine_input_schema_version") != "causal-engine-suite-request.v2"
+    ):
+        return expected_runtime
+    try:
+        from types import SimpleNamespace
+
+        from .analysis_runs import runtime_fingerprint
+        from .settings import RuntimeFingerprint
+
+        delivery_identity = RuntimeFingerprint.model_validate(expected_runtime)
+        return runtime_fingerprint(
+            SimpleNamespace(runtime_fingerprint=delivery_identity),
+            request,
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise ReferenceVerificationError(
+            "runtime fingerprint cannot be recomputed for the current release"
+        ) from error
+
+
 def _object_path(artifact_root: Path, descriptor: Mapping[str, Any]) -> Path:
     digest = descriptor["sha256"][7:]
     class_root = descriptor["confidentiality_class"]
@@ -848,7 +879,8 @@ def _verify_bundle(
         scientific_sha256(runtime),
     }:
         raise ReferenceVerificationError("runtime fingerprint digest does not match")
-    if dict(runtime) != dict(expected_runtime):
+    current_runtime = _expected_runtime_for_bundle(expected_runtime, request, runtime)
+    if dict(runtime) != dict(current_runtime):
         raise ReferenceVerificationError("runtime fingerprint does not match current release")
 
     result = _require_mapping(payloads["engine_result"], "engine result")
@@ -1170,10 +1202,55 @@ class ValidatedReferenceStore:
                 diagnostic_payload, (Mapping, list)
             ):
                 raise DiagnosticIntegrityError("diagnostic payload is unsupported")
+            diagnostic_bundle_manifest_hash: str | None = str(
+                entry["bundle_manifest_hash"]
+            )
+            diagnostic_bindings: list[str | None] = []
+            diagnostic_records: Any = diagnostic_payload
+            if isinstance(diagnostic_payload, Mapping):
+                diagnostic_records = diagnostic_payload.get(
+                    "results",
+                    diagnostic_payload.get(
+                        "diagnostic_results",
+                        diagnostic_payload.get("diagnostics"),
+                    ),
+                )
+                for key in ("robustness_grade", "evidence_verdict"):
+                    value = diagnostic_payload.get(key)
+                    if isinstance(value, Mapping):
+                        diagnostic_bindings.append(
+                            value.get("bundle_manifest_hash")
+                        )
+            if isinstance(diagnostic_records, list):
+                for record in diagnostic_records:
+                    if isinstance(record, Mapping):
+                        diagnostic_bindings.append(
+                            record.get("bundle_manifest_hash")
+                        )
+            if diagnostic_bindings:
+                if any(
+                    binding is not None and not isinstance(binding, str)
+                    for binding in diagnostic_bindings
+                ):
+                    raise DiagnosticIntegrityError(
+                        "diagnostic bundle bindings are invalid"
+                    )
+                observed_bindings = set(diagnostic_bindings)
+                if observed_bindings == {None}:
+                    # Fresh bundles cannot include their final manifest hash in
+                    # the diagnostic bytes without creating a hash cycle. The
+                    # descriptor and manifest still bind this payload exactly.
+                    diagnostic_bundle_manifest_hash = None
+                elif observed_bindings != {
+                    diagnostic_bundle_manifest_hash
+                }:
+                    raise DiagnosticIntegrityError(
+                        "diagnostic bundle bindings are inconsistent"
+                    )
             validity_results = publish_validity_results(
                 diagnostic_payload,
                 analysis_run_id=str(entry["analysis_run_id"]),
-                bundle_manifest_hash=str(entry["bundle_manifest_hash"]),
+                bundle_manifest_hash=diagnostic_bundle_manifest_hash,
                 evidence_refs=diagnostic_descriptor["evidence_refs"],
                 input_refs=["diagnostic_artifacts:" + str(diagnostic_descriptor["logical_id"])],
             )

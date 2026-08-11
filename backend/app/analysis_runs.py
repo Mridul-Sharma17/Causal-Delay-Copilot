@@ -5219,27 +5219,65 @@ def _fresh_artifact_members(
         "runtime_digest": admission.get("runtime_fingerprint_digest"),
         "engine_result_digest": content_sha256(engine_result),
     }
+    verification_checks = [
+        {
+            "check_id": "required_roles",
+            "status": "passed",
+            "evidence_digest": content_sha256(check_basis),
+        },
+        {
+            "check_id": "cross_reference_integrity",
+            "status": "passed",
+            "evidence_digest": content_sha256(
+                {
+                    "request": admission.get("scientific_request_digest"),
+                    "runtime": admission.get("runtime_fingerprint_digest"),
+                }
+            ),
+        },
+    ]
+    investigation_request_id = admission.get("investigation_request_id")
+    if isinstance(investigation_request_id, str) and investigation_request_id:
+        verification_checks.append(
+            {
+                "check_id": "provenance",
+                "status": "passed",
+                "evidence_digest": content_sha256(
+                    {
+                        "investigation_request_id": investigation_request_id,
+                        "dataset_version_id": request.get("dataset_version_id"),
+                        "intended_role": request.get("intended_role"),
+                        "scientific_request_digest": admission.get(
+                            "scientific_request_digest"
+                        ),
+                    }
+                ),
+            }
+        )
+    reproduces_run_id = admission.get("reproduces_run_id")
+    if isinstance(reproduces_run_id, str) and reproduces_run_id:
+        verification_checks.append(
+            {
+                "check_id": "reproduction",
+                "status": "passed",
+                "evidence_digest": content_sha256(
+                    {
+                        "reproduces_run_id": reproduces_run_id,
+                        "scientific_request_digest": admission.get(
+                            "scientific_request_digest"
+                        ),
+                        "runtime_fingerprint_digest": admission.get(
+                            "runtime_fingerprint_digest"
+                        ),
+                    }
+                ),
+            }
+        )
     verification_report = {
         "schema_version": VERIFICATION_REPORT_SCHEMA_VERSION,
         "validation_policy_version": "analysis-run-verification.v1",
         "status": "passed",
-        "checks": [
-            {
-                "check_id": "required_roles",
-                "status": "passed",
-                "evidence_digest": content_sha256(check_basis),
-            },
-            {
-                "check_id": "cross_reference_integrity",
-                "status": "passed",
-                "evidence_digest": content_sha256(
-                    {
-                        "request": admission.get("scientific_request_digest"),
-                        "runtime": admission.get("runtime_fingerprint_digest"),
-                    }
-                ),
-            },
-        ],
+        "checks": verification_checks,
     }
     members.append(
         _fresh_artifact_member(
