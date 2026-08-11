@@ -1570,9 +1570,18 @@ describe("Core health journey", () => {
 
     render(<App />);
 
-    expect(await screen.findByRole("status")).toHaveTextContent(
-      "Core ready with Gemini-only drafting unavailable",
-    );
+    expect(
+      await screen.findByRole("navigation", { name: "Decision journey" }),
+    ).toBeInTheDocument();
+    expect(screen.getAllByRole("link")).toHaveLength(7);
+    expect(screen.getByRole("heading", { name: "Check whether this subject can support a defensible result" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Read the evidence verdict before any action lane" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Prepare an unsent preview and retain manager authority" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Replay exactly what was known and recorded" })).toBeInTheDocument();
+
+    expect(
+      await screen.findByText("Core ready with Gemini-only drafting unavailable"),
+    ).toBeInTheDocument();
     expect(screen.getByText(/Demo Workspace active/)).toBeInTheDocument();
     expect(screen.getByText("Process liveness")).toBeInTheDocument();
     expect(screen.getByText("Core readiness")).toBeInTheDocument();
@@ -1656,9 +1665,7 @@ describe("Core health journey", () => {
 
     render(<App />);
 
-    expect(await screen.findByRole("status")).toHaveTextContent(
-      "Core health is unavailable",
-    );
+    expect(await screen.findByText("Core health is unavailable")).toBeInTheDocument();
     expect(screen.queryByText("CORE_STORE_UNAVAILABLE")).not.toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
@@ -1710,6 +1717,26 @@ describe("Core health journey", () => {
         "Reactive Risk intake is unavailable. No signal or cached result was substituted.",
       ),
     ).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", {
+        name: "Read the evidence verdict before any action lane",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", {
+        name: "Keep the action lane read-only until evidence permits review",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", {
+        name: "Prepare an unsent preview and retain manager authority",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", {
+        name: "Replay exactly what was known and recorded",
+      }),
+    ).toBeInTheDocument();
     expect(screen.queryByText("Canonical fields")).not.toBeInTheDocument();
     expect(
       fetchMock.mock.calls.some(([input]) => input === "/api/ingestion-runs"),
@@ -1742,9 +1769,9 @@ describe("Core health journey", () => {
 
     render(<App />);
 
-    expect(await screen.findByRole("status")).toHaveTextContent(
-      "Core ready with Gemini-only drafting unavailable",
-    );
+    expect(
+      await screen.findByText("Core ready with Gemini-only drafting unavailable"),
+    ).toBeInTheDocument();
     expect(screen.getByText(/Demo Workspace active/)).toBeInTheDocument();
     expect(screen.getByText("Audit occurrence unavailable")).toBeInTheDocument();
   });

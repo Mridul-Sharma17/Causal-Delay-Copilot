@@ -1,4 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+} from "react";
 
 import {
   getDatasetLineage,
@@ -68,6 +74,117 @@ type LineageState = "pending" | "loading" | "ready" | "failed";
 type RiskState = "pending" | "loading" | "ready" | "failed";
 type DecisionBriefState = "pending" | "publishing" | "ready" | "failed";
 type FreshOperationState = "idle" | "starting" | "polling" | "terminal" | "failed";
+
+export type JourneyStage = {
+  key: string;
+  label: string;
+  targetId: string;
+  status: string;
+};
+
+export function JourneyStageNav({ stages }: { stages: readonly JourneyStage[] }) {
+  const [announcement, setAnnouncement] = useState(
+    "Decision journey navigation is ready.",
+  );
+
+  const moveToStage = (
+    event: ReactMouseEvent<HTMLAnchorElement>,
+    stage: JourneyStage,
+  ) => {
+    const target = document.getElementById(stage.targetId);
+    if (target === null) {
+      event.preventDefault();
+      setAnnouncement(`${stage.label} is unavailable. ${stage.status}.`);
+      return;
+    }
+
+    event.preventDefault();
+    window.history.replaceState({}, "", `#${stage.targetId}`);
+    if (typeof target.scrollIntoView === "function") {
+      const reduceMotion =
+        typeof window.matchMedia === "function" &&
+        window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      target.scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth", block: "start" });
+    }
+    target.focus({ preventScroll: true });
+    setAnnouncement(`Moved to ${stage.label}. ${stage.status}.`);
+  };
+
+  return (
+    <nav
+      id="decision-journey"
+      className="journey-navigation"
+      aria-labelledby="decision-journey-heading"
+    >
+      <div className="journey-navigation-heading">
+        <div>
+          <p className="eyebrow">Decision Brief</p>
+          <h2 id="decision-journey-heading">Decision journey</h2>
+        </div>
+        <p className="journey-navigation-caption">
+          Six stages keep evidence, authority, and replay visible in one keyboard-operable path.
+        </p>
+      </div>
+      <ol className="journey-stage-list">
+        {stages.map((stage, index) => {
+          const statusId = `${stage.key}-stage-status`;
+          return (
+            <li key={stage.key}>
+              <a
+                href={`#${stage.targetId}`}
+                aria-describedby={statusId}
+                onClick={(event) => moveToStage(event, stage)}
+              >
+                <span className="journey-stage-number" aria-hidden="true">
+                  {String(index + 1).padStart(2, "0")}
+                </span>
+                <span className="journey-stage-label">{stage.label}</span>
+                <span id={statusId} className="journey-stage-status">
+                  Status: {stage.status}
+                </span>
+              </a>
+            </li>
+          );
+        })}
+      </ol>
+      <div className="visually-hidden" aria-live="polite" aria-atomic="true">
+        {announcement}
+      </div>
+    </nav>
+  );
+}
+
+function JourneyStagePlaceholder({
+  eyebrow,
+  targetId,
+  headingId,
+  heading,
+  description,
+  status,
+}: {
+  eyebrow: string;
+  targetId: string;
+  headingId: string;
+  heading: string;
+  description: string;
+  status: string;
+}) {
+  return (
+    <section
+      className="journey-stage-overview journey-stage-target"
+      id={targetId}
+      tabIndex={-1}
+      aria-labelledby={headingId}
+    >
+      <p className="eyebrow">{eyebrow}</p>
+      <h3 id={headingId}>{heading}</h3>
+      <p className="supporting-copy">{description}</p>
+      <p className="stage-status-copy" aria-live="polite">
+        {status}.
+      </p>
+    </section>
+  );
+}
 
 function runRelationshipLabel(
   relationship: AnalysisRunStatus["run_relationship"],
@@ -1116,8 +1233,12 @@ export function DraftContextPreviewPanel({
           : null;
   const terminalDecision = managerDecision?.decision ?? null;
   return (
-    <div className="draft-preview action-publication" role="status">
-      <strong>
+    <section
+      className="draft-preview action-publication"
+      aria-labelledby="draft-preview-heading"
+      aria-busy={mutationState === "saving" || mutationState === "submitting" ? "true" : undefined}
+    >
+      <strong id="draft-preview-heading" aria-live="polite">
         {draftingSource === "GEMINI_CHECKED"
           ? "Checked Gemini unsent draft preview"
           : "Deterministic unsent draft preview"}
@@ -1385,7 +1506,7 @@ export function DraftContextPreviewPanel({
         </span>
         <code>{formatValue(preview.artifact.provenance)}</code>
       </details>
-    </div>
+    </section>
   );
 }
 
@@ -1513,6 +1634,12 @@ export function DecisionSupportActionsStage({
       : [];
   const isMonitoringFallback =
     recommendationSelectionBasis === "MONITORING_FALLBACK_NO_POSITIVE_ACTIVE_OPTION";
+  const draftStageStatus =
+    actionRecommendation === null
+      ? tradeoff !== null
+        ? "Waiting: manager choice required"
+        : "Unavailable: no recommendation published"
+      : "Ready after exact currentness check";
   const evaluationLifecycle = boundary.evaluation_lifecycle;
   const lifecycleHead =
     evaluationLifecycle !== undefined &&
@@ -1804,7 +1931,17 @@ export function DecisionSupportActionsStage({
   };
 
   return (
-    <section className="actions-stage" aria-labelledby="actions-stage-heading">
+    <section
+      className="actions-stage journey-stage-target"
+      id="stage-actions"
+      tabIndex={-1}
+      aria-labelledby="actions-stage-heading"
+      aria-busy={
+        tradeoffSelectionState === "submitting" || draftPreviewState === "preparing"
+          ? "true"
+          : undefined
+      }
+    >
       <div className="record-heading">
         <div>
           <p className="eyebrow">Actions stage</p>
@@ -1873,48 +2010,76 @@ export function DecisionSupportActionsStage({
         </div>
       )}
 
-      {actionRecommendation !== null && (
-        <div className="action-publication" role="status">
-          <strong>{isMonitoringFallback ? "Accept and Monitor fallback" : "Recommendation available"}</strong>
-          <span>
-            Selected option: <code>{formatValue(actionRecommendation.selected_option_code)}</code>
-          </span>
-          <span>
-            Selection basis: <code>{formatValue(recommendationSelectionBasis)}</code>
-          </span>
-          <span>
-            Manager authorization: <code>{formatValue(recommendationAuthorization?.state ?? "NOT_RECORDED")}</code>
-          </span>
-          {recommendationRunnerUp !== null && (
-            <span>
-              Runner-up: <code>{formatValue(recommendationRunnerUp.option_code)}</code> — {formatValue(recommendationRunnerUp.ordering_reason)}
-            </span>
-          )}
-          <span>This publication does not authorize or execute an action.</span>
-          <button
-            type="button"
-            onClick={() =>
-              void prepareDraftPreviewFor(
-                actionRecommendation,
-                "IMMEDIATE_EVALUATION_RECOMMENDATION",
-                null,
-              )
-            }
-            disabled={draftPreviewState === "preparing"}
-          >
-            {draftPreviewState === "preparing"
-              ? "Preparing deterministic preview…"
-              : "Prepare deterministic unsent draft"}
-          </button>
+      <section
+        className="draft-stage"
+        id="stage-draft"
+        tabIndex={-1}
+        aria-labelledby="draft-stage-heading"
+      >
+        <div className="record-heading">
+          <div>
+            <p className="eyebrow">Stage 5 · Draft &amp; decide</p>
+            <h4 id="draft-stage-heading">
+              Prepare an unsent preview and retain manager authority
+            </h4>
+          </div>
+          <span>{draftPreviewState === "ready" ? "Preview ready" : draftStageStatus}</span>
         </div>
-      )}
-
-      {draftPreviewMessage !== null && (
-        <p className="supporting-copy" role="status">
-          {draftPreviewMessage}
+        <p className="supporting-copy">
+          Only a current, governed recommendation can open the draft path. Editing, disposition,
+          authorization, sending, and execution remain separate operations.
         </p>
-      )}
-      {draftPreview !== null && <DraftContextPreviewPanel preview={draftPreview} />}
+        {actionRecommendation !== null && (
+          <div className="action-publication" aria-labelledby="recommendation-heading">
+            <strong id="recommendation-heading" aria-live="polite">
+              {isMonitoringFallback ? "Accept and Monitor fallback" : "Recommendation available"}
+            </strong>
+            <span>
+              Selected option: <code>{formatValue(actionRecommendation.selected_option_code)}</code>
+            </span>
+            <span>
+              Selection basis: <code>{formatValue(recommendationSelectionBasis)}</code>
+            </span>
+            <span>
+              Manager authorization: <code>{formatValue(recommendationAuthorization?.state ?? "NOT_RECORDED")}</code>
+            </span>
+            {recommendationRunnerUp !== null && (
+              <span>
+                Runner-up: <code>{formatValue(recommendationRunnerUp.option_code)}</code> — {formatValue(recommendationRunnerUp.ordering_reason)}
+              </span>
+            )}
+            <span>This publication does not authorize or execute an action.</span>
+            <button
+              type="button"
+              onClick={() =>
+                void prepareDraftPreviewFor(
+                  actionRecommendation,
+                  "IMMEDIATE_EVALUATION_RECOMMENDATION",
+                  null,
+                )
+              }
+              disabled={draftPreviewState === "preparing"}
+            >
+              {draftPreviewState === "preparing"
+                ? "Preparing deterministic preview…"
+                : "Prepare deterministic unsent draft"}
+            </button>
+          </div>
+        )}
+
+        {actionRecommendation === null && (
+          <p className="lineage-warning" aria-live="polite">
+            Draft unavailable. No current Action Recommendation was published; the manager choice
+            or evidence gate must remain explicit.
+          </p>
+        )}
+        {draftPreviewMessage !== null && (
+          <p className="supporting-copy" role="status" aria-live="polite">
+            {draftPreviewMessage}
+          </p>
+        )}
+        {draftPreview !== null && <DraftContextPreviewPanel preview={draftPreview} />}
+      </section>
 
       <div className="action-monitoring" role="status">
         <strong>Governed monitoring fallback</strong>
@@ -1954,8 +2119,8 @@ export function DecisionSupportActionsStage({
       </div>
 
       {tradeoff !== null && (
-        <div className="action-tradeoff" role="status">
-          <strong>Two-candidate trade-off</strong>
+        <div className="action-tradeoff" aria-labelledby="tradeoff-heading">
+          <strong id="tradeoff-heading" aria-live="polite">Two-candidate trade-off</strong>
           {tradeoffPivot === "INCOMPARABLE_EVIDENCE_GAP" && (
             <span>Incomparable evidence gap</span>
           )}
@@ -2295,22 +2460,44 @@ function DecisionBriefPanel({
           registryInspection={snapshot.decision_support_registry}
         />
       )}
-      {replay?.status === "REPLAYED" && replay.historical_state !== null && (
-        <HistoricalReplayPanel state={replay.historical_state} />
-      )}
-      <p className="audit-status">
-        Immutable snapshot {snapshot.snapshot_id} · event {snapshot.event_seq}
-      </p>
-      {replay?.status === "REPLAYED" && replay.snapshot !== null ? (
-        <p className="replay-status" role="status">
-          Replay verified from stored state at event {replay.requested_event_seq}; no current
-          eligibility or reference state was read.
+      <section
+        className="audit-stage journey-stage-target"
+        id="stage-audit"
+        tabIndex={-1}
+        aria-labelledby="audit-stage-heading"
+      >
+        <div className="record-heading">
+          <div>
+            <p className="eyebrow">Stage 6 · Audit replay</p>
+            <h4 id="audit-stage-heading">Replay exactly what was known and recorded</h4>
+          </div>
+          <span>
+            {replay?.status === "REPLAYED" && replay.historical_state !== null
+              ? "Replay verified"
+              : "Replay unavailable"}
+          </span>
+        </div>
+        <p className="supporting-copy">
+          Replay is read-only. It does not rerun analysis, call a provider, reevaluate currentness,
+          or apply current policy to historical facts.
         </p>
-      ) : (
-        <p className="lineage-warning" role="status">
-          Historical replay is unavailable. The stored snapshot remains read-only.
+        {replay?.status === "REPLAYED" && replay.historical_state !== null && (
+          <HistoricalReplayPanel state={replay.historical_state} />
+        )}
+        <p className="audit-status">
+          Immutable snapshot {snapshot.snapshot_id} · event {snapshot.event_seq}
         </p>
-      )}
+        {replay?.status === "REPLAYED" && replay.snapshot !== null ? (
+          <p className="replay-status" role="status">
+            Replay verified from stored state at event {replay.requested_event_seq}; no current
+            eligibility or reference state was read.
+          </p>
+        ) : (
+          <p className="lineage-warning" role="status">
+            Historical replay is unavailable. The stored snapshot remains read-only.
+          </p>
+        )}
+      </section>
     </section>
   );
 }
@@ -3096,19 +3283,123 @@ function App() {
     proactiveRequest.subject.kind === "proactive_preview"
       ? proactiveRequest.subject
       : null;
+  const decisionSupport = decisionBrief?.decision_support ?? null;
+  const decisionBriefSnapshotReady = decisionBriefState === "ready" && decisionBrief !== null;
+  const decisionSupportStageAvailable = decisionBriefSnapshotReady && decisionSupport !== null;
+  const actionRecommendation = decisionSupport?.action_recommendation ?? null;
+  const riskIntakeStageStatus =
+    journeyState === "loading"
+      ? "Loading Core health"
+      : journeyState === "unavailable"
+        ? "Unavailable: Core health"
+        : riskState === "loading"
+          ? "Loading verified intake"
+          : riskState === "ready"
+            ? "Ready: investigation accepted"
+            : riskState === "failed"
+              ? "Unavailable: no verified signal"
+              : "Waiting for verified intake";
+  const eligibilityStageStatus =
+    riskState === "loading"
+      ? "Loading eligibility inputs"
+      : riskState === "ready" &&
+          riskAttempt !== null &&
+          riskAttempt.investigation_request !== null &&
+          riskAttempt.investigation_request !== undefined
+        ? "Ready: subject gate is visible"
+        : riskState === "failed"
+          ? "Unavailable: no frozen investigation"
+          : "Waiting for accepted investigation";
+  const evidenceStageStatus =
+    decisionBriefState === "publishing"
+      ? "Publishing immutable snapshot"
+      : decisionBriefState === "ready"
+        ? decisionBrief?.subject_applicability.state === "abstained"
+          ? "Abstained: no effect claim"
+          : "Ready: verdict before actions"
+        : decisionBriefState === "failed"
+          ? "Unavailable: no verified snapshot"
+          : "Waiting for accepted intake";
+  const actionsStageStatus =
+    decisionBrief === null
+      ? "Unavailable: no Decision Brief"
+      : decisionSupport === null
+        ? "Read-only: no evaluation published"
+        : decisionSupportStateLabel(decisionSupport.state);
+  const draftStageStatus =
+    decisionSupport === null
+      ? "Unavailable: evidence gate is read-only"
+      : actionRecommendation !== null
+        ? "Ready after exact currentness check"
+        : decisionSupport.tradeoff !== null
+          ? "Waiting: manager choice required"
+          : "Unavailable: no recommendation published";
+  const auditStageStatus =
+    decisionBriefReplay?.status === "REPLAYED" && decisionBriefReplay.historical_state !== null
+      ? "Replay verified"
+      : decisionBriefState === "ready"
+        ? "Unavailable: exact replay not available"
+        : "Waiting for immutable snapshot";
+  const journeyStages: JourneyStage[] = [
+    {
+      key: "risk-intake",
+      label: "Risk intake",
+      targetId: "stage-risk-intake",
+      status: riskIntakeStageStatus,
+    },
+    {
+      key: "eligibility",
+      label: "Eligibility",
+      targetId: "stage-eligibility",
+      status: eligibilityStageStatus,
+    },
+    {
+      key: "evidence",
+      label: "Evidence",
+      targetId: "stage-evidence",
+      status: evidenceStageStatus,
+    },
+    {
+      key: "actions",
+      label: "Actions",
+      targetId: "stage-actions",
+      status: actionsStageStatus,
+    },
+    {
+      key: "draft",
+      label: "Draft & decide",
+      targetId: "stage-draft",
+      status: draftStageStatus,
+    },
+    {
+      key: "audit",
+      label: "Audit replay",
+      targetId: "stage-audit",
+      status: auditStageStatus,
+    },
+  ];
 
   return (
-    <main className="core-shell">
+    <main className="core-shell" aria-labelledby="app-heading">
+      <a className="skip-link" href="#decision-journey">
+        Skip to Decision journey
+      </a>
       <header className="core-header">
         <p className="eyebrow">Causal Delay Copilot</p>
-        <h1>Core application health</h1>
+        <h1 id="app-heading">Core application health</h1>
         <p className="lede">
           One contract-first browser application with a typed API and an
           immutable audit ledger.
         </p>
       </header>
 
-      <section className="health-panel" aria-labelledby="health-heading">
+      <JourneyStageNav stages={journeyStages} />
+
+      <section
+        className="health-panel"
+        aria-labelledby="health-heading"
+        aria-busy={journeyState === "loading" ? "true" : undefined}
+      >
         <div className="panel-heading">
           <div>
             <p className="eyebrow">Operational state</p>
@@ -3226,7 +3517,20 @@ function App() {
                     diagnostics={reference.diagnostics}
                     summary={reference.diagnostic_summary}
                   />
-                  <section className="operation-panel" aria-labelledby="fresh-operation-heading">
+                  <section
+                    className="operation-panel"
+                    aria-labelledby="fresh-operation-heading"
+                    aria-busy={
+                      freshOperationState === "starting" ||
+                      freshOperationState === "polling" ||
+                      reproductionOperationState === "starting" ||
+                      reproductionOperationState === "polling" ||
+                      refreshOperationState === "starting" ||
+                      refreshOperationState === "polling"
+                        ? "true"
+                        : undefined
+                    }
+                  >
                     <div className="record-heading">
                       <div>
                         <p className="eyebrow">Fresh analysis boundary</p>
@@ -3413,7 +3717,19 @@ function App() {
       </section>
 
       {health !== null && (
-        <section className="risk-panel" aria-labelledby="risk-heading">
+        <section
+          className="risk-panel journey-stage-target"
+          id="stage-risk-intake"
+          tabIndex={-1}
+          aria-labelledby="risk-heading"
+          aria-busy={
+            riskState === "loading" ||
+            proactiveState === "loading" ||
+            decisionBriefState === "publishing"
+              ? "true"
+              : undefined
+          }
+        >
           <div className="panel-heading">
             <div>
               <p className="eyebrow">Risk intake</p>
@@ -3429,6 +3745,75 @@ function App() {
             A prediction can initiate an investigation, but it is not causal evidence.
             Canonical facts stay bound to one frozen Order Line and Dataset Version.
           </p>
+
+          <section
+            className="journey-stage-overview"
+            id="stage-eligibility"
+            tabIndex={-1}
+            aria-labelledby="eligibility-stage-heading"
+          >
+            <p className="eyebrow">Stage 2 · Eligibility</p>
+            <h3 id="eligibility-stage-heading">
+              Check whether this subject can support a defensible result
+            </h3>
+            <p className="supporting-copy">
+              Eligibility is checked before estimation or Decision Support. Missing, abstained,
+              stale, and unavailable inputs stay visible and do not become a result.
+            </p>
+            <p className="stage-status-copy" aria-live="polite">
+              {eligibilityStageStatus}.
+            </p>
+          </section>
+
+          <section
+            className="journey-stage-overview"
+            id="stage-evidence"
+            tabIndex={-1}
+            aria-labelledby="evidence-stage-heading"
+          >
+            <p className="eyebrow">Stage 3 · Evidence</p>
+            <h3 id="evidence-stage-heading">
+              Read the evidence verdict before any action lane
+            </h3>
+            <p className="supporting-copy">
+              The immutable Decision Brief Snapshot exposes claim scope, diagnostics, and
+              abstention before options, drafting, or authorization.
+            </p>
+            <p className="stage-status-copy" aria-live="polite">
+              {evidenceStageStatus}.
+            </p>
+          </section>
+
+          {!decisionSupportStageAvailable && (
+            <>
+              <JourneyStagePlaceholder
+                eyebrow="Stage 4 · Actions"
+                targetId="stage-actions"
+                headingId="actions-stage-heading"
+                heading="Keep the action lane read-only until evidence permits review"
+                description="Decision Support is a governed boundary. A missing, abstained, stale, or unavailable verdict never becomes a recommendation or authorization."
+                status={actionsStageStatus}
+              />
+              <JourneyStagePlaceholder
+                eyebrow="Stage 5 · Draft & decide"
+                targetId="stage-draft"
+                headingId="draft-stage-heading"
+                heading="Prepare an unsent preview and retain manager authority"
+                description="Drafting remains a preview-only operation. Editing, disposition, authorization, sending, and execution stay separate and explicit."
+                status={draftStageStatus}
+              />
+            </>
+          )}
+          {!decisionBriefSnapshotReady && (
+            <JourneyStagePlaceholder
+              eyebrow="Stage 6 · Audit replay"
+              targetId="stage-audit"
+              headingId="audit-stage-heading"
+              heading="Replay exactly what was known and recorded"
+              description="Replay is read-only and cannot run until an immutable Decision Brief Snapshot exists."
+              status={auditStageStatus}
+            />
+          )}
 
           {riskState === "loading" && (
             <p className="supporting-copy" role="status">
@@ -3562,7 +3947,7 @@ function App() {
                 available when predictive artifacts are unavailable.
               </p>
               {predictiveStatus?.state === "unavailable" && (
-                <p className="lineage-warning" role="status">
+                <p className="lineage-warning" aria-live="polite">
                   {predictiveStatus.code}: {predictiveStatus.message}
                 </p>
               )}
@@ -3593,7 +3978,7 @@ function App() {
               )}
 
               {riskFailureState === "failed" && (
-                <p className="lineage-warning" role="status">
+                <p className="lineage-warning" aria-live="polite">
                   The rejected conformance path could not be recorded.
                 </p>
               )}

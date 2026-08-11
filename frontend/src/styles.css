@@ -1,8 +1,30 @@
 :root {
+  --app-background: var(--cds-background, #f4f4f4);
+  --app-layer: var(--cds-layer-01, #ffffff);
+  --app-layer-alt: var(--cds-layer-02, #f4f4f4);
+  --app-text: var(--cds-text-primary, #161616);
+  --app-text-secondary: var(--cds-text-secondary, #525252);
+  --app-border: var(--cds-border-subtle, #c6c6c6);
+  --app-border-strong: var(--cds-border-strong, #8d8d8d);
+  --app-interactive: var(--cds-interactive, #0f62fe);
+  --app-focus: var(--cds-focus, #0f62fe);
+  --app-success: var(--cds-support-success, #198038);
+  --app-warning: var(--cds-support-warning, #f1c21b);
+  --app-error: var(--cds-support-error, #da1e28);
+  --app-info: var(--cds-support-info, #0f62fe);
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --touch-target: 48px;
   font-family: "IBM Plex Sans", Arial, sans-serif;
-  color: #161616;
-  background: #f4f4f4;
+  color: var(--app-text);
+  background: var(--app-background);
   font-synthesis: none;
+  letter-spacing: 0.16px;
+  line-height: 1.5;
   text-rendering: optimizeLegibility;
 }
 
@@ -14,10 +36,56 @@ body {
   margin: 0;
   min-width: 320px;
   min-height: 100vh;
+  background: var(--app-background);
+  color: var(--app-text);
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  border-radius: 0;
+  min-block-size: var(--touch-target);
 }
 
 button {
-  font: inherit;
+  min-block-size: var(--touch-target);
+  padding: var(--space-3) var(--space-4);
+  color: var(--app-text);
+  background: var(--cds-button-tertiary, #ffffff);
+  border: 1px solid var(--app-border-strong);
+  cursor: pointer;
+  text-align: start;
+}
+
+button:hover:not(:disabled) {
+  background: var(--cds-button-tertiary-hover, #e0e0e0);
+}
+
+button:disabled {
+  color: var(--cds-text-disabled, #8d8d8d);
+  background: var(--cds-button-disabled, #e0e0e0);
+  border-color: var(--cds-button-disabled, #e0e0e0);
+  cursor: not-allowed;
+}
+
+:where(a, button, input, select, textarea, summary):focus-visible {
+  outline: 2px solid var(--app-focus);
+  outline-offset: 2px;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
 }
 
 .core-shell {
@@ -25,13 +93,147 @@ button {
   padding: 48px clamp(24px, 8vw, 128px);
 }
 
+.skip-link {
+  position: absolute;
+  z-index: 10;
+  inset-block-start: -100px;
+  inset-inline-start: 16px;
+  min-block-size: var(--touch-target);
+  padding: var(--space-3) var(--space-4);
+  color: #ffffff;
+  background: var(--app-text);
+  text-decoration: none;
+}
+
+.skip-link:focus {
+  inset-block-start: 16px;
+}
+
 .core-header,
+.journey-navigation,
 .health-panel,
 .risk-panel,
 .lineage-panel,
 .operation-panel {
-  width: min(100%, 960px);
+  width: min(100%, 1584px);
   margin: 0 auto;
+}
+
+.journey-navigation {
+  margin-block: 0 32px;
+  padding: 24px;
+  background: var(--app-layer);
+  border-block-start: 4px solid var(--app-interactive);
+}
+
+.journey-navigation-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  margin-block-end: 16px;
+}
+
+.journey-navigation-heading h2 {
+  margin: 0;
+}
+
+.journey-navigation-caption {
+  max-width: 480px;
+  margin: 0;
+  color: var(--app-text-secondary);
+  line-height: 1.5;
+}
+
+.journey-stage-list {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.journey-stage-list a {
+  display: grid;
+  min-block-size: 88px;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 4px 12px;
+  align-content: start;
+  padding: 12px;
+  color: var(--app-text-secondary);
+  background: var(--app-layer-alt);
+  border-block-start: 3px solid var(--app-border);
+  text-decoration: none;
+}
+
+.journey-stage-list a:hover {
+  color: var(--app-text);
+  background: var(--cds-layer-hover, #e0e0e0);
+  border-block-start-color: var(--app-interactive);
+}
+
+.journey-stage-number {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-block-size: 32px;
+  min-inline-size: 32px;
+  color: var(--app-text-secondary);
+  background: var(--app-border);
+  font-family: "IBM Plex Mono", Consolas, monospace;
+  font-size: 0.75rem;
+}
+
+.journey-stage-label {
+  align-self: center;
+  color: inherit;
+  font-weight: 600;
+  line-height: 1.25;
+}
+
+.journey-stage-status {
+  grid-column: 1 / -1;
+  color: var(--app-text-secondary);
+  font-size: 0.75rem;
+  line-height: 1.35;
+}
+
+.journey-stage-target,
+.journey-stage-overview {
+  scroll-margin-block-start: 16px;
+}
+
+.journey-stage-target:focus,
+.journey-stage-overview:focus {
+  outline: 2px solid var(--app-focus);
+  outline-offset: 4px;
+}
+
+.journey-stage-overview {
+  display: grid;
+  gap: 8px;
+  margin-block-start: 24px;
+  padding: 20px;
+  background: var(--app-layer-alt);
+  border-inline-start: 4px solid var(--app-interactive);
+}
+
+.journey-stage-overview h3,
+.draft-stage h4,
+.audit-stage h4 {
+  margin: 0;
+  font-size: 1.25rem;
+  font-weight: 500;
+  line-height: 1.35;
+}
+
+.stage-status-copy {
+  margin: 0;
+  color: var(--app-text);
+  font-family: "IBM Plex Mono", Consolas, monospace;
+  font-size: 0.875rem;
+  line-height: 1.5;
 }
 
 .core-header {
@@ -189,6 +391,7 @@ dd {
 code {
   display: block;
   margin-top: 4px;
+  overflow-wrap: anywhere;
   color: #525252;
   font-family: "IBM Plex Mono", Consolas, monospace;
   font-size: 0.75rem;
@@ -196,11 +399,18 @@ code {
 
 .degradation-note,
 .workspace-status,
-.audit-status {
+.audit-status,
+.lineage-warning {
   padding: 16px;
   border-left: 4px solid #f1c21b;
   background: #fff8e1;
+  overflow-wrap: anywhere;
   line-height: 1.5;
+}
+
+.status-message,
+.supporting-copy {
+  overflow-wrap: anywhere;
 }
 
 .workspace-status {
@@ -313,6 +523,21 @@ code {
   font-weight: 500;
 }
 
+.draft-stage,
+.audit-stage {
+  display: grid;
+  gap: 16px;
+  margin-block-start: 24px;
+  padding: 24px;
+  background: var(--app-layer);
+  border-block-start: 4px solid var(--app-interactive);
+}
+
+.draft-stage > .supporting-copy,
+.audit-stage > .supporting-copy {
+  margin: 0;
+}
+
 .action-evidence,
 .action-suppressions,
 .action-options,
@@ -390,6 +615,7 @@ code {
 .draft-disposition select {
   width: 100%;
   padding: 8px;
+  min-block-size: var(--touch-target);
   border: 1px solid #8d8d8d;
   background: #ffffff;
   font: inherit;
@@ -413,6 +639,13 @@ code {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+summary {
+  display: flex;
+  align-items: center;
+  min-block-size: var(--touch-target);
+  cursor: pointer;
 }
 
 .action-evidence ul,
@@ -909,14 +1142,33 @@ code {
   outline-offset: 2px;
 }
 
-@media (max-width: 600px) {
+@media (max-width: 671px) {
   .core-shell {
     padding: 32px 16px;
   }
 
+  .journey-navigation {
+    padding: 20px 16px;
+  }
+
+  .journey-navigation-heading {
+    display: grid;
+    gap: 12px;
+  }
+
+  .journey-stage-list {
+    grid-template-columns: 1fr;
+  }
+
+  .journey-stage-list a {
+    min-block-size: var(--touch-target);
+  }
+
   .health-panel,
   .risk-panel,
-  .lineage-panel {
+  .lineage-panel,
+  .draft-stage,
+  .audit-stage {
     padding: 24px 20px;
   }
 
@@ -936,5 +1188,54 @@ code {
     display: block;
     margin-top: 8px;
     text-align: left;
+  }
+}
+
+@media (min-width: 672px) and (max-width: 1055px) {
+  .journey-stage-list {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .journey-navigation-heading {
+    align-items: end;
+  }
+}
+
+@media (min-width: 1056px) {
+  .core-shell {
+    padding-inline: clamp(32px, 6vw, 96px);
+  }
+
+  .journey-navigation {
+    padding: 32px;
+  }
+}
+
+@media (min-width: 1312px) {
+  .core-shell {
+    padding-inline: clamp(48px, 8vw, 128px);
+  }
+
+  .journey-navigation {
+    padding-inline: 40px;
+  }
+}
+
+@media (min-width: 1584px) {
+  .core-shell {
+    padding-inline: max(64px, calc((100vw - 1584px) / 2));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
   }
 }
