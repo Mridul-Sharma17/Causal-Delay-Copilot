@@ -21,6 +21,13 @@ export type HealthResponse = {
   observed_at: string;
 };
 
+export type ReleaseIdentity = {
+  schema_version: "release-identity.v1";
+  profile: "HOSTED" | "LOCAL_DEVELOPMENT" | "LOCAL_FALLBACK";
+  release_candidate_id: string;
+  build_manifest_id: string;
+};
+
 export type AuditOccurrenceRequest = {
   idempotency_key: string;
   occurrence_kind: "BOOT_HEALTH_CHECK";
@@ -2060,6 +2067,28 @@ export function parseDemoWorkspaceResponse(value: unknown): DemoWorkspace {
     remaining_mutations: value.remaining_mutations,
     terminal_fresh_bundle_count: value.terminal_fresh_bundle_count,
     remaining_terminal_fresh_bundles: value.remaining_terminal_fresh_bundles,
+  };
+}
+
+export function parseReleaseIdentity(value: unknown): ReleaseIdentity {
+  if (
+    !isRecord(value) ||
+    value.schema_version !== "release-identity.v1" ||
+    (value.profile !== "HOSTED" &&
+      value.profile !== "LOCAL_DEVELOPMENT" &&
+      value.profile !== "LOCAL_FALLBACK") ||
+    typeof value.release_candidate_id !== "string" ||
+    value.release_candidate_id.length === 0 ||
+    typeof value.build_manifest_id !== "string" ||
+    value.build_manifest_id.length === 0
+  ) {
+    throw new Error("invalid release identity");
+  }
+  return {
+    schema_version: "release-identity.v1",
+    profile: value.profile,
+    release_candidate_id: value.release_candidate_id,
+    build_manifest_id: value.build_manifest_id,
   };
 }
 

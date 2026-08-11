@@ -1,0 +1,460 @@
+name: Release Candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Build and deploy, or record an explicit rollback"
+        required: true
+        type: choice
+        options:
+          - deploy
+          - rollback
+        default: deploy
+      source_commit:
+        description: "Immutable source commit for a deployment"
+        required: false
+        type: string
+      rollback_source_commit:
+        description: "Previously released source commit for a rollback"
+        required: false
+        type: string
+      current_release_candidate_id:
+        description: "Currently active release_candidate_id for a rollback"
+        required: false
+        type: string
+      current_build_manifest_id:
+        description: "Currently active build_manifest_id for a rollback"
+        required: false
+        type: string
+      rollback_release_candidate_id:
+        description: "Previously released release_candidate_id"
+        required: false
+        type: string
+      rollback_build_manifest_id:
+        description: "Previously released build_manifest_id"
+        required: false
+        type: string
+      rollback_image_ref:
+        description: "Previously released immutable Railway image reference"
+        required: false
+        type: string
+      rollback_image_digest:
+        description: "Previously released immutable Railway image digest"
+        required: false
+        type: string
+      rollback_target_deployment_id:
+        description: "Immutable Vercel deployment to roll back to"
+        required: false
+        type: string
+      rollback_reason:
+        description: "Required reason recorded in the immutable occurrence"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  RAILWAY_CLI_VERSION: 5.37.4
+  VERCEL_CLI_VERSION: 58.9.3
+
+jobs:
+  build:
+    if: inputs.action != 'rollback'
+    runs-on: ubuntu-24.04
+    environment: release-candidate
+    outputs:
+      source_commit: ${{ steps.identity.outputs.source_commit }}
+      release_candidate_id: ${{ steps.identity.outputs.release_candidate_id }}
+      build_manifest_id: ${{ steps.manifest.outputs.build_manifest_id }}
+      image_ref: ${{ steps.image.outputs.image_ref }}
+      image_digest: ${{ steps.image.outputs.image_digest }}
+    steps:
+      - name: Checkout the requested immutable source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_commit || github.sha }}
+          fetch-depth: 1
+
+      - name: Derive the release identity
+        id: identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          SOURCE_COMMIT="$(git rev-parse HEAD)"
+          RELEASE_CANDIDATE_ID="rc-${SOURCE_COMMIT:0:12}"
+          printf 'source_commit=%s\n' "$SOURCE_COMMIT" >> "$GITHUB_OUTPUT"
+          printf 'release_candidate_id=%s\n' "$RELEASE_CANDIDATE_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Authenticate the immutable image registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build the locked backend image and compiled SPA once
+        id: image
+        shell: bash
+        env:
+          SOURCE_COMMIT: ${{ steps.identity.outputs.source_commit }}
+          RELEASE_CANDIDATE_ID: ${{ steps.identity.outputs.release_candidate_id }}
+        run: |
+          set -euo pipefail
+          IMAGE_REPOSITORY="ghcr.io/${GITHUB_REPOSITORY,,}"
+          IMAGE_REF="${IMAGE_REPOSITORY}:${RELEASE_CANDIDATE_ID}"
+          docker build \
+            --pull \
+            --label "org.opencontainers.image.revision=${SOURCE_COMMIT}" \
+            --label "io.causal-delay-copilot.release-candidate-id=${RELEASE_CANDIDATE_ID}" \
+            --tag "$IMAGE_REF" \
+            .
+          docker push "$IMAGE_REF"
+          IMAGE_DIGEST="$(docker inspect --format '{{index .RepoDigests 0}}' "$IMAGE_REF" | sed 's/.*@//')"
+          test -n "$IMAGE_DIGEST"
+          mkdir -p .release/spa
+          CONTAINER_ID="$(docker create "$IMAGE_REF")"
+          trap 'docker rm "$CONTAINER_ID" >/dev/null' EXIT
+          docker cp "$CONTAINER_ID:/app/frontend/dist/." .release/spa/
+          printf 'image_digest=%s\n' "$IMAGE_DIGEST" >> "$GITHUB_OUTPUT"
+          printf 'image_ref=%s\n' "$IMAGE_REF" >> "$GITHUB_OUTPUT"
+
+      - name: Emit the content-addressed build manifest
+        id: manifest
+        shell: bash
+        env:
+          SOURCE_COMMIT: ${{ steps.identity.outputs.source_commit }}
+          RELEASE_CANDIDATE_ID: ${{ steps.identity.outputs.release_candidate_id }}
+          IMAGE_DIGEST: ${{ steps.image.outputs.image_digest }}
+          IMAGE_REF: ${{ steps.image.outputs.image_ref }}
+        run: |
+          set -euo pipefail
+          python scripts/release_candidate.py build-manifest \
+            --source-root . \
+            --source-commit "$SOURCE_COMMIT" \
+            --release-candidate-id "$RELEASE_CANDIDATE_ID" \
+            --image-digest "$IMAGE_DIGEST" \
+            --image-ref "$IMAGE_REF" \
+            --spa-root .release/spa \
+            --output .release/build-manifest.json
+          BUILD_MANIFEST_ID="$(python -c 'import json; print(json.load(open(".release/build-manifest.json", encoding="utf-8"))["build_manifest_id"])')"
+          printf 'build_manifest_id=%s\n' "$BUILD_MANIFEST_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Render the release-bound Vercel static artifact and guard
+        shell: bash
+        env:
+          RELEASE_CANDIDATE_ID: ${{ steps.identity.outputs.release_candidate_id }}
+          BUILD_MANIFEST_ID: ${{ steps.manifest.outputs.build_manifest_id }}
+          RAILWAY_PUBLIC_ORIGIN: ${{ vars.RAILWAY_PUBLIC_ORIGIN }}
+        run: |
+          set -euo pipefail
+          python scripts/release_candidate.py render-release-assets \
+            --source-root . \
+            --spa-root .release/spa \
+            --output .release/vercel \
+            --railway-origin "$RAILWAY_PUBLIC_ORIGIN" \
+            --release-candidate-id "$RELEASE_CANDIDATE_ID" \
+            --build-manifest-id "$BUILD_MANIFEST_ID"
+
+      - name: Upload the one immutable release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ steps.identity.outputs.release_candidate_id }}
+          path: .release
+          if-no-files-found: error
+          retention-days: 90
+
+  deploy_railway:
+    if: inputs.action != 'rollback'
+    needs: build
+    runs-on: ubuntu-24.04
+    environment: release-candidate
+    steps:
+      - name: Checkout the exact release source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.build.outputs.source_commit }}
+          fetch-depth: 1
+
+      - name: Download the immutable release artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: release-${{ needs.build.outputs.release_candidate_id }}
+          path: .release
+
+      - name: Bind Railway to this release without exposing secrets
+        shell: bash
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}
+          RAILWAY_SERVICE_ID: ${{ secrets.RAILWAY_SERVICE_ID }}
+          RAILWAY_ENVIRONMENT_ID: ${{ secrets.RAILWAY_ENVIRONMENT_ID }}
+          RELEASE_CANDIDATE_ID: ${{ needs.build.outputs.release_candidate_id }}
+          BUILD_MANIFEST_ID: ${{ needs.build.outputs.build_manifest_id }}
+          IMAGE_REF: ${{ needs.build.outputs.image_ref }}
+          IMAGE_DIGEST: ${{ needs.build.outputs.image_digest }}
+          CORE_PUBLIC_ORIGIN: ${{ vars.VERCEL_PUBLIC_ORIGIN }}
+        run: |
+          set -euo pipefail
+          RAILWAY=(npx --yes "@railway/cli@${RAILWAY_CLI_VERSION}")
+          "${RAILWAY[@]}" variable set "CORE_PROFILE=HOSTED" --project "$RAILWAY_PROJECT_ID" --service "$RAILWAY_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID" --skip-deploys
+          "${RAILWAY[@]}" variable set "CORE_STATE_ROOT=/data/core" --project "$RAILWAY_PROJECT_ID" --service "$RAILWAY_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID" --skip-deploys
+          "${RAILWAY[@]}" variable set "CORE_RAILWAY_VOLUME_PATH=/data" --project "$RAILWAY_PROJECT_ID" --service "$RAILWAY_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID" --skip-deploys
+          "${RAILWAY[@]}" variable set "CORE_PUBLIC_ORIGIN=$CORE_PUBLIC_ORIGIN" --project "$RAILWAY_PROJECT_ID" --service "$RAILWAY_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID" --skip-deploys
+          "${RAILWAY[@]}" variable set "CORE_RELEASE_CANDIDATE_ID=$RELEASE_CANDIDATE_ID" --project "$RAILWAY_PROJECT_ID" --service "$RAILWAY_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID" --skip-deploys
+          "${RAILWAY[@]}" variable set "CORE_BUILD_MANIFEST_ID=$BUILD_MANIFEST_ID" --project "$RAILWAY_PROJECT_ID" --service "$RAILWAY_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID" --skip-deploys
+          IMAGE="$IMAGE_REF@$IMAGE_DIGEST"
+          "${RAILWAY[@]}" service source connect --image "$IMAGE" --project "$RAILWAY_PROJECT_ID" --service "$RAILWAY_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID" --json > .release/railway-source.json
+
+      - name: Deploy the exact immutable Railway image first
+        shell: bash
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}
+          RAILWAY_SERVICE_ID: ${{ secrets.RAILWAY_SERVICE_ID }}
+          RAILWAY_ENVIRONMENT_ID: ${{ secrets.RAILWAY_ENVIRONMENT_ID }}
+        run: |
+          set -euo pipefail
+          RAILWAY=(npx --yes "@railway/cli@${RAILWAY_CLI_VERSION}")
+          "${RAILWAY[@]}" service redeploy --from-source --project "$RAILWAY_PROJECT_ID" --service "$RAILWAY_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID" --yes --json > .release/railway-deployment.json
+          "${RAILWAY[@]}" deployment list --project "$RAILWAY_PROJECT_ID" --service "$RAILWAY_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID" --json > .release/railway-status.json
+
+      - name: Run migration and release preflight before Vercel
+        shell: bash
+        env:
+          RAILWAY_PUBLIC_ORIGIN: ${{ vars.RAILWAY_PUBLIC_ORIGIN }}
+        run: |
+          set -euo pipefail
+          python scripts/release_candidate.py verify-railway \
+            --manifest .release/build-manifest.json \
+            --railway-origin "$RAILWAY_PUBLIC_ORIGIN" \
+            --retries 60 \
+            --delay-seconds 5
+
+  deploy_vercel:
+    if: inputs.action != 'rollback'
+    needs: [build, deploy_railway]
+    runs-on: ubuntu-24.04
+    environment: release-candidate
+    outputs:
+      deployment_url: ${{ steps.deploy.outputs.deployment_url }}
+    steps:
+      - name: Checkout the exact release source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.build.outputs.source_commit }}
+          fetch-depth: 1
+
+      - name: Download the immutable release artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: release-${{ needs.build.outputs.release_candidate_id }}
+          path: .release
+
+      - name: Deploy the prebuilt Vercel artifact without production activation
+        id: deploy
+        shell: bash
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+        run: |
+          set -euo pipefail
+          DEPLOYMENT_JSON="$(npx --yes "vercel@${VERCEL_CLI_VERSION}" deploy .release/vercel --token "$VERCEL_TOKEN" --scope "$VERCEL_ORG_ID" --project "$VERCEL_PROJECT_ID" --skip-domain --yes --json)"
+          printf '%s\n' "$DEPLOYMENT_JSON" > .release/vercel-deployment.json
+          DEPLOYMENT_URL="$(printf '%s' "$DEPLOYMENT_JSON" | python -c 'import json, sys; print(json.load(sys.stdin)["url"])')"
+          [[ "$DEPLOYMENT_URL" == https://* ]] || DEPLOYMENT_URL="https://$DEPLOYMENT_URL"
+          printf 'deployment_url=%s\n' "$DEPLOYMENT_URL" >> "$GITHUB_OUTPUT"
+
+      - name: Fail closed unless Railway and Vercel expose the same release
+        shell: bash
+        env:
+          RAILWAY_PUBLIC_ORIGIN: ${{ vars.RAILWAY_PUBLIC_ORIGIN }}
+        run: |
+          set -euo pipefail
+          python scripts/release_candidate.py verify-match \
+            --manifest .release/build-manifest.json \
+            --railway-origin "$RAILWAY_PUBLIC_ORIGIN" \
+            --vercel-origin "${{ steps.deploy.outputs.deployment_url }}" \
+            --retries 30 \
+            --delay-seconds 3
+
+  activate:
+    if: inputs.action != 'rollback'
+    needs: [build, deploy_railway, deploy_vercel]
+    runs-on: ubuntu-24.04
+    environment: production
+    steps:
+      - name: Checkout the exact release source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.build.outputs.source_commit }}
+          fetch-depth: 1
+
+      - name: Download the immutable release artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: release-${{ needs.build.outputs.release_candidate_id }}
+          path: .release
+
+      - name: Activate only the already-verified Vercel deployment
+        shell: bash
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+        run: |
+          set -euo pipefail
+          npx --yes "vercel@${VERCEL_CLI_VERSION}" promote \
+            "${{ needs.deploy_vercel.outputs.deployment_url }}" \
+            --token "$VERCEL_TOKEN" \
+            --scope "$VERCEL_ORG_ID" \
+            --yes
+
+      - name: Re-read the activated public origin and verify the release binding
+        shell: bash
+        env:
+          RAILWAY_PUBLIC_ORIGIN: ${{ vars.RAILWAY_PUBLIC_ORIGIN }}
+          VERCEL_PUBLIC_ORIGIN: ${{ vars.VERCEL_PUBLIC_ORIGIN }}
+        run: |
+          set -euo pipefail
+          python scripts/release_candidate.py verify-match \
+            --manifest .release/build-manifest.json \
+            --railway-origin "$RAILWAY_PUBLIC_ORIGIN" \
+            --vercel-origin "$VERCEL_PUBLIC_ORIGIN" \
+            --retries 30 \
+            --delay-seconds 3
+
+  rollback:
+    if: inputs.action == 'rollback'
+    runs-on: ubuntu-24.04
+    environment: production
+    steps:
+      - name: Checkout the release tooling from main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 1
+
+      - name: Record the rollback occurrence before any platform mutation
+        shell: bash
+        env:
+          CURRENT_RELEASE_CANDIDATE_ID: ${{ inputs.current_release_candidate_id }}
+          CURRENT_BUILD_MANIFEST_ID: ${{ inputs.current_build_manifest_id }}
+          ROLLBACK_RELEASE_CANDIDATE_ID: ${{ inputs.rollback_release_candidate_id }}
+          ROLLBACK_BUILD_MANIFEST_ID: ${{ inputs.rollback_build_manifest_id }}
+          ROLLBACK_TARGET_DEPLOYMENT_ID: ${{ inputs.rollback_target_deployment_id }}
+          ROLLBACK_IMAGE_REF: ${{ inputs.rollback_image_ref }}
+          ROLLBACK_IMAGE_DIGEST: ${{ inputs.rollback_image_digest }}
+          ROLLBACK_SOURCE_COMMIT: ${{ inputs.rollback_source_commit }}
+          ROLLBACK_REASON: ${{ inputs.rollback_reason }}
+        run: |
+          set -euo pipefail
+          mkdir -p .release
+          python scripts/release_candidate.py record-rollback \
+            --output .release/rollback-occurrence.json \
+            --from-release-candidate-id "$CURRENT_RELEASE_CANDIDATE_ID" \
+            --from-build-manifest-id "$CURRENT_BUILD_MANIFEST_ID" \
+            --to-release-candidate-id "$ROLLBACK_RELEASE_CANDIDATE_ID" \
+            --to-build-manifest-id "$ROLLBACK_BUILD_MANIFEST_ID" \
+            --target-deployment-id "$ROLLBACK_TARGET_DEPLOYMENT_ID" \
+            --target-image-ref "$ROLLBACK_IMAGE_REF" \
+            --target-image-digest "$ROLLBACK_IMAGE_DIGEST" \
+            --source-commit "$ROLLBACK_SOURCE_COMMIT" \
+            --reason "$ROLLBACK_REASON"
+
+      - name: Deploy the exact immutable rollback image to Railway first
+        shell: bash
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}
+          RAILWAY_SERVICE_ID: ${{ secrets.RAILWAY_SERVICE_ID }}
+          RAILWAY_ENVIRONMENT_ID: ${{ secrets.RAILWAY_ENVIRONMENT_ID }}
+          CORE_PUBLIC_ORIGIN: ${{ vars.VERCEL_PUBLIC_ORIGIN }}
+          ROLLBACK_SOURCE_COMMIT: ${{ inputs.rollback_source_commit }}
+          ROLLBACK_IMAGE_REF: ${{ inputs.rollback_image_ref }}
+          ROLLBACK_IMAGE_DIGEST: ${{ inputs.rollback_image_digest }}
+          ROLLBACK_RELEASE_CANDIDATE_ID: ${{ inputs.rollback_release_candidate_id }}
+          ROLLBACK_BUILD_MANIFEST_ID: ${{ inputs.rollback_build_manifest_id }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "$ROLLBACK_SOURCE_COMMIT"
+          test "$(git rev-parse FETCH_HEAD)" = "$ROLLBACK_SOURCE_COMMIT"
+          RAILWAY=(npx --yes "@railway/cli@${RAILWAY_CLI_VERSION}")
+          "${RAILWAY[@]}" variable set "CORE_PROFILE=HOSTED" --project "$RAILWAY_PROJECT_ID" --service "$RAILWAY_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID" --skip-deploys
+          "${RAILWAY[@]}" variable set "CORE_STATE_ROOT=/data/core" --project "$RAILWAY_PROJECT_ID" --service "$RAILWAY_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID" --skip-deploys
+          "${RAILWAY[@]}" variable set "CORE_RAILWAY_VOLUME_PATH=/data" --project "$RAILWAY_PROJECT_ID" --service "$RAILWAY_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID" --skip-deploys
+          "${RAILWAY[@]}" variable set "CORE_PUBLIC_ORIGIN=$CORE_PUBLIC_ORIGIN" --project "$RAILWAY_PROJECT_ID" --service "$RAILWAY_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID" --skip-deploys
+          "${RAILWAY[@]}" variable set "CORE_RELEASE_CANDIDATE_ID=$ROLLBACK_RELEASE_CANDIDATE_ID" --project "$RAILWAY_PROJECT_ID" --service "$RAILWAY_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID" --skip-deploys
+          "${RAILWAY[@]}" variable set "CORE_BUILD_MANIFEST_ID=$ROLLBACK_BUILD_MANIFEST_ID" --project "$RAILWAY_PROJECT_ID" --service "$RAILWAY_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID" --skip-deploys
+          IMAGE="$ROLLBACK_IMAGE_REF@$ROLLBACK_IMAGE_DIGEST"
+          "${RAILWAY[@]}" service source connect --image "$IMAGE" --project "$RAILWAY_PROJECT_ID" --service "$RAILWAY_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID" --json > .release/rollback-railway-source.json
+          "${RAILWAY[@]}" service redeploy --from-source --project "$RAILWAY_PROJECT_ID" --service "$RAILWAY_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID" --yes --json > .release/rollback-railway-deployment.json
+          "${RAILWAY[@]}" deployment list --project "$RAILWAY_PROJECT_ID" --service "$RAILWAY_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID" --json > .release/rollback-railway-status.json
+
+      - name: Run rollback Railway preflight before Vercel
+        shell: bash
+        env:
+          RAILWAY_PUBLIC_ORIGIN: ${{ vars.RAILWAY_PUBLIC_ORIGIN }}
+          ROLLBACK_RELEASE_CANDIDATE_ID: ${{ inputs.rollback_release_candidate_id }}
+          ROLLBACK_BUILD_MANIFEST_ID: ${{ inputs.rollback_build_manifest_id }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          Path(".release/rollback-target-manifest.json").write_text(
+              json.dumps(
+                  {
+                      "release_candidate_id": os.environ["ROLLBACK_RELEASE_CANDIDATE_ID"],
+                      "build_manifest_id": os.environ["ROLLBACK_BUILD_MANIFEST_ID"],
+                  }
+              ),
+              encoding="utf-8",
+          )
+          PY
+          python scripts/release_candidate.py verify-railway \
+            --manifest .release/rollback-target-manifest.json \
+            --railway-origin "$RAILWAY_PUBLIC_ORIGIN" \
+            --retries 60 \
+            --delay-seconds 5
+
+      - name: Roll back Vercel only after the new Railway occurrence exists
+        shell: bash
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          ROLLBACK_TARGET_DEPLOYMENT_ID: ${{ inputs.rollback_target_deployment_id }}
+        run: |
+          set -euo pipefail
+          npx --yes "vercel@${VERCEL_CLI_VERSION}" rollback \
+            "$ROLLBACK_TARGET_DEPLOYMENT_ID" \
+            --token "$VERCEL_TOKEN" \
+            --scope "$VERCEL_ORG_ID" \
+            --yes
+
+      - name: Verify the activated rollback release binding
+        shell: bash
+        env:
+          RAILWAY_PUBLIC_ORIGIN: ${{ vars.RAILWAY_PUBLIC_ORIGIN }}
+          VERCEL_PUBLIC_ORIGIN: ${{ vars.VERCEL_PUBLIC_ORIGIN }}
+        run: |
+          set -euo pipefail
+          python scripts/release_candidate.py verify-match \
+            --manifest .release/rollback-target-manifest.json \
+            --railway-origin "$RAILWAY_PUBLIC_ORIGIN" \
+            --vercel-origin "$VERCEL_PUBLIC_ORIGIN" \
+            --retries 30 \
+            --delay-seconds 3
+
+      - name: Preserve the immutable rollback occurrence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rollback-${{ github.run_id }}
+          path: .release/rollback-occurrence.json
+          if-no-files-found: error
+          retention-days: 365

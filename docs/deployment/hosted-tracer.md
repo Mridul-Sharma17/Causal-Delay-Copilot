@@ -69,3 +69,8 @@ npm.cmd run test:e2e
 The smoke must show the typed health state, an active isolated Demo Workspace,
 and one recorded immutable audit occurrence. No capability, source row,
 prompt, provider response, note, stack trace, or filesystem path is rendered.
+
+For the production Release Candidate workflow, see
+[`release-candidate.md`](release-candidate.md). Production activation is a
+protected GitHub Actions approval after Railway preflight and exact Vercel /
+Railway release-identity matching.

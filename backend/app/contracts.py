@@ -35,6 +35,15 @@ class HealthResponse(BaseModel):
     observed_at: datetime
 
 
+class ReleaseIdentityResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["release-identity.v1"]
+    profile: Literal["HOSTED", "LOCAL_DEVELOPMENT", "LOCAL_FALLBACK"]
+    release_candidate_id: str
+    build_manifest_id: str
+
+
 class AuditOccurrenceRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

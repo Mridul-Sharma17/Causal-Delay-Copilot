@@ -53,3 +53,27 @@ def test_public_frontend_uses_only_relative_api_requests() -> None:
     assert '"/api/audit/occurrences"' in source
     assert "railway" not in source.lower()
     assert "serviceWorker" not in source
+
+
+def test_release_workflow_builds_once_and_keeps_activation_manual_and_ordered() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "release-candidate.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "workflow_dispatch:" in workflow
+    assert "build_manifest_id" in workflow
+    assert "docker push" in workflow
+    assert "actions/upload-artifact" in workflow
+    assert "service source connect --image" in workflow
+    assert "service redeploy --from-source" in workflow
+    assert "deployment list" in workflow
+    assert "rollback_image_digest" in workflow
+    assert "current_release_candidate_id" in workflow
+    assert "release_candidate.py verify-railway" in workflow
+    assert "release_candidate.py verify-match" in workflow
+    assert "vercel@" in workflow
+    assert "deploy .release/vercel" in workflow
+    assert " promote " in workflow
+    assert "release_candidate.py record-rollback" in workflow
+    assert "environment: production" in workflow
+    assert workflow.index("deploy_railway:") < workflow.index("deploy_vercel:")
+    assert workflow.index("deploy_vercel:") < workflow.index("activate:")

@@ -1,6 +1,6 @@
 import { afterEach, expect, test, vi } from "vitest";
 
-import { pollOperation } from "./api";
+import { getReleaseIdentity, pollOperation } from "./api";
 import { parseOperationResponse } from "./contracts";
 
 function operation(state: string) {
@@ -33,6 +33,29 @@ function operation(state: string) {
 afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
+});
+
+test("getReleaseIdentity accepts the public release binding", async () => {
+  const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+    new Response(
+      JSON.stringify({
+        schema_version: "release-identity.v1",
+        profile: "HOSTED",
+        release_candidate_id: "rc-test",
+        build_manifest_id: "build-test",
+      }),
+      { status: 200 },
+    ),
+  );
+
+  await expect(getReleaseIdentity()).resolves.toMatchObject({
+    release_candidate_id: "rc-test",
+    build_manifest_id: "build-test",
+  });
+  expect(fetchMock).toHaveBeenCalledWith(
+    "/api/release",
+    { headers: { accept: "application/json" } },
+  );
 });
 
 test("pollOperation uses bounded backoff and stops at a terminal state", async () => {

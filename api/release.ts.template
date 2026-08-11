@@ -1,0 +1,51 @@
+const expected = {
+  schema_version: "release-identity.v1",
+  profile: "HOSTED",
+  release_candidate_id: "__RELEASE_CANDIDATE_ID__",
+  build_manifest_id: "__BUILD_MANIFEST_ID__",
+} as const;
+
+const railwayOrigin = "__RAILWAY_PUBLIC_ORIGIN__";
+
+type VercelResponse = {
+  status: (statusCode: number) => VercelResponse;
+  json: (payload: unknown) => void;
+};
+
+function unavailable(response: VercelResponse): void {
+  response.status(503).json({
+    schema_version: "release-identity.v1",
+    state: "unavailable",
+    code: "RELEASE_IDENTITY_MISMATCH",
+  });
+}
+export default async function handler(
+  _request: unknown,
+  response: VercelResponse,
+): Promise<void> {
+  try {
+    const upstream = await fetch(`${railwayOrigin}/api/release`, {
+      headers: { accept: "application/json" },
+    });
+    if (!upstream.ok) {
+      unavailable(response);
+      return;
+    }
+    const payload: unknown = await upstream.json();
+    if (
+      typeof payload !== "object" ||
+      payload === null ||
+      (payload as Record<string, unknown>).schema_version !== expected.schema_version ||
+      (payload as Record<string, unknown>).profile !== expected.profile ||
+      (payload as Record<string, unknown>).release_candidate_id !==
+        expected.release_candidate_id ||
+      (payload as Record<string, unknown>).build_manifest_id !== expected.build_manifest_id
+    ) {
+      unavailable(response);
+      return;
+    }
+    response.status(200).json(expected);
+  } catch {
+    unavailable(response);
+  }
+}

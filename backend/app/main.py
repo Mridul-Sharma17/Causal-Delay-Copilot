@@ -65,6 +65,7 @@ from .contracts import (
     ReactiveInvestigationResponse,
     ReactiveFixtureRequest,
     ReplayResponse,
+    ReleaseIdentityResponse,
     RiskSignalListResponse,
     RiskSignalRequest,
     TradeoffSelectionAcceptanceRequest,
@@ -1066,6 +1067,16 @@ def create_app(
     @app.get("/api/health/live", response_model=HealthProbe)
     async def get_liveness() -> HealthProbe:
         return liveness_probe()
+
+    @app.get("/api/release", response_model=ReleaseIdentityResponse)
+    async def get_release_identity() -> JSONResponse:
+        response = ReleaseIdentityResponse(
+            schema_version="release-identity.v1",
+            profile=resolved_settings.profile.value,
+            release_candidate_id=resolved_settings.release_candidate_id,
+            build_manifest_id=resolved_settings.build_manifest_id,
+        )
+        return JSONResponse(status_code=200, content=response.model_dump(mode="json"))
 
     @app.get("/api/health/ready", response_model=HealthProbe)
     async def get_readiness() -> JSONResponse | HealthProbe:

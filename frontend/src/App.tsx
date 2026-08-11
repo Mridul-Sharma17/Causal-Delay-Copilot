@@ -11,6 +11,7 @@ import {
   getHealth,
   getProactiveProposals,
   getRiskSignals,
+  getReleaseIdentity,
   getValidatedReference,
   getWorkspace,
   acceptTradeoffSelection,
@@ -2917,6 +2918,7 @@ function App() {
   const loadHealth = useCallback(async () => {
     setJourneyState("loading");
     try {
+      await getReleaseIdentity();
       const nextHealth = await getHealth();
       setHealth(nextHealth);
       setJourneyState("healthy");

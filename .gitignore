@@ -27,6 +27,9 @@ playwright-report/
 test-results/
 vercel.json
 .vercel/
+.release/
+.release-check-*/
+.tmp-pytest-*/
 
 # Local application state
 state/

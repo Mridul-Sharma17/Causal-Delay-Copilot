@@ -7,6 +7,7 @@ import {
   parseAuditOccurrenceResponse,
   parseDecisionBriefResponse,
   parseHealthResponse,
+  parseReleaseIdentity,
   parseOperationMutationResponse,
   parseOperationResponse,
   parseProactiveInvestigationResponse,
@@ -27,6 +28,7 @@ import {
   type DraftMutationResponse,
   type ManagerDecisionResponse,
   type HealthResponse,
+  type ReleaseIdentity,
   type OperationMutationResponse,
   type LineageSnapshot,
   type ProactiveInvestigationResponse,
@@ -106,6 +108,14 @@ export function getValidatedReference(): Promise<ValidatedReferenceDelivery> {
       credentials: "same-origin",
     },
     parseValidatedReferenceDelivery,
+  );
+}
+
+export function getReleaseIdentity(): Promise<ReleaseIdentity> {
+  return requestJson(
+    "/api/release",
+    { headers: { accept: "application/json" } },
+    parseReleaseIdentity,
   );
 }
 

@@ -24,6 +24,13 @@ const healthResponse = {
   observed_at: "2026-08-05T00:00:00Z",
 };
 
+const releaseIdentityResponse = {
+  schema_version: "release-identity.v1",
+  profile: "LOCAL_FALLBACK",
+  release_candidate_id: "local-local_fallback",
+  build_manifest_id: "local-local_fallback",
+};
+
 const workspaceResponse = {
   workspace_id: "demo-workspace-1",
   status: "ACTIVE",
@@ -1310,6 +1317,12 @@ describe("Core health journey", () => {
   test("shows typed liveness/readiness and records one audited boot occurrence", async () => {
     const fetchMock = vi.fn<typeof fetch>();
     fetchMock.mockImplementation(async (input, init) => {
+      if (input === "/api/release") {
+        return new Response(JSON.stringify(releaseIdentityResponse), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
       if (input === "/api/health") {
         return new Response(JSON.stringify(healthResponse), {
           status: 200,
@@ -1651,28 +1664,71 @@ describe("Core health journey", () => {
       await screen.findByText("Source observation register (3)"),
     ).toBeInTheDocument();
     expect(screen.getAllByText("SOURCE_DUPLICATE_DEDUPED").length).toBeGreaterThan(0);
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(13));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(14));
+  });
+
+  test("fails closed when the release identity is unavailable", async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockImplementation(async (input) => {
+      if (input === "/api/release") {
+        return new Response(
+          JSON.stringify({
+            schema_version: "release-identity.v1",
+            state: "unavailable",
+            code: "RELEASE_IDENTITY_MISMATCH",
+          }),
+          { status: 503, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response(JSON.stringify(healthResponse), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<App />);
+
+    expect(await screen.findByText("Core health is unavailable")).toBeInTheDocument();
+    expect(screen.queryByText("RELEASE_IDENTITY_MISMATCH")).not.toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/release",
+      { headers: { accept: "application/json" } },
+    );
+    expect(fetchMock).not.toHaveBeenCalledWith(
+      "/api/health",
+      expect.anything(),
+    );
   });
 
   test("does not expose an internal error when health is unavailable", async () => {
-    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
-      new Response(JSON.stringify({ code: "CORE_STORE_UNAVAILABLE" }), {
+    const fetchMock = vi.fn<typeof fetch>().mockImplementation(async (input) => {
+      if (input === "/api/release") {
+        return new Response(JSON.stringify(releaseIdentityResponse), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({ code: "CORE_STORE_UNAVAILABLE" }), {
         status: 503,
         headers: { "content-type": "application/json" },
-      }),
-    );
+      });
+    });
     vi.stubGlobal("fetch", fetchMock);
 
     render(<App />);
 
     expect(await screen.findByText("Core health is unavailable")).toBeInTheDocument();
     expect(screen.queryByText("CORE_STORE_UNAVAILABLE")).not.toBeInTheDocument();
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   test("fails closed and does not load ordinary evidence when the reference is unavailable", async () => {
     const fetchMock = vi.fn<typeof fetch>();
     fetchMock.mockImplementation(async (input) => {
+      if (input === "/api/release") {
+        return new Response(JSON.stringify(releaseIdentityResponse), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
       if (input === "/api/health") {
         return new Response(JSON.stringify(healthResponse), {
           status: 200,
@@ -1751,6 +1807,12 @@ describe("Core health journey", () => {
   test("keeps health available when the audit write is unavailable", async () => {
     const fetchMock = vi.fn<typeof fetch>();
     fetchMock.mockImplementation(async (input) => {
+      if (input === "/api/release") {
+        return new Response(JSON.stringify(releaseIdentityResponse), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
       if (input === "/api/health") {
         return new Response(JSON.stringify(healthResponse), {
           status: 200,
@@ -1779,6 +1841,12 @@ describe("Core health journey", () => {
   test("does not write an audit occurrence when workspace creation is unavailable", async () => {
     const fetchMock = vi.fn<typeof fetch>();
     fetchMock.mockImplementation(async (input) => {
+      if (input === "/api/release") {
+        return new Response(JSON.stringify(releaseIdentityResponse), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
       if (input === "/api/health") {
         return new Response(JSON.stringify(healthResponse), {
           status: 200,
@@ -1793,7 +1861,7 @@ describe("Core health journey", () => {
 
     expect(await screen.findByText("Demo Workspace unavailable")).toBeInTheDocument();
     expect(screen.getByText("Audit occurrence unavailable")).toBeInTheDocument();
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(fetchMock).not.toHaveBeenCalledWith(
       "/api/audit/occurrences",
       expect.anything(),
@@ -1829,6 +1897,12 @@ describe("Core health journey", () => {
     };
     const fetchMock = vi.fn<typeof fetch>();
     fetchMock.mockImplementation(async (input) => {
+      if (input === "/api/release") {
+        return new Response(JSON.stringify(releaseIdentityResponse), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
       if (input === "/api/health") {
         return new Response(JSON.stringify(healthResponse), {
           status: 200,

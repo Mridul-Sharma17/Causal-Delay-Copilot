@@ -1,0 +1,104 @@
+const expected = {
+  schema_version: "release-identity.v1",
+  profile: "HOSTED",
+  release_candidate_id: "__RELEASE_CANDIDATE_ID__",
+  build_manifest_id: "__BUILD_MANIFEST_ID__",
+} as const;
+
+const railwayOrigin = "__RAILWAY_PUBLIC_ORIGIN__";
+
+type VercelRequest = {
+  method?: string;
+  url?: string;
+  headers?: Record<string, string | string[] | undefined>;
+  body?: unknown;
+};
+
+type VercelResponse = {
+  status: (statusCode: number) => VercelResponse;
+  setHeader: (name: string, value: string) => void;
+  send: (payload: string) => void;
+  json: (payload: unknown) => void;
+};
+
+function unavailable(response: VercelResponse): void {
+  response.status(503).json({
+    schema_version: "release-identity.v1",
+    state: "unavailable",
+    code: "RELEASE_IDENTITY_MISMATCH",
+  });
+}
+
+async function releaseMatches(): Promise<boolean> {
+  const upstream = await fetch(`${railwayOrigin}/api/release`, {
+    headers: { accept: "application/json" },
+  });
+  if (!upstream.ok) {
+    return false;
+  }
+  const payload: unknown = await upstream.json();
+  if (typeof payload !== "object" || payload === null) {
+    return false;
+  }
+  const record = payload as Record<string, unknown>;
+  return (
+    record.schema_version === expected.schema_version &&
+    record.profile === expected.profile &&
+    record.release_candidate_id === expected.release_candidate_id &&
+    record.build_manifest_id === expected.build_manifest_id
+  );
+}
+
+function requestHeaders(request: VercelRequest): Headers {
+  const headers = new Headers();
+  for (const [name, value] of Object.entries(request.headers ?? {})) {
+    const lowerName = name.toLowerCase();
+    if (
+      value === undefined ||
+      lowerName === "host" ||
+      lowerName === "content-length" ||
+      lowerName === "connection"
+    ) {
+      continue;
+    }
+    headers.set(name, Array.isArray(value) ? value.join(",") : value);
+  }
+  return headers;
+}
+
+function requestBody(request: VercelRequest, method: string): string | undefined {
+  if (method === "GET" || method === "HEAD" || request.body === undefined) {
+    return undefined;
+  }
+  return typeof request.body === "string"
+    ? request.body
+    : JSON.stringify(request.body);
+}
+
+export default async function handler(
+  request: VercelRequest,
+  response: VercelResponse,
+): Promise<void> {
+  try {
+    if (!(await releaseMatches())) {
+      unavailable(response);
+      return;
+    }
+
+    const incoming = new URL(request.url ?? "/api", "https://vercel.invalid");
+    const target = `${railwayOrigin}${incoming.pathname}${incoming.search}`;
+    const method = (request.method ?? "GET").toUpperCase();
+    const upstream = await fetch(target, {
+      method,
+      headers: requestHeaders(request),
+      body: requestBody(request, method),
+    });
+    const contentType = upstream.headers.get("content-type");
+    if (contentType !== null) {
+      response.setHeader("content-type", contentType);
+    }
+    response.status(upstream.status).send(await upstream.text());
+  } catch {
+    unavailable(response);
+  }
+}
