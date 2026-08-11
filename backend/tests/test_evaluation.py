@@ -11,14 +11,17 @@ import pytest
 from backend.app.evaluation import (
     CLAIM_STATES,
     CORE_SCENARIO_IDS,
+    EvaluationIntegrityError,
     POLICY_IDS,
     build_frozen_evaluation_manifest,
     evaluate_evaluation_replicate,
     evaluate_policy_replicate,
     generate_evaluation_replicate,
+    render_evidence_pack_summary,
     run_scientific_evaluation,
     verify_evidence_pack,
     verify_evaluation_manifest,
+    write_evidence_pack,
 )
 from backend.app.canonical import sha256
 
@@ -446,6 +449,22 @@ def test_evidence_pack_is_manifest_last_and_tamper_detectable(tmp_path) -> None:
     assert verify_evidence_pack(pack_root)["reason_code"] == "EVIDENCE_PACK_MEMBER_HASH_MISMATCH"
 
 
+def test_evidence_pack_publication_replays_the_checked_in_typed_result(tmp_path) -> None:
+    fixture_root = Path(__file__).parents[2] / "tests" / "fixtures" / "scientific_evaluation" / "v1"
+    manifest = json.loads((fixture_root / "evaluation-manifest.json").read_text(encoding="utf-8"))
+    result = json.loads((fixture_root / "evaluation-result.json").read_text(encoding="utf-8"))
+
+    publication = write_evidence_pack(
+        tmp_path / "published-pack",
+        manifest=manifest,
+        result=result,
+    )
+
+    assert publication["state"] == "ACCEPTED"
+    assert publication["member_count"] == 7
+    assert verify_evidence_pack(tmp_path / "published-pack")["state"] == "ACCEPTED"
+
+
 def test_checked_in_scientific_evidence_pack_is_verified() -> None:
     pack_root = Path(__file__).parents[2] / "tests" / "fixtures" / "scientific_evaluation" / "v1"
 
@@ -477,3 +496,83 @@ def test_execution_error_preserves_the_seed_as_invalid_evidence(monkeypatch) -> 
     assert rows[0]["failure_identity"]["code"] == "EVALUATION_EXECUTION_ERROR"
     assert rows[1]["failure_identity"] is None
     assert result["integrity"]["state"] == "INVALID"
+
+
+def test_evidence_pack_contains_provenance_summary_and_retention_metadata() -> None:
+    pack_root = Path(__file__).parents[2] / "tests" / "fixtures" / "scientific_evaluation" / "v1"
+
+    descriptor = json.loads((pack_root / "manifest.json").read_text(encoding="utf-8"))
+    member_paths = {member["path"] for member in descriptor["members"]}
+
+    assert {"provenance.json", "summary.md"}.issubset(member_paths)
+    assert descriptor["schema_versions"]["evaluation_manifest"] == (
+        "scientific-evaluation-manifest.v1"
+    )
+    assert descriptor["schema_versions"]["evaluation_result"] == (
+        "scientific-evaluation-result.v1"
+    )
+    assert descriptor["schema_versions"]["policy"] == "scientific-policy-evaluation.v1"
+    assert descriptor["provenance"]["source_identity_hash"].startswith("sha256:")
+    assert descriptor["provenance"]["environment_identity_hash"].startswith("sha256:")
+    assert descriptor["audit_reference"]["schema_version"] == (
+        "core-evaluation-audit-reference.v1"
+    )
+    assert descriptor["retention_pin"]["state"] == "PINNED"
+    assert set(descriptor["retention_pin"]["scope"].split(",")) == {
+        "manifest.json",
+        "evaluation-manifest.json",
+        "evaluation-result.json",
+        "policy-config.json",
+        "runtime-lock.json",
+        "provenance.json",
+        "summary.md",
+        "verification-command.txt",
+    }
+
+    summary = (pack_root / "summary.md").read_text(encoding="utf-8")
+    assert "CORE_EVALUATION_ACCEPTED" in summary
+    assert "UNAVAILABLE" in summary
+    assert "| TRUE_EFFECT | 100 | 0 | 1.4729447695 | 1.0 | UNAVAILABLE |" in summary
+    assert "| TRUE_EFFECT | 100 | 0 | 1.4729447695 | 1.0 | None |" not in summary
+    assert "PRACTITIONER_DOMAIN_VALIDATION" in summary
+    assert "Kaya" not in summary
+    assert "transferability" not in summary.lower()
+
+
+def test_human_summary_preserves_nonaccepted_claim_states() -> None:
+    pack_root = Path(__file__).parents[2] / "tests" / "fixtures" / "scientific_evaluation" / "v1"
+    manifest = json.loads((pack_root / "evaluation-manifest.json").read_text(encoding="utf-8"))
+    result = json.loads((pack_root / "evaluation-result.json").read_text(encoding="utf-8"))
+    claim = next(item for item in result["claims"] if item["claim_id"] == "TRUE_EFFECT_ESTIMATION_QUALITY")
+    claim["state"] = "REJECTED"
+    claim["reason_code"] = "TEST_REJECTION_PRESERVED"
+    result["overall_status"] = "CORE_EVALUATION_REJECTED"
+    result["content_hash"] = sha256(
+        {key: value for key, value in result.items() if key != "content_hash"}
+    )
+
+    summary = render_evidence_pack_summary(manifest, result)
+
+    assert "| TRUE_EFFECT_ESTIMATION_QUALITY | REJECTED | TEST_REJECTION_PRESERVED |" in summary
+    assert "| TRUE_EFFECT_ESTIMATION_QUALITY | ACCEPTED |" not in summary
+
+
+def test_pack_publication_rejects_rehashed_claim_registry_tampering(tmp_path) -> None:
+    pack_root = Path(__file__).parents[2] / "tests" / "fixtures" / "scientific_evaluation" / "v1"
+    manifest = json.loads((pack_root / "evaluation-manifest.json").read_text(encoding="utf-8"))
+    result = json.loads((pack_root / "evaluation-result.json").read_text(encoding="utf-8"))
+    claim = next(
+        item
+        for item in result["claims"]
+        if item["claim_id"] == "PRACTITIONER_DOMAIN_VALIDATION"
+    )
+    claim["state"] = "ACCEPTED"
+    result["content_hash"] = sha256(
+        {key: value for key, value in result.items() if key != "content_hash"}
+    )
+
+    with pytest.raises(
+        EvaluationIntegrityError,
+        match="EVIDENCE_PACK_CLAIM_REGISTRY_INVALID",
+    ):
+        write_evidence_pack(tmp_path / "tampered-pack", manifest=manifest, result=result)

@@ -34,7 +34,13 @@ from .fixture_boundaries import (
 
 EVALUATION_MANIFEST_SCHEMA_VERSION = "scientific-evaluation-manifest.v1"
 EVALUATION_RESULT_SCHEMA_VERSION = "scientific-evaluation-result.v1"
-EVIDENCE_PACK_SCHEMA_VERSION = "scientific-evidence-pack.v1"
+EVIDENCE_PACK_SCHEMA_VERSION = "core-evaluation-evidence-pack.v1"
+POLICY_CONFIG_SCHEMA_VERSION = "scientific-policy-config.v1"
+POLICY_EVALUATION_SCHEMA_VERSION = "scientific-policy-evaluation.v1"
+EVIDENCE_PROVENANCE_SCHEMA_VERSION = "core-evaluation-provenance.v1"
+EVIDENCE_SUMMARY_SCHEMA_VERSION = "core-evaluation-summary.v1"
+EVIDENCE_AUDIT_REFERENCE_SCHEMA_VERSION = "core-evaluation-audit-reference.v1"
+EVIDENCE_RETENTION_PIN_SCHEMA_VERSION = "core-evaluation-retention-pin.v1"
 # This is the content address of the reviewed frozen manifest.  A recomputed
 # self-hash is not sufficient evidence that a campaign is still the registered
 # campaign, so verification also binds to this immutable value.
@@ -42,7 +48,10 @@ FROZEN_MANIFEST_CONTENT_HASH = (
     "sha256:ca9944139b1434640e082ca1be9d67d97833e8a9830bcdde28412a16c21ebf97"
 )
 FROZEN_EVIDENCE_PACK_HASH = (
-    "sha256:b32a129fbc2c63ba45d5c70173616c633c51802286ea68e43b152331da7550f7"
+    "sha256:6aa69b25b63aec029f190a9a423bc5a5e8dc262117999f55add773016e024acc"
+)
+FROZEN_EVALUATION_RESULT_CONTENT_HASH = (
+    "sha256:cc5684675c235f9fa81986fa3bc5db9b7b7bb1594815db7b727fd32eaa5ec2cd"
 )
 
 CLAIM_STATES = ("ACCEPTED", "REJECTED", "UNAVAILABLE", "INVALID")
@@ -3206,6 +3215,507 @@ def _atomic_write_bytes(path: Path, payload: bytes) -> None:
             temporary_path.unlink(missing_ok=True)
 
 
+def _policy_config(manifest: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "schema_version": POLICY_CONFIG_SCHEMA_VERSION,
+        "policy_version": POLICY_EVALUATION_SCHEMA_VERSION,
+        "policies": deepcopy(manifest["policies"]),
+        "metrics": deepcopy(manifest["metrics"]),
+    }
+
+
+def _source_identities(manifest: Mapping[str, Any]) -> list[dict[str, Any]]:
+    source = manifest.get("source")
+    base_dgp = manifest.get("base_dgp")
+    external_boundaries = manifest.get("external_boundaries")
+    synthetic_boundary = manifest.get("synthetic_fixture_boundary")
+    if not isinstance(source, Mapping) or not isinstance(base_dgp, Mapping):
+        raise EvaluationIntegrityError("EVIDENCE_PROVENANCE_SOURCE_INVALID")
+    if not isinstance(external_boundaries, list) or not isinstance(
+        synthetic_boundary, Mapping
+    ):
+        raise EvaluationIntegrityError("EVIDENCE_PROVENANCE_SOURCE_INVALID")
+
+    source_identities: list[dict[str, Any]] = [
+        {
+            "identity_kind": "evaluation_implementation",
+            "source_id": source.get("implementation_id"),
+            "source_version": source.get("implementation_version"),
+            "identity_hash": sha256(source),
+        },
+        {
+            "identity_kind": "base_dgp",
+            "source_id": base_dgp.get("base_manifest_id"),
+            "source_version": base_dgp.get("base_manifest_version"),
+            "identity_hash": sha256(base_dgp),
+        },
+    ]
+    for boundary in external_boundaries:
+        if not isinstance(boundary, Mapping):
+            raise EvaluationIntegrityError("EVIDENCE_PROVENANCE_SOURCE_INVALID")
+        identity = {
+            "identity_kind": "external_boundary",
+            "source_id": boundary.get("dataset_key"),
+            "source_version": boundary.get("mapping_manifest_id"),
+            "claim_id": boundary.get("claim_id"),
+            "source_kind": boundary.get("source_kind"),
+            "intended_role": boundary.get("intended_role"),
+            "adapter_id": boundary.get("adapter_id"),
+            "adapter_version": boundary.get("adapter_version"),
+            "mapping_hash": boundary.get("mapping_hash"),
+            "identity_hash": None,
+        }
+        identity["identity_hash"] = sha256(
+            {
+                key: value
+                for key, value in identity.items()
+                if key != "identity_hash"
+            }
+        )
+        source_identities.append(identity)
+
+    synthetic_identity = {
+        "identity_kind": "synthetic_fixture_boundary",
+        "source_id": synthetic_boundary.get("namespace"),
+        "source_version": "v1",
+        "source_kind": synthetic_boundary.get("source_kind"),
+        "intended_role": synthetic_boundary.get("intended_role"),
+        "identity_hash": sha256(synthetic_boundary),
+    }
+    source_identities.append(synthetic_identity)
+    return source_identities
+
+
+def build_evidence_pack_provenance(
+    manifest: Mapping[str, Any],
+    result: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build the deterministic identity projection shared by pack members."""
+
+    if verify_evaluation_manifest(manifest)["state"] != "ACCEPTED":
+        raise EvaluationIntegrityError("EVIDENCE_MANIFEST_INVALID")
+    if (
+        not isinstance(result, Mapping)
+        or result.get("manifest_hash") != manifest.get("content_hash")
+        or result.get("content_hash") != _safe_content_hash(result)
+    ):
+        raise EvaluationIntegrityError("EVIDENCE_RESULT_HASH_MISMATCH")
+
+    source_identities = _source_identities(manifest)
+    source_identity_hash = sha256(source_identities)
+    runtime = result.get("runtime")
+    if not isinstance(runtime, Mapping):
+        raise EvaluationIntegrityError("EVIDENCE_PROVENANCE_ENVIRONMENT_INVALID")
+    environment_identity = {
+        "state": runtime.get("state"),
+        "runtime_lock_hash": runtime.get("runtime_lock_hash"),
+        "expected": deepcopy(runtime.get("expected")),
+        "observed": deepcopy(runtime.get("observed")),
+    }
+    environment_identity_hash = sha256(environment_identity)
+    scientific_identity = {
+        "manifest_hash": manifest.get("content_hash"),
+        "result_hash": result.get("content_hash"),
+        "scope": result.get("scope"),
+        "scenario_ids": list(result.get("scenarios", [])),
+        "seed_policy": deepcopy(manifest.get("repetitions")),
+        "seeds": list(result.get("seeds", [])),
+    }
+    scientific_identity_hash = sha256(scientific_identity)
+    policy_config = _policy_config(manifest)
+    claim_registry = result.get("claims")
+    if not isinstance(claim_registry, list):
+        raise EvaluationIntegrityError("EVIDENCE_RESULT_CLAIM_REGISTRY_INVALID")
+    claim_registry_hash = sha256(claim_registry)
+    audit_subject = {
+        "manifest_hash": manifest.get("content_hash"),
+        "result_hash": result.get("content_hash"),
+        "source_identity_hash": source_identity_hash,
+        "environment_identity_hash": environment_identity_hash,
+        "claim_registry_hash": claim_registry_hash,
+    }
+    audit_reference = {
+        "schema_version": EVIDENCE_AUDIT_REFERENCE_SCHEMA_VERSION,
+        "reference_kind": "immutable_core_evaluation_pack",
+        "reference_id": f"core-evaluation-evidence:{result['content_hash']}",
+        "event_kind": "CORE_EVALUATION_EVIDENCE_PACK_PUBLISHED",
+        "subject_hash": sha256(audit_subject),
+    }
+    audit_reference["content_hash"] = _content_hash(audit_reference)
+    retention_subject = {
+        "manifest_hash": manifest.get("content_hash"),
+        "result_hash": result.get("content_hash"),
+        "source_identity_hash": source_identity_hash,
+        "scope": "CORE_EVALUATION_EVIDENCE_PACK",
+        "reason": "release-evidence-input",
+    }
+    retention_pin = {
+        "schema_version": EVIDENCE_RETENTION_PIN_SCHEMA_VERSION,
+        "state": "PINNED",
+        "pin_id": f"core-evaluation-retention:{result['content_hash']}",
+        "scope": "manifest.json,evaluation-manifest.json,evaluation-result.json,policy-config.json,runtime-lock.json,provenance.json,summary.md,verification-command.txt",
+        "reason": "release-evidence-input",
+        "pin_digest": sha256(retention_subject),
+    }
+    retention_pin["content_hash"] = _content_hash(retention_pin)
+    provenance: dict[str, Any] = {
+        "schema_version": EVIDENCE_PROVENANCE_SCHEMA_VERSION,
+        "schema_versions": {
+            "evaluation_manifest": EVALUATION_MANIFEST_SCHEMA_VERSION,
+            "evaluation_result": EVALUATION_RESULT_SCHEMA_VERSION,
+            "policy_config": POLICY_CONFIG_SCHEMA_VERSION,
+            "policy": POLICY_EVALUATION_SCHEMA_VERSION,
+            "summary": EVIDENCE_SUMMARY_SCHEMA_VERSION,
+        },
+        "policy_version": POLICY_EVALUATION_SCHEMA_VERSION,
+        "policy_config_hash": sha256(policy_config),
+        "source_identities": source_identities,
+        "source_identity_hash": source_identity_hash,
+        "environment_identity": environment_identity,
+        "environment_identity_hash": environment_identity_hash,
+        "scientific_identity": scientific_identity,
+        "scientific_identity_hash": scientific_identity_hash,
+        "claim_registry_hash": claim_registry_hash,
+        "integrity": deepcopy(result.get("integrity")),
+        "reproducibility": deepcopy(result.get("reproducibility")),
+        "unavailable_claims": deepcopy(result.get("unavailable_claims", [])),
+        "audit_reference": audit_reference,
+        "retention_pin": retention_pin,
+    }
+    provenance["content_hash"] = _content_hash(provenance)
+    return provenance
+
+
+def _summary_json(value: object) -> str:
+    return "null" if value is None else canonical_json(value)
+
+
+def _summary_metric(value: object, *, unavailable_state: str = "UNAVAILABLE") -> str:
+    return unavailable_state if value is None else str(value)
+
+
+def render_evidence_pack_summary(
+    manifest: Mapping[str, Any],
+    result: Mapping[str, Any],
+) -> str:
+    """Render release copy as a lossless projection of typed evaluation facts."""
+
+    if verify_evaluation_manifest(manifest)["state"] != "ACCEPTED":
+        raise EvaluationIntegrityError("EVIDENCE_MANIFEST_INVALID")
+    if (
+        not isinstance(result, Mapping)
+        or result.get("manifest_hash") != manifest.get("content_hash")
+        or result.get("content_hash") != _safe_content_hash(result)
+    ):
+        raise EvaluationIntegrityError("EVIDENCE_RESULT_HASH_MISMATCH")
+    claims = result.get("claims")
+    if not isinstance(claims, list) or any(not isinstance(claim, Mapping) for claim in claims):
+        raise EvaluationIntegrityError("EVIDENCE_RESULT_CLAIM_REGISTRY_INVALID")
+    for claim in claims:
+        if claim.get("state") not in CLAIM_STATES:
+            raise EvaluationIntegrityError("EVIDENCE_RESULT_CLAIM_REGISTRY_INVALID")
+
+    provenance = build_evidence_pack_provenance(manifest, result)
+    state_counts = {state: 0 for state in CLAIM_STATES}
+    for claim in claims:
+        state_counts[str(claim["state"])] += 1
+    lines = [
+        "# Core Evaluation Evidence Pack",
+        "",
+        f"- Summary schema: `{EVIDENCE_SUMMARY_SCHEMA_VERSION}`",
+        f"- Evaluation manifest schema: `{manifest.get('schema_version')}`",
+        f"- Evaluation result schema: `{result.get('schema_version')}`",
+        f"- Policy schema: `{POLICY_EVALUATION_SCHEMA_VERSION}`",
+        f"- Scope: `{result.get('scope')}`",
+        f"- Overall status: `{result.get('overall_status')}`",
+        "",
+        "## Identity and provenance",
+        "",
+        f"- Evaluation manifest: `{manifest.get('content_hash')}`",
+        f"- Evaluation result: `{result.get('content_hash')}`",
+        f"- Scientific identity: `{provenance['scientific_identity_hash']}`",
+        f"- Source identity: `{provenance['source_identity_hash']}`",
+        f"- Environment identity: `{provenance['environment_identity_hash']}`",
+        f"- Runtime state: `{provenance['environment_identity'].get('state')}`",
+        f"- Runtime lock: `{provenance['environment_identity'].get('runtime_lock_hash')}`",
+        f"- Seed policy: `{_summary_json(provenance['scientific_identity'].get('seed_policy'))}`",
+        f"- Seeds (paired, {len(result.get('seeds', []))}): `{_summary_json(result.get('seeds', []))}`",
+        "",
+        "### Source identities",
+        "",
+    ]
+    for source in provenance["source_identities"]:
+        lines.append(
+            f"- `{source['identity_kind']}`: `{source['source_id']}` / "
+            f"`{source['source_version']}` — `{source['identity_hash']}`"
+        )
+
+    lines.extend(
+        [
+            "",
+            "## Integrity and claim states",
+            "",
+            f"- Runtime: `{_summary_json(result.get('runtime'))}`",
+            f"- Integrity: `{_summary_json(result.get('integrity'))}`",
+            f"- Reproducibility: `{_summary_json(result.get('reproducibility'))}`",
+            "- Claim-state counts: "
+            + "; ".join(f"{state}={state_counts[state]}" for state in CLAIM_STATES),
+            "",
+            "| Claim ID | State | Reason | Evidence refs | Observed | Threshold |",
+            "| --- | --- | --- | --- | --- | --- |",
+        ]
+    )
+    for claim in claims:
+        refs = ", ".join(str(ref) for ref in claim.get("evidence_refs", [])) or "none"
+        lines.append(
+            f"| {claim.get('claim_id')} | {claim.get('state')} | "
+            f"{claim.get('reason_code')} | {refs} | "
+            f"{_summary_json(claim.get('observed'))} | "
+            f"{_summary_json(claim.get('threshold'))} |"
+        )
+
+    unavailable_claims = [claim for claim in claims if claim.get("state") == "UNAVAILABLE"]
+    lines.extend(["", "## Unavailable rationales", ""])
+    if unavailable_claims:
+        for claim in unavailable_claims:
+            lines.append(
+                f"- `{claim.get('claim_id')}`: `{claim.get('reason_code')}`"
+            )
+    else:
+        lines.append("- None.")
+
+    lines.extend(
+        [
+            "",
+            "## Scenario aggregates",
+            "",
+            "| Scenario | Valid seeds | Invalid seeds | Mean ATTE days | Supported rate | Abstention precision |",
+            "| --- | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    scenario_results = result.get("scenario_results", {})
+    if not isinstance(scenario_results, Mapping):
+        raise EvaluationIntegrityError("EVIDENCE_RESULT_SCENARIO_RESULTS_INVALID")
+    for scenario_id in result.get("scenarios", []):
+        scenario_result = scenario_results.get(scenario_id, {})
+        aggregate = (
+            scenario_result.get("aggregate", {})
+            if isinstance(scenario_result, Mapping)
+            else {}
+        )
+        abstention_metrics = aggregate.get("abstention_metrics", {})
+        abstention_precision_state = (
+            abstention_metrics.get("abstention_precision_state")
+            if isinstance(abstention_metrics, Mapping)
+            else None
+        )
+        lines.append(
+            f"| {scenario_id} | {_summary_metric(aggregate.get('valid_seed_count'))} | "
+            f"{_summary_metric(aggregate.get('invalid_seed_count'))} | "
+            f"{_summary_metric(aggregate.get('mean_atte_days'))} | "
+            f"{_summary_metric(aggregate.get('supported_rate'))} | "
+            f"{_summary_metric(aggregate.get('abstention_precision'), unavailable_state=abstention_precision_state or 'UNAVAILABLE')} |"
+        )
+
+    lines.extend(
+        [
+            "",
+            "## Paired policy comparisons",
+            "",
+            "| Scenario | Challenger | Paired seeds | State | Mean regret reduction | One-sided lower bound |",
+            "| --- | --- | ---: | --- | ---: | ---: |",
+        ]
+    )
+    for scenario_id in result.get("scenarios", []):
+        scenario_result = scenario_results.get(scenario_id, {})
+        comparisons = (
+            scenario_result.get("paired_policy_comparisons", {})
+            if isinstance(scenario_result, Mapping)
+            else {}
+        )
+        if not isinstance(comparisons, Mapping):
+            raise EvaluationIntegrityError("EVIDENCE_RESULT_COMPARISONS_INVALID")
+        for challenger_id in POLICY_COMPARISON_IDS:
+            comparison = comparisons.get(challenger_id)
+            if not isinstance(comparison, Mapping):
+                continue
+            bootstrap = comparison.get("bootstrap", {})
+            lower_bound = (
+                bootstrap.get("one_sided_lower_bound")
+                if isinstance(bootstrap, Mapping)
+                else None
+            )
+            lines.append(
+                f"| {scenario_id} | {challenger_id} | "
+                f"{_summary_metric(comparison.get('paired_seed_count'))} | "
+                f"{_summary_metric(comparison.get('state'))} | "
+                f"{_summary_metric(comparison.get('mean_regret_reduction'))} | "
+                f"{_summary_metric(lower_bound)} |"
+            )
+
+    synthetic_boundary = result.get("synthetic_fixture_boundary", {})
+    lines.extend(
+        [
+            "",
+            "## Boundaries and retention",
+            "",
+            f"- Synthetic fixture boundary: `{_summary_json(synthetic_boundary)}`",
+            f"- Audit reference: `{provenance['audit_reference']['reference_id']}`",
+            f"- Audit subject hash: `{provenance['audit_reference']['subject_hash']}`",
+            f"- Retention pin: `{provenance['retention_pin']['pin_id']}`",
+            f"- Retention state: `{provenance['retention_pin']['state']}`",
+            "",
+            "This summary is a deterministic projection of the machine-readable "
+            "manifest and result. Claim state, reason, evidence references, observed "
+            "facts, thresholds, unavailable rationales, and integrity outcomes are "
+            "shown as recorded; no state is inferred from narrative copy.",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _expected_release_claim_ids(manifest: Mapping[str, Any]) -> set[str]:
+    expected: set[str] = set()
+    for scenario_id in CORE_SCENARIO_IDS:
+        if scenario_id == "TRUE_EFFECT":
+            expected.update(
+                {
+                    "TRUE_EFFECT_ESTIMATION_QUALITY",
+                    "TRUE_EFFECT_INTERVAL_COVERAGE",
+                }
+            )
+        elif scenario_id == "NULL_EFFECT":
+            expected.add("NULL_EFFECT_NO_SUPPORTED_DRIVER")
+        elif scenario_id == "PLANTED_CORRELATE":
+            expected.add("PLANTED_CORRELATE_REJECTION")
+        elif scenario_id == "HIDDEN_CONFOUNDING":
+            expected.add("HIDDEN_CONFOUNDING_REJECTION")
+        elif scenario_id == "POOR_OVERLAP":
+            expected.add("POOR_OVERLAP_ABSTENTION")
+        for challenger_id in POLICY_COMPARISON_IDS:
+            if challenger_id == "ORACLE":
+                continue
+            if scenario_id == "TRUE_EFFECT" or (
+                scenario_id == "PLANTED_CORRELATE"
+                and challenger_id
+                in {"PREDICTION_ONLY", "CORRELATION_ONLY", "ALWAYS_EXPEDITE"}
+            ):
+                expected.add(f"{scenario_id}_{challenger_id}_DECISION_VALUE")
+    expected.update(
+        str(item["claim_id"])
+        for item in manifest.get("external_boundaries", [])
+        if isinstance(item, Mapping) and "claim_id" in item
+    )
+    expected.update(
+        {
+            "SYNTHETIC_APPROVAL_FIXTURE_BOUNDARY",
+            "EVALUATION_RUNTIME_COMPATIBILITY",
+            "EVALUATION_INTEGRITY",
+            "EVALUATION_REPRODUCIBILITY",
+            "EVALUATION_SCOPE_COMPLETENESS",
+            "HUMAN_TRUST_AND_COMPREHENSION",
+        }
+    )
+    expected.update(str(item["claim_id"]) for item in UNAVAILABLE_CLAIM_SPECS)
+    return expected
+
+
+def _verify_release_claim_registry(
+    manifest: Mapping[str, Any],
+    result: Mapping[str, Any],
+) -> None:
+    claims = result.get("claims")
+    if not isinstance(claims, list) or any(not isinstance(item, Mapping) for item in claims):
+        raise EvaluationIntegrityError("EVIDENCE_PACK_CLAIM_REGISTRY_INVALID")
+    if any(not isinstance(item.get("claim_id"), str) for item in claims):
+        raise EvaluationIntegrityError("EVIDENCE_PACK_CLAIM_REGISTRY_INVALID")
+    claim_ids = [str(item["claim_id"]) for item in claims]
+    if len(set(claim_ids)) != len(claim_ids) or set(claim_ids) != _expected_release_claim_ids(manifest):
+        raise EvaluationIntegrityError("EVIDENCE_PACK_CLAIM_REGISTRY_INVALID")
+    unavailable_specs = {
+        str(item["claim_id"]): str(item["reason_code"])
+        for item in UNAVAILABLE_CLAIM_SPECS
+    }
+    unavailable_specs["HUMAN_TRUST_AND_COMPREHENSION"] = "HUMAN_VALIDATION_OUT_OF_SCOPE"
+    for claim in claims:
+        claim_id = str(claim["claim_id"])
+        state = claim.get("state")
+        if state not in CLAIM_STATES:
+            raise EvaluationIntegrityError("EVIDENCE_PACK_CLAIM_REGISTRY_INVALID")
+        evidence_refs = claim.get("evidence_refs")
+        if not isinstance(evidence_refs, list) or any(
+            not isinstance(ref, str) or not ref.startswith("sha256:") for ref in evidence_refs
+        ):
+            raise EvaluationIntegrityError("EVIDENCE_PACK_CLAIM_REGISTRY_INVALID")
+        if claim_id in unavailable_specs:
+            if (
+                state != "UNAVAILABLE"
+                or claim.get("reason_code") != unavailable_specs[claim_id]
+                or claim.get("observed") is not None
+                or claim.get("threshold") is not None
+                or evidence_refs
+            ):
+                raise EvaluationIntegrityError("EVIDENCE_PACK_CLAIM_REGISTRY_INVALID")
+        elif state != "ACCEPTED" or not evidence_refs:
+            raise EvaluationIntegrityError("EVIDENCE_PACK_CLAIM_REGISTRY_INVALID")
+
+    expected_unavailable = [
+        {
+            "claim_id": claim["claim_id"],
+            "state": claim["state"],
+            "reason_code": claim["reason_code"],
+        }
+        for claim in claims
+        if claim["state"] == "UNAVAILABLE"
+    ]
+    if result.get("unavailable_claims") != expected_unavailable:
+        raise EvaluationIntegrityError("EVIDENCE_PACK_CLAIM_REGISTRY_INVALID")
+
+
+def _verify_release_evaluation_result(
+    manifest: Mapping[str, Any],
+    result: Mapping[str, Any],
+) -> None:
+    if not isinstance(result, Mapping):
+        raise EvaluationIntegrityError("EVIDENCE_PACK_RESULT_SCHEMA_INVALID")
+    if result.get("schema_version") != EVALUATION_RESULT_SCHEMA_VERSION:
+        raise EvaluationIntegrityError("EVIDENCE_PACK_RESULT_SCHEMA_INVALID")
+    if result.get("manifest_hash") != manifest.get("content_hash"):
+        raise EvaluationIntegrityError("EVIDENCE_PACK_CROSS_RECORD_BINDING_INVALID")
+    _verify_release_claim_registry(manifest, result)
+    integrity = result.get("integrity")
+    runtime = result.get("runtime")
+    reproducibility = result.get("reproducibility")
+    if not isinstance(integrity, Mapping) or not isinstance(runtime, Mapping) or not isinstance(
+        reproducibility, Mapping
+    ):
+        raise EvaluationIntegrityError("EVIDENCE_PACK_SCOPE_INVALID")
+    expected_seeds = list(
+        range(
+            int(manifest["repetitions"]["seed_start"]),
+            int(manifest["repetitions"]["seed_start"])
+            + int(manifest["repetitions"]["seed_count"]),
+        )
+    )
+    if (
+        result.get("scope") != "FULL_CAMPAIGN"
+        or result.get("scenarios") != list(CORE_SCENARIO_IDS)
+        or result.get("seeds") != expected_seeds
+        or result.get("overall_status") != "CORE_EVALUATION_ACCEPTED"
+        or integrity.get("state") != "ACCEPTED"
+        or integrity.get("invalid_seed_count") != 0
+        or runtime.get("state") != "ACCEPTED"
+        or reproducibility.get("state") != "ACCEPTED"
+        or reproducibility.get("mismatches") != []
+    ):
+        raise EvaluationIntegrityError("EVIDENCE_PACK_SCOPE_INVALID")
+    if result.get("content_hash") != _safe_content_hash(result):
+        raise EvaluationIntegrityError("EVIDENCE_PACK_RESULT_HASH_MISMATCH")
+    if result.get("content_hash") != FROZEN_EVALUATION_RESULT_CONTENT_HASH:
+        raise EvaluationIntegrityError("EVIDENCE_PACK_RESULT_NOT_CANONICAL")
+
+
 def _pack_identity_hash(
     manifest_hash: str,
     result_hash: str,
@@ -3228,6 +3738,8 @@ def _verification_command(
     manifest_hash: str,
     result_hash: str,
     identity_hash: str,
+    summary_hash: str,
+    provenance_hash: str,
 ) -> str:
     """Return a location-independent, self-contained pack member check."""
 
@@ -3239,8 +3751,12 @@ def _verification_command(
         "d=json.loads((r/'manifest.json').read_text()); "
         "m=json.loads((r/'evaluation-manifest.json').read_text()); "
         "q=json.loads((r/'evaluation-result.json').read_text()); "
+        "p=json.loads((r/'provenance.json').read_text()); "
         "assert d['content_hash']==h(c({k:v for k,v in d.items() if k!='content_hash'})); "
-        "assert set(x['path'] for x in d['members'])=={'evaluation-manifest.json','evaluation-result.json','policy-config.json','runtime-lock.json','verification-command.txt'}; "
+        "assert d['schema_version']=="
+        + repr(EVIDENCE_PACK_SCHEMA_VERSION)
+        + "; "
+        "assert set(x['path'] for x in d['members'])=={'evaluation-manifest.json','evaluation-result.json','policy-config.json','runtime-lock.json','provenance.json','summary.md','verification-command.txt'}; "
         "assert all(Path(x['path']).name==x['path'] and not Path(x['path']).is_absolute() and '..' not in Path(x['path']).parts for x in d['members']); "
         "assert d['evaluation_manifest_hash']=="
         + repr(manifest_hash)
@@ -3248,11 +3764,22 @@ def _verification_command(
         "assert d['evaluation_result_hash']=="
         + repr(result_hash)
         + "==q['content_hash']; "
+        "assert d['provenance']['content_hash']=="
+        + repr(provenance_hash)
+        + "==p['content_hash']; "
+        "assert d['provenance']['source_identity_hash']==p['source_identity_hash']; "
+        "assert d['provenance']['environment_identity_hash']==p['environment_identity_hash']; "
+        "assert d['audit_reference']['content_hash']==p['audit_reference']['content_hash']; "
+        "assert d['retention_pin']['content_hash']==p['retention_pin']['content_hash']; "
         "assert d['canonical_identity_hash']=="
         + repr(identity_hash)
         + "==h(c({'evaluation_manifest_hash':d['evaluation_manifest_hash'],'evaluation_result_hash':d['evaluation_result_hash'],'member_hashes':{x['path']:x['content_hash'] for x in d['members'] if x['path']!='verification-command.txt'}})); "
         "assert q['content_hash']==h(c({k:v for k,v in q.items() if k!='content_hash'})); "
-        "assert json.loads((r/'policy-config.json').read_text())=={'policies':m['policies'],'metrics':m['metrics']}; "
+        "assert h((r/'summary.md').read_bytes())=="
+        + repr(summary_hash)
+        + "; "
+        "assert p['content_hash']==h(c({k:v for k,v in p.items() if k!='content_hash'})); "
+        "assert json.loads((r/'policy-config.json').read_text())=={'schema_version':'scientific-policy-config.v1','policy_version':'scientific-policy-evaluation.v1','policies':m['policies'],'metrics':m['metrics']}; "
         "assert json.loads((r/'runtime-lock.json').read_text())==m['runtime_lock']; "
         "assert all(h((r/x['path']).read_bytes())==x['content_hash'] for x in d['members']); "
         "print({'state':'ACCEPTED','reason_code':'EVIDENCE_PACK_SELF_CHECKED'})\""
@@ -3269,29 +3796,9 @@ def write_evidence_pack(
 
     if verify_evaluation_manifest(manifest)["state"] != "ACCEPTED":
         raise EvaluationIntegrityError("EVALUATION_MANIFEST_INVALID")
-    if (
-        result.get("manifest_hash") != manifest.get("content_hash")
-        or result.get("content_hash") != _content_hash(result)
-    ):
-        raise EvaluationIntegrityError("EVALUATION_RESULT_HASH_MISMATCH")
-    expected_seeds = list(
-        range(
-            int(manifest["repetitions"]["seed_start"]),
-            int(manifest["repetitions"]["seed_start"])
-            + int(manifest["repetitions"]["seed_count"]),
-        )
-    )
-    if (
-        result.get("scope") != "FULL_CAMPAIGN"
-        or result.get("overall_status") != "CORE_EVALUATION_ACCEPTED"
-        or result.get("scenarios") != list(CORE_SCENARIO_IDS)
-        or result.get("seeds") != expected_seeds
-        or result.get("integrity", {}).get("state") != "ACCEPTED"
-        or result.get("runtime", {}).get("state") != "ACCEPTED"
-        or result.get("reproducibility", {}).get("state") != "ACCEPTED"
-        or result.get("integrity", {}).get("invalid_seed_count") != 0
-    ):
-        raise EvaluationIntegrityError("EVIDENCE_PACK_SCOPE_INVALID")
+    _verify_release_evaluation_result(manifest, result)
+    provenance = build_evidence_pack_provenance(manifest, result)
+    summary = render_evidence_pack_summary(manifest, result)
     root = Path(destination)
     if root.is_symlink():
         raise EvaluationIntegrityError("EVIDENCE_PACK_TARGET_SYMLINK")
@@ -3303,31 +3810,39 @@ def write_evidence_pack(
     member_values: dict[str, object] = {
         "evaluation-manifest.json": manifest,
         "evaluation-result.json": result,
-        "policy-config.json": {
-            "policies": manifest["policies"],
-            "metrics": manifest["metrics"],
-        },
+        "policy-config.json": _policy_config(manifest),
         "runtime-lock.json": manifest["runtime_lock"],
+        "provenance.json": provenance,
+        "summary.md": summary,
     }
     members: list[dict[str, Any]] = []
     for relative_path, value in member_values.items():
         payload = value.encode("utf-8") if isinstance(value, str) else _json_bytes(value)
         _atomic_write_bytes(root / relative_path, payload)
+        media_type = (
+            "text/markdown"
+            if relative_path.endswith(".md")
+            else "text/plain"
+            if relative_path.endswith(".txt")
+            else "application/json"
+        )
         members.append(
             {
                 "path": relative_path,
                 "content_hash": sha256(payload),
                 "byte_count": len(payload),
-                "media_type": "text/plain"
-                if relative_path.endswith(".txt")
-                else "application/json",
+                "media_type": media_type,
             }
         )
     identity_hash = _pack_identity_hash(
         manifest["content_hash"], result["content_hash"], members
     )
     verification_payload = _verification_command(
-        manifest["content_hash"], result["content_hash"], identity_hash
+        manifest["content_hash"],
+        result["content_hash"],
+        identity_hash,
+        sha256(summary.encode("utf-8")),
+        provenance["content_hash"],
     ).encode("utf-8")
     _atomic_write_bytes(root / "verification-command.txt", verification_payload)
     members.append(
@@ -3345,6 +3860,22 @@ def write_evidence_pack(
         "evaluation_manifest_hash": manifest["content_hash"],
         "evaluation_result_hash": result["content_hash"],
         "scope": result.get("scope"),
+        "schema_versions": {
+            "pack": EVIDENCE_PACK_SCHEMA_VERSION,
+            **provenance["schema_versions"],
+            "provenance": EVIDENCE_PROVENANCE_SCHEMA_VERSION,
+        },
+        "policy_version": POLICY_EVALUATION_SCHEMA_VERSION,
+        "provenance": {
+            "schema_version": provenance["schema_version"],
+            "content_hash": provenance["content_hash"],
+            "source_identity_hash": provenance["source_identity_hash"],
+            "environment_identity_hash": provenance["environment_identity_hash"],
+            "scientific_identity_hash": provenance["scientific_identity_hash"],
+            "claim_registry_hash": provenance["claim_registry_hash"],
+        },
+        "audit_reference": provenance["audit_reference"],
+        "retention_pin": provenance["retention_pin"],
         "canonical_identity_hash": identity_hash,
         "members": members,
         "offline_verification": {
@@ -3393,7 +3924,11 @@ def verify_evidence_pack(destination: str | Path) -> dict[str, Any]:
         return _invalid_pack("EVIDENCE_PACK_MANIFEST_SCHEMA_UNSUPPORTED", declared_hash)
     if not isinstance(declared_hash, str) or declared_hash != descriptor_hash:
         return _invalid_pack("EVIDENCE_PACK_MANIFEST_HASH_MISMATCH", declared_hash)
-    if descriptor.get("schema_version") != EVIDENCE_PACK_SCHEMA_VERSION:
+    if (
+        descriptor.get("schema_version") != EVIDENCE_PACK_SCHEMA_VERSION
+        or descriptor.get("pack_id") != "core-scientific-evaluation-evidence"
+        or descriptor.get("pack_version") != "v1"
+    ):
         return _invalid_pack("EVIDENCE_PACK_MANIFEST_SCHEMA_UNSUPPORTED", declared_hash)
     members = descriptor.get("members")
     if not isinstance(members, list) or not members:
@@ -3421,6 +3956,15 @@ def verify_evidence_pack(destination: str | Path) -> dict[str, Any]:
             payload = member_path.read_bytes()
         except OSError:
             return _invalid_pack("EVIDENCE_PACK_MEMBER_UNREADABLE", declared_hash)
+        expected_media_type = (
+            "text/markdown"
+            if relative_path.endswith(".md")
+            else "text/plain"
+            if relative_path.endswith(".txt")
+            else "application/json"
+        )
+        if member.get("media_type") != expected_media_type:
+            return _invalid_pack("EVIDENCE_PACK_MEMBER_SCHEMA_UNSUPPORTED", declared_hash)
         if member.get("content_hash") != sha256(payload):
             return _invalid_pack("EVIDENCE_PACK_MEMBER_HASH_MISMATCH", declared_hash)
         if member.get("byte_count") != len(payload):
@@ -3431,16 +3975,14 @@ def verify_evidence_pack(destination: str | Path) -> dict[str, Any]:
         "evaluation-result.json",
         "policy-config.json",
         "runtime-lock.json",
+        "provenance.json",
+        "summary.md",
         "verification-command.txt",
     }
     if seen != required_members:
         return _invalid_pack("EVIDENCE_PACK_MEMBER_SET_INVALID", declared_hash)
-    actual_files = {
-        item.name
-        for item in root.iterdir()
-        if item.is_file() and not item.is_symlink()
-    }
-    if actual_files != required_members | {"manifest.json"}:
+    actual_entries = {item.name for item in root.iterdir()}
+    if actual_entries != required_members | {"manifest.json"}:
         return _invalid_pack("EVIDENCE_PACK_EXTRA_MEMBER", declared_hash)
     try:
         identity_hash = _pack_identity_hash(
@@ -3467,22 +4009,73 @@ def verify_evidence_pack(destination: str | Path) -> dict[str, Any]:
     try:
         policy_config = json.loads(parsed_members["policy-config.json"].decode("utf-8"))
         runtime_lock = json.loads(parsed_members["runtime-lock.json"].decode("utf-8"))
+        provenance = json.loads(parsed_members["provenance.json"].decode("utf-8"))
+        summary = parsed_members["summary.md"].decode("utf-8")
     except (UnicodeDecodeError, ValueError, TypeError):
         return _invalid_pack("EVIDENCE_PACK_JSON_INVALID", declared_hash)
-    if policy_config != {
-        "policies": evaluation_manifest["policies"],
-        "metrics": evaluation_manifest["metrics"],
-    } or runtime_lock != evaluation_manifest["runtime_lock"]:
+    if policy_config != _policy_config(evaluation_manifest) or runtime_lock != evaluation_manifest[
+        "runtime_lock"
+    ]:
         return _invalid_pack("EVIDENCE_PACK_CANONICAL_MEMBER_INVALID", declared_hash)
+    try:
+        _verify_release_evaluation_result(evaluation_manifest, evaluation_result)
+        expected_provenance = build_evidence_pack_provenance(
+            evaluation_manifest, evaluation_result
+        )
+        expected_summary = render_evidence_pack_summary(
+            evaluation_manifest, evaluation_result
+        )
+    except EvaluationIntegrityError as error:
+        return _invalid_pack(str(error), declared_hash)
     if (
-        not isinstance(evaluation_result, Mapping)
-        or _safe_content_hash(evaluation_result) != evaluation_result.get("content_hash")
-        or evaluation_result.get("manifest_hash") != evaluation_manifest.get("content_hash")
-        or descriptor.get("evaluation_manifest_hash") != evaluation_manifest.get("content_hash")
-        or descriptor.get("evaluation_result_hash") != evaluation_result.get("content_hash")
-        or evaluation_result.get("scope") != "FULL_CAMPAIGN"
+        descriptor.get("evaluation_manifest_hash")
+        != evaluation_manifest.get("content_hash")
+        or descriptor.get("evaluation_result_hash")
+        != evaluation_result.get("content_hash")
+        or descriptor.get("scope") != evaluation_result.get("scope")
+        or provenance != expected_provenance
+        or summary != expected_summary
     ):
-        return _invalid_pack("EVIDENCE_PACK_CROSS_RECORD_BINDING_INVALID", declared_hash)
+        return _invalid_pack("EVIDENCE_PACK_PROVENANCE_OR_SUMMARY_INVALID", declared_hash)
+    expected_schema_versions = {
+        "pack": EVIDENCE_PACK_SCHEMA_VERSION,
+        **expected_provenance["schema_versions"],
+        "provenance": EVIDENCE_PROVENANCE_SCHEMA_VERSION,
+    }
+    expected_descriptor_provenance = {
+        "schema_version": expected_provenance["schema_version"],
+        "content_hash": expected_provenance["content_hash"],
+        "source_identity_hash": expected_provenance["source_identity_hash"],
+        "environment_identity_hash": expected_provenance["environment_identity_hash"],
+        "scientific_identity_hash": expected_provenance["scientific_identity_hash"],
+        "claim_registry_hash": expected_provenance["claim_registry_hash"],
+    }
+    if (
+        descriptor.get("schema_versions") != expected_schema_versions
+        or descriptor.get("policy_version") != POLICY_EVALUATION_SCHEMA_VERSION
+        or descriptor.get("provenance") != expected_descriptor_provenance
+        or descriptor.get("audit_reference") != expected_provenance["audit_reference"]
+        or descriptor.get("retention_pin") != expected_provenance["retention_pin"]
+        or descriptor.get("offline_verification")
+        != {
+            "command_member": "verification-command.txt",
+            "manifest_last": True,
+        }
+    ):
+        return _invalid_pack("EVIDENCE_PACK_PROVENANCE_OR_SUMMARY_INVALID", declared_hash)
+    try:
+        expected_command = _verification_command(
+            evaluation_manifest["content_hash"],
+            evaluation_result["content_hash"],
+            identity_hash,
+            sha256(summary.encode("utf-8")),
+            expected_provenance["content_hash"],
+        )
+        actual_command = parsed_members["verification-command.txt"].decode("utf-8")
+    except (UnicodeDecodeError, KeyError, TypeError, ValueError):
+        return _invalid_pack("EVIDENCE_PACK_VERIFICATION_COMMAND_INVALID", declared_hash)
+    if actual_command != expected_command:
+        return _invalid_pack("EVIDENCE_PACK_VERIFICATION_COMMAND_INVALID", declared_hash)
     if (
         evaluation_manifest.get("content_hash") == FROZEN_MANIFEST_CONTENT_HASH
         and declared_hash != FROZEN_EVIDENCE_PACK_HASH
@@ -3495,4 +4088,8 @@ def verify_evidence_pack(destination: str | Path) -> dict[str, Any]:
         "member_count": len(members),
         "evaluation_manifest_hash": evaluation_manifest["content_hash"],
         "evaluation_result_hash": evaluation_result["content_hash"],
+        "source_identity_hash": expected_provenance["source_identity_hash"],
+        "environment_identity_hash": expected_provenance["environment_identity_hash"],
+        "claim_registry_hash": expected_provenance["claim_registry_hash"],
+        "retention_state": expected_provenance["retention_pin"]["state"],
     }
