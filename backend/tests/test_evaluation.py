@@ -6,6 +6,8 @@ import math
 from pathlib import Path
 import shutil
 
+import pytest
+
 from backend.app.evaluation import (
     CLAIM_STATES,
     CORE_SCENARIO_IDS,
@@ -195,6 +197,126 @@ def test_policy_definitions_are_isolated_and_oracle_is_evaluator_only() -> None:
     assert policies["policies"]["COPILOT"]["driver_recommendation"] is False
 
 
+def test_policy_metrics_preserve_denominators_and_manager_authority_boundary() -> None:
+    manifest = build_frozen_evaluation_manifest()
+    replicate = generate_evaluation_replicate(
+        manifest,
+        scenario_id="TRUE_EFFECT",
+        seed=160016,
+    )
+    estimation = evaluate_evaluation_replicate(manifest, replicate)
+
+    policies = evaluate_policy_replicate(manifest, replicate, estimation)
+    copilot = policies["policies"]["COPILOT"]
+
+    assert copilot["total_subject_count"] == 5_000
+    assert copilot["eligible_subject_count"] > 0
+    assert copilot["ineligible_subject_count"] == (
+        copilot["total_subject_count"] - copilot["eligible_subject_count"]
+    )
+    assert copilot["monitoring_count"] == (
+        copilot["eligible_subject_count"] - copilot["action_count"]
+    )
+    assert copilot["selection_count"] == copilot["eligible_subject_count"]
+    assert copilot["recommendation_count"] == copilot["action_count"]
+    assert copilot["authorization_count"] == 0
+    assert copilot["authorization_state"] == "NOT_AUTHORIZED"
+    assert copilot["policy_utility"] == copilot["realized_net_value"]
+    assert copilot["regret_denominator"] == (
+        copilot["oracle_net_value"] - copilot["monitoring_net_value"]
+    )
+    assert copilot["metric_denominators"]["false_action_rate"] == {
+        "numerator": copilot["false_action_count"],
+        "denominator": copilot["eligible_subject_count"],
+        "state": "AVAILABLE",
+    }
+    assert policies["policy_input_boundaries"]["COPILOT"][
+        "selection_truth_access"
+    ] is False
+    assert policies["policy_input_boundaries"]["ORACLE"][
+        "selection_truth_access"
+    ] is True
+
+
+def test_zero_opportunity_preserves_unavailable_regret_denominator() -> None:
+    manifest = build_frozen_evaluation_manifest()
+    replicate = generate_evaluation_replicate(
+        manifest,
+        scenario_id="NULL_EFFECT",
+        seed=160016,
+    )
+    estimation = evaluate_evaluation_replicate(manifest, replicate)
+
+    policies = evaluate_policy_replicate(manifest, replicate, estimation)
+    prediction_only = policies["policies"]["PREDICTION_ONLY"]
+
+    assert prediction_only["regret_denominator"] == 0.0
+    assert prediction_only["normalized_regret"] is None
+    assert prediction_only["normalized_regret_state"] == "UNAVAILABLE"
+    assert prediction_only["metric_denominators"]["normalized_regret"] == {
+        "numerator": prediction_only["raw_oracle_regret"],
+        "denominator": 0.0,
+        "state": "UNAVAILABLE",
+    }
+
+
+def test_campaign_compares_every_policy_on_paired_seed_rows() -> None:
+    manifest = build_frozen_evaluation_manifest()
+
+    result = run_scientific_evaluation(
+        manifest=manifest,
+        scenario_ids=("TRUE_EFFECT", "PLANTED_CORRELATE"),
+        seeds=(160016, 160017),
+    )
+
+    challenger_ids = (
+        "PREDICTION_ONLY",
+        "CORRELATION_ONLY",
+        "ALWAYS_EXPEDITE",
+        "STATIC_LOAD_RULE",
+        "ORACLE",
+    )
+    for scenario in result["scenario_results"].values():
+        assert tuple(scenario["paired_policy_comparisons"]) == challenger_ids
+        assert all(
+            comparison["paired_seed_count"] == 2
+            for comparison in scenario["paired_policy_comparisons"].values()
+        )
+    aggregate = result["scenario_results"]["TRUE_EFFECT"]["aggregate"]
+    assert aggregate["policy_metrics"]["COPILOT"]["eligible_subject_denominator"] == (
+        2 * 4_338
+    )
+    assert aggregate["policy_metrics"]["COPILOT"]["state"] == "AVAILABLE"
+
+
+def test_campaign_keeps_external_scopes_and_unavailable_domain_claims_explicit() -> None:
+    manifest = build_frozen_evaluation_manifest()
+
+    result = run_scientific_evaluation(
+        manifest=manifest,
+        scenario_ids=("TRUE_EFFECT",),
+        seeds=(160016,),
+    )
+    claims = {claim["claim_id"]: claim for claim in result["claims"]}
+
+    assert claims["OLIST_ADAPTER_TRANSPORT_TIMING_VALIDATION"]["state"] == "ACCEPTED"
+    assert claims["SCMS_REJECTION_ABSTENTION"]["state"] == "ACCEPTED"
+    for claim_id in (
+        "CONSTRUCTION_CAUSAL_MAGNITUDE",
+        "ACTION_REALISM",
+        "MANAGER_COMPREHENSION",
+        "PRACTITIONER_DOMAIN_VALIDATION",
+    ):
+        assert claims[claim_id]["state"] == "UNAVAILABLE"
+        assert claims[claim_id]["observed"] is None
+        assert claims[claim_id]["evidence_refs"] == []
+
+    boundary = result["synthetic_fixture_boundary"]
+    assert boundary["state"] == "TEST_ONLY_NOT_SHIPPED"
+    assert boundary["domain_validation_claim"] is False
+    assert boundary["shipped_demo_claim"] is False
+
+
 def test_policy_scoring_rejects_cross_replicate_estimation() -> None:
     manifest = build_frozen_evaluation_manifest()
     first_replicate = generate_evaluation_replicate(
@@ -215,6 +337,42 @@ def test_policy_scoring_rejects_cross_replicate_estimation() -> None:
         assert str(error) == "EVALUATION_ESTIMATION_BINDING_INVALID"
     else:
         raise AssertionError("cross-replicate estimation was accepted")
+
+
+def test_policy_scoring_rejects_rehashed_truth_tampering() -> None:
+    manifest = build_frozen_evaluation_manifest()
+    replicate = generate_evaluation_replicate(
+        manifest,
+        scenario_id="TRUE_EFFECT",
+        seed=160016,
+    )
+    estimation = evaluate_evaluation_replicate(manifest, replicate)
+    tampered = deepcopy(replicate)
+    tampered["evaluator_only_truth"]["action_responses"][0][
+        "direct_action_cost"
+    ] = 0.0
+    tampered["evaluator_only_truth"]["content_hash"] = sha256(
+        {
+            key: value
+            for key, value in tampered["evaluator_only_truth"].items()
+            if key != "content_hash"
+        }
+    )
+    tampered["content_hash"] = sha256(
+        {key: value for key, value in tampered.items() if key != "content_hash"}
+    )
+    tampered_estimation = deepcopy(estimation)
+    tampered_estimation["replicate_hash"] = tampered["content_hash"]
+    tampered_estimation["content_hash"] = sha256(
+        {
+            key: value
+            for key, value in tampered_estimation.items()
+            if key != "content_hash"
+        }
+    )
+
+    with pytest.raises(ValueError, match="EVALUATION_REPLICATE_NOT_REGENERATED"):
+        evaluate_policy_replicate(manifest, tampered, tampered_estimation)
 
 
 def test_scientific_evaluation_retains_paired_seed_rows_and_typed_claims() -> None:

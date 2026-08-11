@@ -24,6 +24,12 @@ from typing import Any
 import numpy as np
 
 from .canonical import canonical_json, sha256
+from .fixture_boundaries import (
+    SYNTHETIC_FIXTURE_ID_PREFIX,
+    SYNTHETIC_FIXTURE_NAMESPACE,
+    SYNTHETIC_FIXTURE_ROLE,
+    SYNTHETIC_FIXTURE_SOURCE_KIND,
+)
 
 
 EVALUATION_MANIFEST_SCHEMA_VERSION = "scientific-evaluation-manifest.v1"
@@ -33,10 +39,10 @@ EVIDENCE_PACK_SCHEMA_VERSION = "scientific-evidence-pack.v1"
 # self-hash is not sufficient evidence that a campaign is still the registered
 # campaign, so verification also binds to this immutable value.
 FROZEN_MANIFEST_CONTENT_HASH = (
-    "sha256:6745f14bdc6f279209a0a0c02bccd4488dedd5f94ec92f7e67ccec39d73ef0ff"
+    "sha256:ca9944139b1434640e082ca1be9d67d97833e8a9830bcdde28412a16c21ebf97"
 )
 FROZEN_EVIDENCE_PACK_HASH = (
-    "sha256:6673879bafcbded3163c7dbb171167038d143942491c70c08d04688900e6d4a5"
+    "sha256:b32a129fbc2c63ba45d5c70173616c633c51802286ea68e43b152331da7550f7"
 )
 
 CLAIM_STATES = ("ACCEPTED", "REJECTED", "UNAVAILABLE", "INVALID")
@@ -56,6 +62,33 @@ POLICY_IDS = (
     "ALWAYS_EXPEDITE",
     "STATIC_LOAD_RULE",
     "ORACLE",
+)
+
+POLICY_COMPARISON_IDS = (
+    "PREDICTION_ONLY",
+    "CORRELATION_ONLY",
+    "ALWAYS_EXPEDITE",
+    "STATIC_LOAD_RULE",
+    "ORACLE",
+)
+
+UNAVAILABLE_CLAIM_SPECS = (
+    {
+        "claim_id": "CONSTRUCTION_CAUSAL_MAGNITUDE",
+        "reason_code": "CONSTRUCTION_MAGNITUDE_VALIDATION_UNAVAILABLE",
+    },
+    {
+        "claim_id": "ACTION_REALISM",
+        "reason_code": "ACTION_REALISM_VALIDATION_UNAVAILABLE",
+    },
+    {
+        "claim_id": "MANAGER_COMPREHENSION",
+        "reason_code": "MANAGER_COMPREHENSION_VALIDATION_UNAVAILABLE",
+    },
+    {
+        "claim_id": "PRACTITIONER_DOMAIN_VALIDATION",
+        "reason_code": "PRACTITIONER_DOMAIN_VALIDATION_UNAVAILABLE",
+    },
 )
 
 ORDINARY_TRUE_ATTE_DAYS = 1.5
@@ -256,6 +289,97 @@ def _metric_specs() -> dict[str, Any]:
             "formula": "actual_spend / positive_project_delay_days_recovered",
             "unit": "declared_currency_per_calendar_day_or_unavailable",
         },
+        "false_action_rate": {
+            "formula": "actions_when_oracle_prefers_monitoring / eligible_subjects",
+            "unit": "ratio",
+        },
+        "policy_utility": {
+            "formula": "policy_realized_net_value - monitoring_realized_net_value",
+            "unit": "declared_currency",
+        },
+        "abstention_precision": {
+            "formula": "abstained_off_support_subjects / off_support_subjects",
+            "unit": "ratio",
+        },
+        "abstention_coverage": {
+            "formula": "abstained_subjects / subject_cases",
+            "unit": "ratio",
+        },
+        "recommendation_rate": {
+            "formula": "recommendation_count / eligible_subjects",
+            "unit": "ratio_or_unavailable",
+        },
+        "monitoring_rate": {
+            "formula": "monitoring_count / eligible_subjects",
+            "unit": "ratio_or_unavailable",
+        },
+        "selection_rate": {
+            "formula": "selection_count / eligible_subjects",
+            "unit": "ratio_or_unavailable",
+        },
+        "authorization_rate": {
+            "formula": "authorized_count / eligible_subjects",
+            "unit": "ratio_or_not_authorized",
+        },
+    }
+
+
+def _external_boundary_specs() -> list[dict[str, Any]]:
+    """Declare the only external claims admitted to the evaluation."""
+
+    return [
+        {
+            "claim_id": "OLIST_ADAPTER_TRANSPORT_TIMING_VALIDATION",
+            "dataset_key": "olist-validation",
+            "mapping_manifest_id": "olist-validation.mapping.v1",
+            "source_kind": "olist",
+            "intended_role": "out_of_domain_validation",
+            "adapter_id": "olist-public-validation-adapter",
+            "adapter_version": "1.0.0",
+            "claim_scope": "adapter_transport_timing_validation",
+            "resolution_kind": "validation_only",
+            "mapping_hash": (
+                "sha256:ccd9eb87387990abd90d13ea967dc62dc801c842835bf2cd2699c43e9e05fdb7"
+            ),
+            "decision_support_evaluation_permitted": False,
+            "construction_causal_claim_permitted": False,
+        },
+        {
+            "claim_id": "SCMS_REJECTION_ABSTENTION",
+            "dataset_key": "scms-rejection-vignette",
+            "mapping_manifest_id": "scms-rejection-vignette.mapping.v1",
+            "source_kind": "scms",
+            "intended_role": "rejection_vignette",
+            "adapter_id": "scms-rejection-vignette-adapter",
+            "adapter_version": "1.0.0",
+            "claim_scope": "rejection_abstention",
+            "resolution_kind": "rejection_vignette_only",
+            "mapping_hash": (
+                "sha256:e9cfeda6fa099f28fae85eabf6375fc0f927982625e70321289e87686f11e4f8"
+            ),
+            "decision_support_evaluation_permitted": False,
+            "construction_causal_claim_permitted": False,
+        },
+    ]
+
+
+def _synthetic_fixture_boundary_spec() -> dict[str, Any]:
+    return {
+        "state": "TEST_ONLY_NOT_SHIPPED",
+        "namespace": SYNTHETIC_FIXTURE_NAMESPACE,
+        "id_prefix": SYNTHETIC_FIXTURE_ID_PREFIX,
+        "source_kind": SYNTHETIC_FIXTURE_SOURCE_KIND,
+        "intended_role": SYNTHETIC_FIXTURE_ROLE,
+        "approval_scope": "SYNTHETIC_CONFORMANCE_ONLY",
+        "labels": [
+            "SYNTHETIC",
+            "TEST_ONLY",
+            "NO_PRACTITIONER_VALIDATION",
+            "NOT_SHIPPED",
+        ],
+        "shipped_demo_claim": False,
+        "domain_validation_claim": False,
+        "external_evaluation_claim": False,
     }
 
 
@@ -413,6 +537,9 @@ def build_frozen_evaluation_manifest() -> dict[str, Any]:
         "scenarios": _scenario_specs(),
         "policies": _policy_specs(),
         "metrics": _metric_specs(),
+        "external_boundaries": _external_boundary_specs(),
+        "synthetic_fixture_boundary": _synthetic_fixture_boundary_spec(),
+        "unavailable_claims": [deepcopy(item) for item in UNAVAILABLE_CLAIM_SPECS],
         "repetitions": {
             "seed_policy_id": "sha256-coordinate-seeds",
             "seed_policy_version": "v1",
@@ -545,6 +672,12 @@ def verify_evaluation_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
         return _invalid_manifest("EVALUATION_DESIGN_VALIDATION_INVALID")
     if tuple(manifest.get("claim_states", ())) != CLAIM_STATES:
         return _invalid_manifest("EVALUATION_CLAIM_STATE_REGISTRY_INVALID")
+    if manifest.get("external_boundaries") != _external_boundary_specs():
+        return _invalid_manifest("EVALUATION_EXTERNAL_BOUNDARY_REGISTRY_INVALID")
+    if manifest.get("synthetic_fixture_boundary") != _synthetic_fixture_boundary_spec():
+        return _invalid_manifest("EVALUATION_SYNTHETIC_BOUNDARY_INVALID")
+    if manifest.get("unavailable_claims") != list(UNAVAILABLE_CLAIM_SPECS):
+        return _invalid_manifest("EVALUATION_UNAVAILABLE_CLAIM_REGISTRY_INVALID")
     return {
         "state": "ACCEPTED",
         "reason_code": "EVALUATION_MANIFEST_VALID",
@@ -1241,7 +1374,6 @@ def evaluate_evaluation_replicate(
         )
     estimate = float(estimator["estimate_days"])
     interval = estimator["interval"]
-    exposed_count = int(estimator["exposed_count"])
     denominator = int(estimator["denominator"])
     lower = float(interval["lower"])
     upper = float(interval["upper"])
@@ -1410,12 +1542,22 @@ def _operationally_eligible(row: Mapping[str, Any]) -> bool:
     )
 
 
+def _ratio_metric(
+    numerator: int | float,
+    denominator: int | float,
+) -> tuple[float | None, str]:
+    if denominator <= 0:
+        return None, "UNAVAILABLE"
+    return round(float(numerator) / float(denominator), 10), "AVAILABLE"
+
+
 def evaluate_policy_replicate(
     manifest: Mapping[str, Any],
     replicate: Mapping[str, Any],
     estimation: Mapping[str, Any],
     *,
     include_actions: bool = True,
+    verify_generation: bool = True,
 ) -> dict[str, Any]:
     """Score the six policies while keeping Oracle selection evaluator-only."""
 
@@ -1434,10 +1576,26 @@ def evaluate_policy_replicate(
         raise EvaluationIntegrityError("EVALUATION_ESTIMATION_BINDING_INVALID")
     observations = replicate.get("observations")
     truth = replicate.get("evaluator_only_truth")
-    if not isinstance(observations, list) or not isinstance(truth, Mapping):
+    if (
+        not isinstance(observations, list)
+        or not isinstance(truth, Mapping)
+        or truth.get("namespace")
+        != manifest.get("evaluator_only_boundary", {}).get("namespace")
+        or truth.get("schema_version") != "evaluation-only-truth.v1"
+        or truth.get("scenario_id") != replicate.get("scenario_id")
+        or truth.get("seed") != replicate.get("seed")
+    ):
         raise EvaluationIntegrityError("EVALUATION_REPLICATE_BOUNDARY_INVALID")
     if truth.get("content_hash") != _hash_truth(truth):
         raise EvaluationIntegrityError("EVALUATION_TRUTH_HASH_MISMATCH")
+    if verify_generation:
+        regenerated = generate_evaluation_replicate(
+            manifest,
+            scenario_id=str(replicate["scenario_id"]),
+            seed=int(replicate["seed"]),
+        )
+        if regenerated.get("content_hash") != replicate.get("content_hash"):
+            raise EvaluationIntegrityError("EVALUATION_REPLICATE_NOT_REGENERATED")
     responses = truth.get("action_responses")
     if not isinstance(responses, list) or len(responses) != len(observations):
         raise EvaluationIntegrityError("EVALUATION_ACTION_RESPONSE_BINDING_INVALID")
@@ -1455,9 +1613,17 @@ def evaluate_policy_replicate(
         policy_id: {
             "state": "ACCEPTED",
             "policy_id": policy_id,
+            "total_subject_count": len(observations),
             "eligible_subject_count": 0,
+            "ineligible_subject_count": 0,
             "action_count": 0,
+            "monitoring_count": 0,
+            "recommendation_count": 0,
+            "selection_count": 0,
+            "authorization_count": 0,
+            "false_action_count": 0,
             "realized_net_value": 0.0,
+            "monitoring_net_value": 0.0,
             "oracle_net_value": 0.0,
             "unnecessary_action_count": 0,
             "harmful_action_count": 0,
@@ -1470,6 +1636,8 @@ def evaluate_policy_replicate(
     boundaries: dict[str, Any] = {
         policy_id: {
             "truth_access": policy_id == "ORACLE",
+            "selection_truth_access": policy_id == "ORACLE",
+            "scoring_truth_access": True,
             "selection_inputs": ["evaluator_only_truth.action_responses"]
             if policy_id == "ORACLE"
             else ["public_observations", "typed_estimation_verdict"],
@@ -1489,6 +1657,8 @@ def evaluate_policy_replicate(
             metrics["oracle_net_value"] += oracle_positive_value
             if eligible:
                 metrics["eligible_subject_count"] += 1
+            else:
+                metrics["ineligible_subject_count"] += 1
             if policy_id == "COPILOT":
                 accelerate = (
                     copilot_permitted
@@ -1516,11 +1686,16 @@ def evaluate_policy_replicate(
             action = _ACCELERATION_ACTION if accelerate else _MONITOR_ACTION
             if include_actions:
                 metrics["actions"].append({"order_line_id": order_line_id, "action": action})
+            if not eligible:
+                continue
+            metrics["selection_count"] += 1
             if action != _ACCELERATION_ACTION:
+                metrics["monitoring_count"] += 1
                 continue
             if response.get("feasible") is not True:
                 raise EvaluationIntegrityError("EVALUATION_INFEASIBLE_POLICY_ACTION")
             metrics["action_count"] += 1
+            metrics["recommendation_count"] += 1
             metrics["realized_net_value"] += oracle_value_number
             metrics["preventable_delay_recovery"] += float(
                 response["protected_project_delay_days"]
@@ -1535,29 +1710,63 @@ def evaluate_policy_replicate(
         oracle_net_value = float(metrics["oracle_net_value"])
         realized_net_value = float(metrics["realized_net_value"])
         recovered_delay = float(metrics["preventable_delay_recovery"])
-        metrics["action_rate"] = (
-            round(int(metrics["action_count"]) / eligible_count, 10)
-            if eligible_count
-            else None
+        action_rate, action_rate_state = _ratio_metric(
+            int(metrics["action_count"]), eligible_count
+        )
+        monitoring_rate, monitoring_rate_state = _ratio_metric(
+            int(metrics["monitoring_count"]), eligible_count
+        )
+        recommendation_rate, recommendation_rate_state = _ratio_metric(
+            int(metrics["recommendation_count"]), eligible_count
+        )
+        selection_rate, selection_rate_state = _ratio_metric(
+            int(metrics["selection_count"]), eligible_count
+        )
+        false_action_count = int(metrics["unnecessary_action_count"])
+        false_action_rate, false_action_rate_state = _ratio_metric(
+            false_action_count, eligible_count
+        )
+        authorization_rate, authorization_rate_state = _ratio_metric(
+            int(metrics["authorization_count"]), eligible_count
         )
         metrics["realized_net_value"] = round(realized_net_value, 10)
         metrics["oracle_net_value"] = round(oracle_net_value, 10)
         metrics["raw_oracle_regret"] = round(oracle_net_value - realized_net_value, 10)
-        metrics["normalized_regret"] = (
-            round((oracle_net_value - realized_net_value) / oracle_net_value, 10)
-            if oracle_net_value > 0.0
-            else None
+        metrics["monitoring_net_value"] = round(float(metrics["monitoring_net_value"]), 10)
+        metrics["policy_utility"] = round(
+            realized_net_value - float(metrics["monitoring_net_value"]), 10
         )
-        metrics["unnecessary_action_rate"] = (
-            round(int(metrics["unnecessary_action_count"]) / eligible_count, 10)
-            if eligible_count
-            else None
+        metrics["regret_denominator"] = round(
+            oracle_net_value - float(metrics["monitoring_net_value"]), 10
         )
-        metrics["harmful_action_rate"] = (
-            round(int(metrics["harmful_action_count"]) / eligible_count, 10)
-            if eligible_count
-            else None
+        normalized_regret, normalized_regret_state = _ratio_metric(
+            metrics["raw_oracle_regret"], metrics["regret_denominator"]
         )
+        unnecessary_action_rate, unnecessary_action_rate_state = _ratio_metric(
+            int(metrics["unnecessary_action_count"]), eligible_count
+        )
+        harmful_action_rate, harmful_action_rate_state = _ratio_metric(
+            int(metrics["harmful_action_count"]), eligible_count
+        )
+        metrics["false_action_count"] = false_action_count
+        metrics["false_action_rate"] = false_action_rate
+        metrics["false_action_rate_state"] = false_action_rate_state
+        metrics["action_rate"] = action_rate
+        metrics["action_rate_state"] = action_rate_state
+        metrics["monitoring_rate"] = monitoring_rate
+        metrics["monitoring_rate_state"] = monitoring_rate_state
+        metrics["recommendation_rate"] = recommendation_rate
+        metrics["recommendation_rate_state"] = recommendation_rate_state
+        metrics["selection_rate"] = selection_rate
+        metrics["selection_rate_state"] = selection_rate_state
+        metrics["authorization_rate"] = authorization_rate
+        metrics["authorization_rate_state"] = authorization_rate_state
+        metrics["normalized_regret"] = normalized_regret
+        metrics["normalized_regret_state"] = normalized_regret_state
+        metrics["unnecessary_action_rate"] = unnecessary_action_rate
+        metrics["unnecessary_action_rate_state"] = unnecessary_action_rate_state
+        metrics["harmful_action_rate"] = harmful_action_rate
+        metrics["harmful_action_rate_state"] = harmful_action_rate_state
         metrics["preventable_delay_recovery"] = round(recovered_delay, 10)
         metrics["cost_per_protected_day"] = (
             round(float(metrics["actual_spend"]) / recovered_delay, 10)
@@ -1568,6 +1777,59 @@ def evaluate_policy_replicate(
             "AVAILABLE" if recovered_delay > 0.0 else "NO_POSITIVE_RECOVERY"
         )
         metrics["actual_spend"] = round(float(metrics["actual_spend"]), 10)
+        recommendation_state = "AVAILABLE"
+        if policy_id == "COPILOT" and not copilot_permitted:
+            recommendation_state = "UNAVAILABLE"
+        metrics["recommendation_state"] = recommendation_state
+        metrics["selection_state"] = selection_rate_state
+        metrics["monitoring_state"] = monitoring_rate_state
+        metrics["authorization_state"] = "NOT_AUTHORIZED"
+        metrics["metric_denominators"] = {
+            "action_rate": {
+                "numerator": int(metrics["action_count"]),
+                "denominator": eligible_count,
+                "state": action_rate_state,
+            },
+            "false_action_rate": {
+                "numerator": false_action_count,
+                "denominator": eligible_count,
+                "state": false_action_rate_state,
+            },
+            "recommendation_rate": {
+                "numerator": int(metrics["recommendation_count"]),
+                "denominator": eligible_count,
+                "state": recommendation_state
+                if recommendation_state == "UNAVAILABLE"
+                else recommendation_rate_state,
+            },
+            "monitoring_rate": {
+                "numerator": int(metrics["monitoring_count"]),
+                "denominator": eligible_count,
+                "state": monitoring_rate_state,
+            },
+            "selection_rate": {
+                "numerator": int(metrics["selection_count"]),
+                "denominator": eligible_count,
+                "state": selection_rate_state,
+            },
+            "authorization_rate": {
+                "numerator": int(metrics["authorization_count"]),
+                "denominator": eligible_count,
+                "state": "NOT_AUTHORIZED",
+            },
+            "normalized_regret": {
+                "numerator": metrics["raw_oracle_regret"],
+                "denominator": metrics["regret_denominator"],
+                "state": normalized_regret_state,
+            },
+            "cost_per_protected_day": {
+                "numerator": metrics["actual_spend"],
+                "denominator": metrics["preventable_delay_recovery"],
+                "state": "AVAILABLE"
+                if recovered_delay > 0.0
+                else "UNAVAILABLE",
+            },
+        }
         metrics["driver_recommendation"] = (
             policy_id == "COPILOT" and copilot_permitted
         )
@@ -1605,6 +1867,122 @@ def _claim(
     }
 
 
+def _external_boundary_claims(
+    manifest: Mapping[str, Any],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Verify the two public adapter boundaries without importing their rows."""
+
+    from .ingestion import PUBLIC_ADAPTER_SPECS
+
+    claims: list[dict[str, Any]] = []
+    projections: dict[str, Any] = {}
+    for declared in manifest.get("external_boundaries", []):
+        claim_id = str(declared.get("claim_id"))
+        dataset_key = str(declared.get("dataset_key"))
+        mapping_hash = declared.get("mapping_hash")
+        observed: dict[str, Any] = {
+            "dataset_key": dataset_key,
+            "mapping_manifest_id": declared.get("mapping_manifest_id"),
+            "source_kind": declared.get("source_kind"),
+            "intended_role": declared.get("intended_role"),
+            "adapter_id": declared.get("adapter_id"),
+            "adapter_version": declared.get("adapter_version"),
+            "claim_scope": declared.get("claim_scope"),
+            "decision_support_evaluation_permitted": declared.get(
+                "decision_support_evaluation_permitted"
+            ),
+            "construction_causal_claim_permitted": declared.get(
+                "construction_causal_claim_permitted"
+            ),
+        }
+        valid = False
+        try:
+            adapter = PUBLIC_ADAPTER_SPECS[dataset_key]
+            mapping_path = adapter.mapping_file
+            mapping = json.loads(mapping_path.read_text(encoding="utf-8"))
+            if not isinstance(mapping, Mapping):
+                raise TypeError("external mapping must be an object")
+            actual_mapping_hash = sha256(mapping_path.read_bytes())
+            common_valid = (
+                mapping_path.is_file()
+                and adapter.source_file.is_file()
+                and actual_mapping_hash == mapping_hash == adapter.mapping_sha256
+                and mapping.get("mapping_manifest_id")
+                == declared.get("mapping_manifest_id")
+                and mapping.get("source_kind") == declared.get("source_kind")
+                and mapping.get("intended_role") == declared.get("intended_role")
+                and mapping.get("adapter_id") == declared.get("adapter_id")
+                and mapping.get("adapter_version") == declared.get("adapter_version")
+                and mapping.get("raw_redistribution_policy") == "prohibited"
+            )
+            event_mappings = mapping.get("event_mappings", {})
+            advisory_mappings = mapping.get("advisory_context_mappings", {})
+            if claim_id == "OLIST_ADAPTER_TRANSPORT_TIMING_VALIDATION":
+                transport_timing = event_mappings.get("transport_timing")
+                advisory = advisory_mappings.get("transport_timing", {})
+                valid = common_valid and transport_timing == {
+                    "committed": "order_purchase_timestamp",
+                    "promised": "shipping_limit_date",
+                    "reached": "order_delivered_carrier_date",
+                    "assumed_timezone": "America/Sao_Paulo",
+                    "promise_known_at": "committed",
+                } and advisory.get("resolution_kind") == declared.get(
+                    "resolution_kind"
+                )
+                observed["transport_timing"] = transport_timing
+            elif claim_id == "SCMS_REJECTION_ABSTENTION":
+                rejection_mapping = event_mappings.get("rejection_mapping")
+                advisory = advisory_mappings.get("client_delivery", {})
+                valid = common_valid and rejection_mapping == {
+                    "po_sent_to_vendor": "PO Sent to Vendor Date",
+                    "scheduled_delivery": "Scheduled Delivery Date",
+                    "delivered_to_client": "Delivered to Client Date",
+                    "delivery_recorded": "Delivery Recorded Date",
+                    "promise_known_at": "unknown",
+                    "missingness_tokens": {
+                        "Date Not Captured": "unknown",
+                        "N/A - From RDC": "not_applicable",
+                    },
+                } and advisory.get("resolution_kind") == declared.get(
+                    "resolution_kind"
+                )
+                observed["rejection_mapping"] = rejection_mapping
+        except (AttributeError, OSError, TypeError, ValueError, KeyError):
+            valid = False
+        state = "ACCEPTED" if valid else "INVALID"
+        reason_code = (
+            "OLIST_TRANSPORT_TIMING_BOUNDARY_VERIFIED"
+            if claim_id == "OLIST_ADAPTER_TRANSPORT_TIMING_VALIDATION" and valid
+            else "SCMS_REJECTION_ABSTENTION_BOUNDARY_VERIFIED"
+            if claim_id == "SCMS_REJECTION_ABSTENTION" and valid
+            else "EXTERNAL_BOUNDARY_MAPPING_INVALID"
+        )
+        claims.append(
+            _claim(
+                claim_id=claim_id,
+                state=state,
+                observed=observed if valid else None,
+                threshold={
+                    "claim_scope": declared.get("claim_scope"),
+                    "intended_role": declared.get("intended_role"),
+                    "decision_support_evaluation_permitted": False,
+                    "construction_causal_claim_permitted": False,
+                },
+                reason_code=reason_code,
+                evidence_refs=[str(mapping_hash)] if valid else [],
+            )
+        )
+        projections[claim_id] = {
+            "state": state,
+            "dataset_key": dataset_key,
+            "mapping_manifest_id": declared.get("mapping_manifest_id"),
+            "mapping_hash": mapping_hash if valid else None,
+            "claim_scope": declared.get("claim_scope"),
+            "intended_role": declared.get("intended_role"),
+        }
+    return claims, projections
+
+
 def _gate_state(*, passes: bool, invalid_count: int) -> str:
     if invalid_count:
         return "INVALID"
@@ -1613,6 +1991,227 @@ def _gate_state(*, passes: bool, invalid_count: int) -> str:
 
 def _numeric_mean(values: Sequence[float]) -> float | None:
     return round(sum(values) / len(values), 10) if values else None
+
+
+def _aggregate_policy_metrics(
+    seed_rows: Sequence[Mapping[str, Any]],
+    *,
+    invalid_seed_count: int,
+) -> dict[str, Any]:
+    """Aggregate policy counts with explicit denominators and gate state."""
+
+    aggregates: dict[str, Any] = {}
+    integer_fields = (
+        "total_subject_count",
+        "eligible_subject_count",
+        "ineligible_subject_count",
+        "action_count",
+        "monitoring_count",
+        "recommendation_count",
+        "selection_count",
+        "authorization_count",
+        "false_action_count",
+        "unnecessary_action_count",
+        "harmful_action_count",
+    )
+    float_fields = (
+        "realized_net_value",
+        "monitoring_net_value",
+        "oracle_net_value",
+        "preventable_delay_recovery",
+        "actual_spend",
+    )
+    for policy_id in POLICY_IDS:
+        rows = [
+            row.get("policy_metrics", {}).get(policy_id)
+            for row in seed_rows
+            if isinstance(row.get("policy_metrics", {}).get(policy_id), Mapping)
+        ]
+        if not rows:
+            aggregates[policy_id] = {
+                "state": "INVALID" if invalid_seed_count else "UNAVAILABLE",
+                "valid_seed_count": 0,
+                "invalid_seed_count": invalid_seed_count,
+                "eligible_subject_denominator": 0,
+                "total_subject_denominator": 0,
+                "metric_denominators": {},
+                "authorization_count": 0,
+                "authorization_state": "NOT_AUTHORIZED",
+            }
+            continue
+        aggregate: dict[str, Any] = {
+            "state": "INVALID" if invalid_seed_count else "AVAILABLE",
+            "valid_seed_count": len(rows),
+            "invalid_seed_count": invalid_seed_count,
+        }
+        for field in integer_fields:
+            aggregate[field] = sum(int(row.get(field, 0)) for row in rows)
+        for field in float_fields:
+            aggregate[field] = round(
+                sum(float(row.get(field, 0.0)) for row in rows), 10
+            )
+        eligible_denominator = int(aggregate["eligible_subject_count"])
+        aggregate["eligible_subject_denominator"] = eligible_denominator
+        aggregate["total_subject_denominator"] = int(
+            aggregate["total_subject_count"]
+        )
+        aggregate["raw_oracle_regret"] = round(
+            float(aggregate["oracle_net_value"])
+            - float(aggregate["realized_net_value"]),
+            10,
+        )
+        aggregate["policy_utility"] = round(
+            float(aggregate["realized_net_value"])
+            - float(aggregate["monitoring_net_value"]),
+            10,
+        )
+        aggregate["regret_denominator"] = round(
+            float(aggregate["oracle_net_value"])
+            - float(aggregate["monitoring_net_value"]),
+            10,
+        )
+        aggregate["normalized_regret"], normalized_regret_state = _ratio_metric(
+            aggregate["raw_oracle_regret"], aggregate["regret_denominator"]
+        )
+        aggregate["action_rate"], action_rate_state = _ratio_metric(
+            aggregate["action_count"], eligible_denominator
+        )
+        aggregate["false_action_rate"], false_action_rate_state = _ratio_metric(
+            aggregate["false_action_count"], eligible_denominator
+        )
+        aggregate["monitoring_rate"], monitoring_rate_state = _ratio_metric(
+            aggregate["monitoring_count"], eligible_denominator
+        )
+        aggregate["recommendation_rate"], recommendation_rate_state = _ratio_metric(
+            aggregate["recommendation_count"], eligible_denominator
+        )
+        aggregate["selection_rate"], selection_rate_state = _ratio_metric(
+            aggregate["selection_count"], eligible_denominator
+        )
+        aggregate["authorization_rate"], _ = _ratio_metric(
+            aggregate["authorization_count"], eligible_denominator
+        )
+        aggregate["unnecessary_action_rate"], unnecessary_rate_state = _ratio_metric(
+            aggregate["unnecessary_action_count"], eligible_denominator
+        )
+        aggregate["harmful_action_rate"], harmful_rate_state = _ratio_metric(
+            aggregate["harmful_action_count"], eligible_denominator
+        )
+        aggregate["cost_per_protected_day"] = (
+            round(
+                float(aggregate["actual_spend"])
+                / float(aggregate["preventable_delay_recovery"]),
+                10,
+            )
+            if float(aggregate["preventable_delay_recovery"]) > 0.0
+            else None
+        )
+        aggregate["cost_per_protected_day_state"] = (
+            "AVAILABLE"
+            if float(aggregate["preventable_delay_recovery"]) > 0.0
+            else "NO_POSITIVE_RECOVERY"
+        )
+        recommendation_state = (
+            "UNAVAILABLE"
+            if any(row.get("recommendation_state") == "UNAVAILABLE" for row in rows)
+            else recommendation_rate_state
+        )
+        aggregate["recommendation_state"] = recommendation_state
+        aggregate["selection_state"] = selection_rate_state
+        aggregate["monitoring_state"] = monitoring_rate_state
+        aggregate["authorization_state"] = "NOT_AUTHORIZED"
+        aggregate["metric_denominators"] = {
+            "action_rate": {
+                "numerator": aggregate["action_count"],
+                "denominator": eligible_denominator,
+                "state": action_rate_state,
+            },
+            "false_action_rate": {
+                "numerator": aggregate["false_action_count"],
+                "denominator": eligible_denominator,
+                "state": false_action_rate_state,
+            },
+            "recommendation_rate": {
+                "numerator": aggregate["recommendation_count"],
+                "denominator": eligible_denominator,
+                "state": recommendation_state,
+            },
+            "monitoring_rate": {
+                "numerator": aggregate["monitoring_count"],
+                "denominator": eligible_denominator,
+                "state": monitoring_rate_state,
+            },
+            "selection_rate": {
+                "numerator": aggregate["selection_count"],
+                "denominator": eligible_denominator,
+                "state": selection_rate_state,
+            },
+            "authorization_rate": {
+                "numerator": aggregate["authorization_count"],
+                "denominator": eligible_denominator,
+                "state": "NOT_AUTHORIZED",
+            },
+            "normalized_regret": {
+                "numerator": aggregate["raw_oracle_regret"],
+                "denominator": aggregate["regret_denominator"],
+                "state": normalized_regret_state,
+            },
+            "cost_per_protected_day": {
+                "numerator": aggregate["actual_spend"],
+                "denominator": aggregate["preventable_delay_recovery"],
+                "state": "AVAILABLE"
+                if float(aggregate["preventable_delay_recovery"]) > 0.0
+                else "UNAVAILABLE",
+            },
+        }
+        aggregates[policy_id] = aggregate
+    return aggregates
+
+
+def _aggregate_abstention_metrics(
+    seed_rows: Sequence[Mapping[str, Any]],
+    *,
+    invalid_seed_count: int,
+) -> dict[str, Any]:
+    accepted: list[Mapping[str, Any]] = []
+    for row in seed_rows:
+        abstention = row.get("abstention")
+        if isinstance(abstention, Mapping) and abstention.get("state") == "ACCEPTED":
+            accepted.append(abstention)
+    off_support_denominator = sum(
+        int(item.get("off_support_subjects", 0)) for item in accepted
+    )
+    abstained_subject_count = sum(
+        int(item.get("abstained_subjects", 0)) for item in accepted
+    )
+    subject_case_denominator = sum(
+        len(item.get("subject_results", [])) for item in accepted
+    )
+    precision, precision_state = _ratio_metric(
+        abstained_subject_count, off_support_denominator
+    )
+    coverage, coverage_state = _ratio_metric(
+        abstained_subject_count, subject_case_denominator
+    )
+    if invalid_seed_count:
+        state = "INVALID"
+    elif accepted:
+        state = "AVAILABLE"
+    else:
+        state = "NOT_APPLICABLE"
+    return {
+        "state": state,
+        "accepted_seed_count": len(accepted),
+        "invalid_seed_count": invalid_seed_count,
+        "off_support_subject_numerator": abstained_subject_count,
+        "off_support_subject_denominator": off_support_denominator,
+        "subject_abstained_numerator": abstained_subject_count,
+        "subject_case_denominator": subject_case_denominator,
+        "abstention_precision": precision,
+        "abstention_precision_state": precision_state,
+        "abstention_coverage": coverage,
+        "abstention_coverage_state": coverage_state,
+    }
 
 
 def _paired_policy_bootstrap(
@@ -1669,6 +2268,9 @@ def _paired_policy_bootstrap(
     )
     return {
         "challenger_policy_id": challenger_id,
+        "comparison_role": "EVALUATOR_CEILING"
+        if challenger_id == "ORACLE"
+        else "POLICY_CHALLENGER",
         "paired_seed_count": len(seed_rows),
         "mean_regret_reduction": mean_improvement,
         "oracle_over_monitor_opportunity": opportunity,
@@ -1907,6 +2509,7 @@ def run_scientific_evaluation(
                         replicate,
                         estimation,
                         include_actions=False,
+                        verify_generation=False,
                     )
                     policy_metrics = {
                         policy_id: {
@@ -1974,6 +2577,7 @@ def run_scientific_evaluation(
                             replay_replicate,
                             replay_estimation,
                             include_actions=False,
+                            verify_generation=False,
                         )
                         replay_policy_metrics = {
                             policy_id: {
@@ -2186,9 +2790,24 @@ def run_scientific_evaluation(
                 ]
             ),
         }
+        policy_aggregates = _aggregate_policy_metrics(
+            valid_rows,
+            invalid_seed_count=aggregate["invalid_seed_count"],
+        )
+        aggregate["policy_metrics"] = policy_aggregates
+        aggregate["abstention_metrics"] = _aggregate_abstention_metrics(
+            valid_rows,
+            invalid_seed_count=aggregate["invalid_seed_count"],
+        )
+        aggregate["abstention_precision"] = aggregate["abstention_metrics"][
+            "abstention_precision"
+        ]
+        aggregate["abstention_coverage"] = aggregate["abstention_metrics"][
+            "abstention_coverage"
+        ]
         paired_comparisons: dict[str, Any] = {}
         if valid_rows:
-            for challenger_id in ("PREDICTION_ONLY", "CORRELATION_ONLY", "STATIC_LOAD_RULE"):
+            for challenger_id in POLICY_COMPARISON_IDS:
                 paired_comparisons[challenger_id] = _paired_policy_bootstrap(
                     active_manifest,
                     scenario_id=active_scenario_id,
@@ -2375,9 +2994,10 @@ def run_scientific_evaluation(
                 active_scenario_id == "TRUE_EFFECT"
                 or (
                     active_scenario_id == "PLANTED_CORRELATE"
-                    and challenger_id in {"PREDICTION_ONLY", "CORRELATION_ONLY"}
+                    and challenger_id
+                    in {"PREDICTION_ONLY", "CORRELATION_ONLY", "ALWAYS_EXPEDITE"}
                 )
-            ):
+            ) and challenger_id != "ORACLE":
                 scenario_claims.append(
                     _claim(
                         claim_id=f"{active_scenario_id}_{challenger_id}_DECISION_VALUE",
@@ -2399,6 +3019,32 @@ def run_scientific_evaluation(
                     )
                 )
         result["claims"].extend(scenario_claims)
+    external_claims, external_boundaries = _external_boundary_claims(active_manifest)
+    result["external_boundaries"] = external_boundaries
+    result["claims"].extend(external_claims)
+    synthetic_boundary = deepcopy(active_manifest["synthetic_fixture_boundary"])
+    result["synthetic_fixture_boundary"] = synthetic_boundary
+    synthetic_boundary_valid = (
+        synthetic_boundary.get("state") == "TEST_ONLY_NOT_SHIPPED"
+        and synthetic_boundary.get("domain_validation_claim") is False
+        and synthetic_boundary.get("shipped_demo_claim") is False
+    )
+    result["claims"].append(
+        _claim(
+            claim_id="SYNTHETIC_APPROVAL_FIXTURE_BOUNDARY",
+            state="ACCEPTED" if synthetic_boundary_valid else "INVALID",
+            observed=synthetic_boundary,
+            threshold={
+                "state": "TEST_ONLY_NOT_SHIPPED",
+                "domain_validation_claim": False,
+                "shipped_demo_claim": False,
+            },
+            reason_code="SYNTHETIC_APPROVAL_FIXTURES_EXCLUDED"
+            if synthetic_boundary_valid
+            else "SYNTHETIC_APPROVAL_FIXTURE_BOUNDARY_INVALID",
+            evidence_refs=[active_manifest["content_hash"]],
+        )
+    )
     result["runtime"] = _runtime_fingerprint(active_manifest)
     result["integrity"] = {
         "state": "ACCEPTED" if invalid_count == 0 else "INVALID",
@@ -2488,7 +3134,32 @@ def run_scientific_evaluation(
             ),
         ]
     )
-    non_blocking_claims = {"HUMAN_TRUST_AND_COMPREHENSION"}
+    result["claims"].extend(
+        [
+            _claim(
+                claim_id=str(item["claim_id"]),
+                state="UNAVAILABLE",
+                observed=None,
+                threshold=None,
+                reason_code=str(item["reason_code"]),
+                evidence_refs=[],
+            )
+            for item in UNAVAILABLE_CLAIM_SPECS
+        ]
+    )
+    result["unavailable_claims"] = [
+        {
+            "claim_id": claim["claim_id"],
+            "state": claim["state"],
+            "reason_code": claim["reason_code"],
+        }
+        for claim in result["claims"]
+        if claim["state"] == "UNAVAILABLE"
+    ]
+    non_blocking_claims = {
+        "HUMAN_TRUST_AND_COMPREHENSION",
+        *[str(item["claim_id"]) for item in UNAVAILABLE_CLAIM_SPECS],
+    }
     required_claim_states = [
         claim["state"]
         for claim in result["claims"]
