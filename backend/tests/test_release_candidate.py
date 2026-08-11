@@ -84,7 +84,7 @@ def test_render_release_assets_binds_the_vercel_guard_to_the_same_identity(tmp_p
     assert release["release_candidate_id"] == "rc-test"
     assert release["build_manifest_id"] == "build-test"
     config = json.loads((output / "vercel.json").read_text(encoding="utf-8"))
-    assert not any(item["source"] == "/api/:path*" for item in config["rewrites"])
+    assert config["rewrites"] == []
     guard = (output / "api" / "release.ts").read_text(encoding="utf-8")
     assert "rc-test" in guard
     assert "build-test" in guard

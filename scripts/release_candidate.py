@@ -251,7 +251,7 @@ def _render_vercel_config(source_root: Path, railway_origin: str) -> dict[str, A
         for rewrite in rendered["rewrites"]
         if not (
             isinstance(rewrite, dict)
-            and rewrite.get("source") == "/api/:path*"
+            and rewrite.get("source") in {"/api/:path*", "/(.*)"}
         )
     ]
     return rendered
