@@ -248,14 +248,18 @@ def _render_vercel_config(source_root: Path, railway_origin: str) -> dict[str, A
     rendered.pop("buildCommand", None)
     rendered.pop("installCommand", None)
     rendered.pop("outputDirectory", None)
-    rendered["rewrites"] = [
-        rewrite
-        for rewrite in rendered["rewrites"]
-        if not (
-            isinstance(rewrite, dict)
-            and rewrite.get("source") in {"/api/:path*", "/(.*)"}
-        )
-    ]
+    rendered["rewrites"] = []
+    for rewrite in rewrites:
+        if not isinstance(rewrite, dict):
+            raise ReleaseContractError("VERCEL_CONFIG_INVALID")
+        rendered_rewrite = dict(rewrite)
+        destination = rendered_rewrite.get("destination")
+        if isinstance(destination, str):
+            rendered_rewrite["destination"] = destination.replace(
+                "__RAILWAY_PUBLIC_ORIGIN__",
+                railway_origin,
+            )
+        rendered["rewrites"].append(rendered_rewrite)
     return rendered
 
 

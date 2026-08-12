@@ -61,6 +61,12 @@ CORE_PUBLIC_ORIGIN=https://<vercel-production-origin>
 CORE_GEMINI_ENABLED=true
 ```
 
+The hosted workflow also sets a capacity-safe quota profile for Railway's
+500 MB trial-volume allowance: `disk_warning_bytes=268435456` and
+`disk_block_bytes=134217728`. The qualification protocol reads the selected
+`railway_state_root` and verifies that both thresholds fit within observed free
+capacity; paid-volume defaults remain available for larger deployments.
+
 If Gemini drafting is enabled, put the existing raw Gemini key in the Railway
 service's secret variable named `CORE_GEMINI_API_KEY`. A Windows environment
 variable is local machine configuration; Railway does not read it automatically.
@@ -81,8 +87,9 @@ release workflow run and its artifact, for example:
 gh workflow run hosted-qualification.yml -f release_run_id=31550053794 -f release_artifact_name=release-rc-c36a01fc9358 -f budget_alert_record_ref=<railway-alert-ref> -f budget_alert_actor=<operator> -f budget_alert_observed_at=2026-08-12T00:00:00Z
 ```
 
-For a deliberate fresh Railway volume, dispatch the release workflow with an
-explicit new state root, for example `-f railway_state_root=/data/core2`.
+For a deliberate fresh Railway state root, dispatch the release workflow with
+an explicit new root, for example `-f railway_state_root=/data/core2`, and use
+the same root when dispatching hosted qualification.
 The default remains `/data/core`; the selected root must be below the mounted
 Railway volume and must already contain either a matching sealed state or no
 state so the application can initialize it for that exact release.

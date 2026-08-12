@@ -12,7 +12,7 @@ from backend.app.hosted_qualification import (
     verify_hosted_attestation,
     write_hosted_attestation,
 )
-from scripts.hosted_qualification import _write_failure_evidence
+from scripts.hosted_qualification import _disk_policy_is_safe, _write_failure_evidence
 
 
 def _checks(*, blocked: str | None = None) -> list[dict[str, object]]:
@@ -139,6 +139,17 @@ def test_qualification_failure_has_typed_immutable_evidence(tmp_path: Path) -> N
     assert payload["status"] == "BLOCKED"
     assert payload["code"] == "RELEASE_MANIFEST_INVALID"
     assert (tmp_path / "hosted-qualification-failure.sha256").is_file()
+
+
+def test_disk_policy_is_checked_against_observed_free_capacity() -> None:
+    assert _disk_policy_is_safe(
+        {"disk_warning_bytes": 256 * 1024 * 1024, "disk_block_bytes": 128 * 1024 * 1024},
+        {"current_mb": 85.0, "limit_mb": 500.0},
+    )
+    assert not _disk_policy_is_safe(
+        {"disk_warning_bytes": 512 * 1024 * 1024, "disk_block_bytes": 256 * 1024 * 1024},
+        {"current_mb": 300.0, "limit_mb": 500.0},
+    )
 
 
 def verify_hosted_attestation_payload(payload: dict[str, object]) -> None:

@@ -11,6 +11,11 @@ on:
         description: "Artifact name from that run, for example release-rc-c36a01fc9358"
         required: true
         type: string
+      railway_state_root:
+        description: "Railway volume state root used by the selected release"
+        required: false
+        default: "/data/core"
+        type: string
       budget_alert_record_ref:
         description: "Railway billing alert reference or URL recorded by the operator"
         required: true
@@ -127,6 +132,7 @@ jobs:
           VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
           VERCEL_PUBLIC_ORIGIN: ${{ vars.VERCEL_PUBLIC_ORIGIN }}
           RAILWAY_PUBLIC_ORIGIN: ${{ vars.RAILWAY_PUBLIC_ORIGIN }}
+          RAILWAY_STATE_ROOT: ${{ inputs.railway_state_root }}
           HOSTED_BUDGET_ALERT_EVIDENCE: .release/hosted-qualification/budget-alert.json
         run: |
           set -euo pipefail
@@ -137,6 +143,7 @@ jobs:
             --output-dir .release/hosted-qualification \
             --vercel-origin "$VERCEL_PUBLIC_ORIGIN" \
             --railway-origin "$RAILWAY_PUBLIC_ORIGIN" \
+            --railway-state-root "$RAILWAY_STATE_ROOT" \
             --railway-project-id "$RAILWAY_PROJECT_ID" \
             --railway-service-id "$RAILWAY_SERVICE_ID" \
             --railway-environment-id "$RAILWAY_ENVIRONMENT_ID" \

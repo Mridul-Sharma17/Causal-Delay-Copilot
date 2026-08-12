@@ -64,6 +64,7 @@ permissions:
 env:
   RAILWAY_CLI_VERSION: 5.37.4
   VERCEL_CLI_VERSION: 58.9.3
+  HOSTED_CORE_QUOTAS_JSON: '{"disk_warning_bytes":268435456,"disk_block_bytes":134217728}'
 
 jobs:
   build:
@@ -203,6 +204,7 @@ jobs:
           IMAGE_DIGEST: ${{ needs.build.outputs.image_digest }}
           CORE_PUBLIC_ORIGIN: ${{ vars.VERCEL_PUBLIC_ORIGIN }}
           CORE_STATE_ROOT: ${{ inputs.railway_state_root }}
+          CORE_QUOTAS_JSON: ${{ env.HOSTED_CORE_QUOTAS_JSON }}
         run: |
           set -euo pipefail
           RAILWAY=(npx --yes "@railway/cli@${RAILWAY_CLI_VERSION}")
@@ -210,6 +212,7 @@ jobs:
           "${RAILWAY[@]}" variable set "CORE_STATE_ROOT=$CORE_STATE_ROOT" --project "$RAILWAY_PROJECT_ID" --service "$RAILWAY_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID" --skip-deploys
           "${RAILWAY[@]}" variable set "CORE_RAILWAY_VOLUME_PATH=/data" --project "$RAILWAY_PROJECT_ID" --service "$RAILWAY_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID" --skip-deploys
           "${RAILWAY[@]}" variable set "CORE_PUBLIC_ORIGIN=$CORE_PUBLIC_ORIGIN" --project "$RAILWAY_PROJECT_ID" --service "$RAILWAY_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID" --skip-deploys
+          printf '%s' "$CORE_QUOTAS_JSON" | "${RAILWAY[@]}" variable set CORE_QUOTAS --stdin --project "$RAILWAY_PROJECT_ID" --service "$RAILWAY_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID" --skip-deploys
           "${RAILWAY[@]}" variable set "CORE_RELEASE_CANDIDATE_ID=$RELEASE_CANDIDATE_ID" --project "$RAILWAY_PROJECT_ID" --service "$RAILWAY_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID" --skip-deploys
           "${RAILWAY[@]}" variable set "CORE_BUILD_MANIFEST_ID=$BUILD_MANIFEST_ID" --project "$RAILWAY_PROJECT_ID" --service "$RAILWAY_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID" --skip-deploys
           IMAGE="$IMAGE_REF@$IMAGE_DIGEST"
@@ -388,6 +391,7 @@ jobs:
           RAILWAY_ENVIRONMENT_ID: ${{ secrets.RAILWAY_ENVIRONMENT_ID }}
           CORE_PUBLIC_ORIGIN: ${{ vars.VERCEL_PUBLIC_ORIGIN }}
           CORE_STATE_ROOT: ${{ inputs.railway_state_root }}
+          CORE_QUOTAS_JSON: ${{ env.HOSTED_CORE_QUOTAS_JSON }}
           ROLLBACK_SOURCE_COMMIT: ${{ inputs.rollback_source_commit }}
           ROLLBACK_IMAGE_REF: ${{ inputs.rollback_image_ref }}
           ROLLBACK_IMAGE_DIGEST: ${{ inputs.rollback_image_digest }}
@@ -402,6 +406,7 @@ jobs:
           "${RAILWAY[@]}" variable set "CORE_STATE_ROOT=$CORE_STATE_ROOT" --project "$RAILWAY_PROJECT_ID" --service "$RAILWAY_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID" --skip-deploys
           "${RAILWAY[@]}" variable set "CORE_RAILWAY_VOLUME_PATH=/data" --project "$RAILWAY_PROJECT_ID" --service "$RAILWAY_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID" --skip-deploys
           "${RAILWAY[@]}" variable set "CORE_PUBLIC_ORIGIN=$CORE_PUBLIC_ORIGIN" --project "$RAILWAY_PROJECT_ID" --service "$RAILWAY_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID" --skip-deploys
+          printf '%s' "$CORE_QUOTAS_JSON" | "${RAILWAY[@]}" variable set CORE_QUOTAS --stdin --project "$RAILWAY_PROJECT_ID" --service "$RAILWAY_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID" --skip-deploys
           "${RAILWAY[@]}" variable set "CORE_RELEASE_CANDIDATE_ID=$ROLLBACK_RELEASE_CANDIDATE_ID" --project "$RAILWAY_PROJECT_ID" --service "$RAILWAY_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID" --skip-deploys
           "${RAILWAY[@]}" variable set "CORE_BUILD_MANIFEST_ID=$ROLLBACK_BUILD_MANIFEST_ID" --project "$RAILWAY_PROJECT_ID" --service "$RAILWAY_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID" --skip-deploys
           IMAGE="$ROLLBACK_IMAGE_REF@$ROLLBACK_IMAGE_DIGEST"

@@ -44,6 +44,39 @@ class QualificationRunError(RuntimeError):
     """A qualification collector failed before it could complete a check."""
 
 
+def _railway_runtime_root(state_root: str) -> str:
+    normalized = state_root.rstrip("/")
+    if normalized != "/data" and not normalized.startswith("/data/"):
+        raise QualificationRunError("RAILWAY_STATE_ROOT_INVALID")
+    return f"{normalized}/runtime"
+
+
+def _disk_policy_is_safe(
+    policy: Mapping[str, Any],
+    metric: Mapping[str, Any] | None,
+) -> bool:
+    if not isinstance(metric, Mapping):
+        return False
+    warning = policy.get("disk_warning_bytes")
+    block = policy.get("disk_block_bytes")
+    current_mb = metric.get("current_mb")
+    limit_mb = metric.get("limit_mb")
+    numeric = (int, float)
+    if not all(
+        isinstance(value, numeric) and not isinstance(value, bool)
+        for value in (warning, block, current_mb, limit_mb)
+    ):
+        return False
+    available_bytes = (float(limit_mb) - float(current_mb)) * 1024 * 1024
+    return (
+        float(current_mb) >= 0
+        and float(limit_mb) > float(current_mb)
+        and 0 < int(block)
+        and int(block) <= int(warning)
+        and int(warning) <= available_bytes
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class CommandResult:
     returncode: int
@@ -512,6 +545,7 @@ class QualificationCollector:
             self._qualify_redacted_surface(self._public_health, self._public_release)
 
     def _collect_runtime_files(self, railway_prefix: list[str]) -> None:
+        runtime_root = _railway_runtime_root(str(self.args.railway_state_root))
         listing_result = self.ledger.run(
             railway_prefix
             + [
@@ -524,7 +558,7 @@ class QualificationCollector:
                 "--environment",
                 self.args.railway_environment_id,
                 "list",
-                "/data/core/runtime",
+                runtime_root,
                 "--json",
             ],
             cli="railway",
@@ -552,7 +586,7 @@ class QualificationCollector:
                         "--environment",
                         self.args.railway_environment_id,
                         "download",
-                        f"/data/core/runtime/{name}",
+                        f"{runtime_root}/{name}",
                         str(destination),
                     ],
                     cli="railway",
@@ -656,27 +690,26 @@ class QualificationCollector:
             ),
             None,
         )
-        disk_policy = (
-            self.runtime_policy.get("disk_warning_bytes") == 1_073_741_824
-            and self.runtime_policy.get("disk_block_bytes") == 536_870_912
-        )
-        capacity_observed = (
-            isinstance(metric, Mapping)
+        disk_policy = _disk_policy_is_safe(self.runtime_policy, metric)
+        available_mb = (
+            metric["limit_mb"] - metric["current_mb"]
+            if isinstance(metric, Mapping)
             and isinstance(metric.get("current_mb"), (int, float))
             and isinstance(metric.get("limit_mb"), (int, float))
-            and metric["current_mb"] < metric["limit_mb"]
+            else None
         )
         self._set(
             "disk_thresholds",
-            "VERIFIED" if disk_policy and capacity_observed else "BLOCKED",
+            "VERIFIED" if disk_policy else "BLOCKED",
             "DISK_THRESHOLDS_VERIFIED"
-            if disk_policy and capacity_observed
+            if disk_policy
             else "DISK_THRESHOLDS_UNAVAILABLE",
             {
                 "warning_bytes": self.runtime_policy.get("disk_warning_bytes"),
                 "block_bytes": self.runtime_policy.get("disk_block_bytes"),
                 "current_mb": metric.get("current_mb") if isinstance(metric, Mapping) else None,
                 "limit_mb": metric.get("limit_mb") if isinstance(metric, Mapping) else None,
+                "available_mb": available_mb,
             },
         )
 
@@ -1065,6 +1098,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--vercel-origin", required=True)
     parser.add_argument("--railway-origin", required=True)
+    parser.add_argument(
+        "--railway-state-root",
+        default=os.environ.get("RAILWAY_STATE_ROOT", "/data/core"),
+    )
     parser.add_argument("--railway-project-id", default=os.environ.get("RAILWAY_PROJECT_ID", ""))
     parser.add_argument("--railway-service-id", default=os.environ.get("RAILWAY_SERVICE_ID", ""))
     parser.add_argument("--railway-environment-id", default=os.environ.get("RAILWAY_ENVIRONMENT_ID", ""))
