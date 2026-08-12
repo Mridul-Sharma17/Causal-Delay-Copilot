@@ -81,6 +81,12 @@ release workflow run and its artifact, for example:
 gh workflow run hosted-qualification.yml -f release_run_id=31550053794 -f release_artifact_name=release-rc-c36a01fc9358 -f budget_alert_record_ref=<railway-alert-ref> -f budget_alert_actor=<operator> -f budget_alert_observed_at=2026-08-12T00:00:00Z
 ```
 
+For a deliberate fresh Railway volume, dispatch the release workflow with an
+explicit new state root, for example `-f railway_state_root=/data/core2`.
+The default remains `/data/core`; the selected root must be below the mounted
+Railway volume and must already contain either a matching sealed state or no
+state so the application can initialize it for that exact release.
+
 The workflow fetches the `source_commit` in the downloaded release manifest
 for exact deployment-configuration checks, checks only the public Vercel
 origin for browser behavior,

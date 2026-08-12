@@ -15,6 +15,11 @@ on:
         description: "Immutable source commit for a deployment"
         required: false
         type: string
+      railway_state_root:
+        description: "Railway volume-relative Core state root"
+        required: false
+        default: "/data/core"
+        type: string
       rollback_source_commit:
         description: "Previously released source commit for a rollback"
         required: false
@@ -197,11 +202,12 @@ jobs:
           IMAGE_REF: ${{ needs.build.outputs.image_ref }}
           IMAGE_DIGEST: ${{ needs.build.outputs.image_digest }}
           CORE_PUBLIC_ORIGIN: ${{ vars.VERCEL_PUBLIC_ORIGIN }}
+          CORE_STATE_ROOT: ${{ inputs.railway_state_root }}
         run: |
           set -euo pipefail
           RAILWAY=(npx --yes "@railway/cli@${RAILWAY_CLI_VERSION}")
           "${RAILWAY[@]}" variable set "CORE_PROFILE=HOSTED" --project "$RAILWAY_PROJECT_ID" --service "$RAILWAY_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID" --skip-deploys
-          "${RAILWAY[@]}" variable set "CORE_STATE_ROOT=/data/core" --project "$RAILWAY_PROJECT_ID" --service "$RAILWAY_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID" --skip-deploys
+          "${RAILWAY[@]}" variable set "CORE_STATE_ROOT=$CORE_STATE_ROOT" --project "$RAILWAY_PROJECT_ID" --service "$RAILWAY_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID" --skip-deploys
           "${RAILWAY[@]}" variable set "CORE_RAILWAY_VOLUME_PATH=/data" --project "$RAILWAY_PROJECT_ID" --service "$RAILWAY_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID" --skip-deploys
           "${RAILWAY[@]}" variable set "CORE_PUBLIC_ORIGIN=$CORE_PUBLIC_ORIGIN" --project "$RAILWAY_PROJECT_ID" --service "$RAILWAY_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID" --skip-deploys
           "${RAILWAY[@]}" variable set "CORE_RELEASE_CANDIDATE_ID=$RELEASE_CANDIDATE_ID" --project "$RAILWAY_PROJECT_ID" --service "$RAILWAY_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID" --skip-deploys
@@ -381,6 +387,7 @@ jobs:
           RAILWAY_SERVICE_ID: ${{ secrets.RAILWAY_SERVICE_ID }}
           RAILWAY_ENVIRONMENT_ID: ${{ secrets.RAILWAY_ENVIRONMENT_ID }}
           CORE_PUBLIC_ORIGIN: ${{ vars.VERCEL_PUBLIC_ORIGIN }}
+          CORE_STATE_ROOT: ${{ inputs.railway_state_root }}
           ROLLBACK_SOURCE_COMMIT: ${{ inputs.rollback_source_commit }}
           ROLLBACK_IMAGE_REF: ${{ inputs.rollback_image_ref }}
           ROLLBACK_IMAGE_DIGEST: ${{ inputs.rollback_image_digest }}
@@ -392,7 +399,7 @@ jobs:
           test "$(git rev-parse FETCH_HEAD)" = "$ROLLBACK_SOURCE_COMMIT"
           RAILWAY=(npx --yes "@railway/cli@${RAILWAY_CLI_VERSION}")
           "${RAILWAY[@]}" variable set "CORE_PROFILE=HOSTED" --project "$RAILWAY_PROJECT_ID" --service "$RAILWAY_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID" --skip-deploys
-          "${RAILWAY[@]}" variable set "CORE_STATE_ROOT=/data/core" --project "$RAILWAY_PROJECT_ID" --service "$RAILWAY_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID" --skip-deploys
+          "${RAILWAY[@]}" variable set "CORE_STATE_ROOT=$CORE_STATE_ROOT" --project "$RAILWAY_PROJECT_ID" --service "$RAILWAY_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID" --skip-deploys
           "${RAILWAY[@]}" variable set "CORE_RAILWAY_VOLUME_PATH=/data" --project "$RAILWAY_PROJECT_ID" --service "$RAILWAY_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID" --skip-deploys
           "${RAILWAY[@]}" variable set "CORE_PUBLIC_ORIGIN=$CORE_PUBLIC_ORIGIN" --project "$RAILWAY_PROJECT_ID" --service "$RAILWAY_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID" --skip-deploys
           "${RAILWAY[@]}" variable set "CORE_RELEASE_CANDIDATE_ID=$ROLLBACK_RELEASE_CANDIDATE_ID" --project "$RAILWAY_PROJECT_ID" --service "$RAILWAY_SERVICE_ID" --environment "$RAILWAY_ENVIRONMENT_ID" --skip-deploys
