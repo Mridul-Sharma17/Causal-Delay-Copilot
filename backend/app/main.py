@@ -45,6 +45,7 @@ from .contracts import (
     DemoWorkspaceResponse,
     DatasetVersionListResponse,
     ErrorResponse,
+    FreshRunCapability,
     HealthProbe,
     HealthResponse,
     IngestionRunRequest,
@@ -82,6 +83,7 @@ from .contracts import (
 )
 from .errors import CoreSafeError, SafeErrorCode, WorkspaceRequestError
 from .canonical import sha256
+from .local_qualification import fresh_run_capability as load_fresh_run_capability
 from .analysis_runs import (
     AnalysisRunRequestError,
     analysis_run_id_for_operation,
@@ -1064,6 +1066,20 @@ def create_app(
             code="CORE_READY_GEMINI_DEGRADED",
         )
 
+    def current_fresh_run_capability() -> FreshRunCapability:
+        required = (
+            resolved_settings.profile is DeliveryProfile.LOCAL_FALLBACK
+            and resolved_settings.require_fresh_demo_qualification
+        )
+        return FreshRunCapability(
+            **load_fresh_run_capability(
+                resolved_settings.fresh_qualification_path,
+                required=required,
+                expected_release_candidate_id=resolved_settings.release_candidate_id,
+                expected_build_manifest_id=resolved_settings.build_manifest_id,
+            )
+        )
+
     @app.get("/api/health/live", response_model=HealthProbe)
     async def get_liveness() -> HealthProbe:
         return liveness_probe()
@@ -1099,6 +1115,7 @@ def create_app(
             liveness=liveness,
             readiness=readiness,
             degraded_capabilities=degraded_capabilities,
+            fresh_run=current_fresh_run_capability(),
             observed_at=datetime.now(timezone.utc),
         )
         status_code = 503 if readiness.state == "unavailable" else 200
@@ -1142,6 +1159,14 @@ def create_app(
         request_context: Request,
         request: OperationAdmissionRequest,
     ) -> JSONResponse:
+        if request.operation_kind in {"FRESH_ANALYSIS", "FRESH_REPRODUCTION"}:
+            capability = current_fresh_run_capability()
+            if capability.state == "unavailable":
+                raise WorkspaceRequestError(
+                    SafeErrorCode.FRESH_RUN_UNAVAILABLE,
+                    "RUN_LOCAL_FALLBACK_QUALIFICATION_AND_RETRY",
+                    503,
+                )
         resolution = resolve_workspace(request_context)
         memory_required_bytes = (
             request.memory_required_bytes

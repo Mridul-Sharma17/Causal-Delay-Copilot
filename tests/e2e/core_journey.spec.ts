@@ -2,6 +2,8 @@ import { expect, test } from "@playwright/test";
 
 const forbiddenLeakage = /\b(?:secret|source rows?|prompts?|provider responses?|notes?|stack traces?|filesystem paths?)\b/i;
 const journeyExpect = expect.configure({ timeout: 30_000 });
+const expectedReleaseCandidateId =
+  process.env.CORE_RELEASE_CANDIDATE_ID ?? "core-issue-64-local_fallback";
 
 test("compiled SPA traverses the real validated-reference journey and replay", async ({
   page,
@@ -35,7 +37,7 @@ test("compiled SPA traverses the real validated-reference journey and replay", a
   expect(reference.scientific_request_digest).toMatch(/^sha256:[0-9a-f]{64}$/);
   expect(reference.runtime_fingerprint_digest).toMatch(/^sha256:[0-9a-f]{64}$/);
   expect(reference.bundle_manifest_hash).toMatch(/^sha256:[0-9a-f]{64}$/);
-  expect(reference.release_candidate_id).toBe("core-issue-64-local_fallback");
+  expect(reference.release_candidate_id).toBe(expectedReleaseCandidateId);
 
   const lineageResponse = await page.request.get(
     `/api/datasets/${encodeURIComponent(reference.dataset_version_id)}/lineage`,

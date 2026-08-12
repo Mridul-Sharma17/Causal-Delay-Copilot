@@ -145,6 +145,8 @@ class Settings(BaseSettings):
     gemini_api_key: SecretStr | None = None
     gemini_policy: GeminiDraftingPolicy = Field(default_factory=GeminiDraftingPolicy)
     spa_dist_dir: Path | None = None
+    require_fresh_demo_qualification: bool = False
+    fresh_qualification_path: Path | None = None
 
     def __init__(self, **values: Any) -> None:
         try:
@@ -204,6 +206,14 @@ class Settings(BaseSettings):
             self.validated_reference_root = expected_reference_root
         elif self.validated_reference_root != expected_reference_root:
             raise ValueError("validated reference path must belong to the artifact root")
+
+        expected_qualification_path = (
+            self.state_root / "runtime" / "local-fallback-qualification.json"
+        )
+        if self.fresh_qualification_path is None:
+            self.fresh_qualification_path = expected_qualification_path
+        elif not _is_within(self.fresh_qualification_path, self.state_root):
+            raise ValueError("fresh qualification path must belong to the state root")
 
         if self.api_proxy_prefix != "/api":
             raise ValueError("the browser API proxy must be relative /api")

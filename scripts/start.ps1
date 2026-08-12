@@ -2,6 +2,7 @@
 param(
     [switch]$NoBrowser,
     [switch]$SmokeOnly,
+    [switch]$QualificationRun,
     [string]$StateRoot = "state"
 )
 
@@ -27,6 +28,7 @@ try {
     }
 
     Set-LocalFallbackEnvironment -Root $root -StateRoot $stateRoot -SpaDistDir $spaDistDir
+    $env:CORE_REQUIRE_FRESH_DEMO_QUALIFICATION = if ($QualificationRun) { "false" } else { "true" }
     Assert-LocalFallbackNotRunning -StateRoot $stateRoot
     $lifecycleLock = Open-LocalFallbackLifecycleLock -StateRoot $stateRoot
     Invoke-LocalFallbackPythonJson -PythonPath $pythonPath -Arguments @(

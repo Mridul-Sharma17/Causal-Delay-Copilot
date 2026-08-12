@@ -11,6 +11,17 @@ export type HealthProbe = {
   code: HealthCode;
 };
 
+export type FreshRunCapability = {
+  schema_version: "fresh-run-capability.v1";
+  state: "available" | "unavailable";
+  code:
+    | "FRESH_RUN_QUALIFIED"
+    | "FRESH_RUN_UNAVAILABLE"
+    | "FRESH_RUN_QUALIFICATION_NOT_REQUIRED";
+  control: "enabled" | "disabled";
+  qualification_hash: string | null;
+};
+
 export type HealthResponse = {
   service: "causal-delay-copilot";
   state: "ready" | "degraded" | "unavailable";
@@ -18,6 +29,7 @@ export type HealthResponse = {
   liveness: HealthProbe;
   readiness: HealthProbe;
   degraded_capabilities: Array<"GEMINI_DRAFTING">;
+  fresh_run: FreshRunCapability;
   observed_at: string;
 };
 
@@ -1970,6 +1982,43 @@ function parseProbe(value: unknown): HealthProbe {
   return { state, code: value.code };
 }
 
+function parseFreshRunCapability(value: unknown): FreshRunCapability {
+  if (!isRecord(value)) {
+    throw new Error("invalid health response");
+  }
+  if (
+    value.schema_version !== "fresh-run-capability.v1" ||
+    (value.state !== "available" && value.state !== "unavailable") ||
+    (value.code !== "FRESH_RUN_QUALIFIED" &&
+      value.code !== "FRESH_RUN_UNAVAILABLE" &&
+      value.code !== "FRESH_RUN_QUALIFICATION_NOT_REQUIRED") ||
+    (value.control !== "enabled" && value.control !== "disabled") ||
+    (value.qualification_hash !== null &&
+      typeof value.qualification_hash !== "string") ||
+    (value.code === "FRESH_RUN_QUALIFIED" &&
+      (value.state !== "available" ||
+        value.control !== "enabled" ||
+        typeof value.qualification_hash !== "string")) ||
+    (value.code === "FRESH_RUN_QUALIFICATION_NOT_REQUIRED" &&
+      (value.state !== "available" ||
+        value.control !== "enabled" ||
+        value.qualification_hash !== null)) ||
+    (value.code === "FRESH_RUN_UNAVAILABLE" &&
+      (value.state !== "unavailable" ||
+        value.control !== "disabled" ||
+        value.qualification_hash !== null))
+  ) {
+    throw new Error("invalid health response");
+  }
+  return {
+    schema_version: "fresh-run-capability.v1",
+    state: value.state,
+    code: value.code,
+    control: value.control,
+    qualification_hash: value.qualification_hash,
+  };
+}
+
 export function parseHealthResponse(value: unknown): HealthResponse {
   if (!isRecord(value) || value.service !== "causal-delay-copilot") {
     throw new Error("invalid health response");
@@ -2001,6 +2050,7 @@ export function parseHealthResponse(value: unknown): HealthResponse {
   ) {
     throw new Error("invalid health response");
   }
+  const fresh_run = parseFreshRunCapability(value.fresh_run);
   return {
     service: "causal-delay-copilot",
     state: value.state,
@@ -2008,6 +2058,7 @@ export function parseHealthResponse(value: unknown): HealthResponse {
     liveness,
     readiness,
     degraded_capabilities: value.degraded_capabilities,
+    fresh_run,
     observed_at: value.observed_at,
   };
 }

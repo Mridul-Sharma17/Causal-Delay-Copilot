@@ -45,9 +45,12 @@ def core_journey_settings(
     *,
     public_origin: str | None = None,
     spa_dist_dir: Path | None = None,
+    release_candidate_id: str | None = None,
+    build_manifest_id: str | None = None,
 ) -> Settings:
     state_root = state_root.resolve()
-    release_candidate_id = f"core-issue-64-{profile.value.lower()}"
+    release_candidate_id = release_candidate_id or f"core-issue-64-{profile.value.lower()}"
+    build_manifest_id = build_manifest_id or BUILD_MANIFEST_ID
     if profile is DeliveryProfile.HOSTED:
         return Settings(
             profile=profile,
@@ -55,7 +58,7 @@ def core_journey_settings(
             railway_volume_path=state_root.parent,
             public_origin=public_origin or "https://core-issue-64.example.test",
             release_candidate_id=release_candidate_id,
-            build_manifest_id=BUILD_MANIFEST_ID,
+            build_manifest_id=build_manifest_id,
             gemini_enabled=False,
             gemini_api_key=None,
             spa_dist_dir=spa_dist_dir,
@@ -65,7 +68,7 @@ def core_journey_settings(
         state_root=state_root,
         public_origin=public_origin or "http://127.0.0.1:8000",
         release_candidate_id=release_candidate_id,
-        build_manifest_id=BUILD_MANIFEST_ID,
+        build_manifest_id=build_manifest_id,
         gemini_enabled=False,
         gemini_api_key=None,
         spa_dist_dir=spa_dist_dir,
@@ -121,6 +124,8 @@ def prepare_core_journey(
     *,
     public_origin: str | None = None,
     spa_dist_dir: Path | None = None,
+    release_candidate_id: str | None = None,
+    build_manifest_id: str | None = None,
 ) -> PreparedCoreJourney:
     """Prepare a real API/SQLite/artifact state for the compiled-browser journey."""
 
@@ -129,6 +134,8 @@ def prepare_core_journey(
         profile,
         public_origin=public_origin,
         spa_dist_dir=spa_dist_dir,
+        release_candidate_id=release_candidate_id,
+        build_manifest_id=build_manifest_id,
     )
     with core_journey_client(settings) as client:
         imported = _assert_status(

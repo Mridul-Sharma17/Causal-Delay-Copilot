@@ -23,6 +23,8 @@ def main() -> None:
     )
     parser.add_argument("--public-origin")
     parser.add_argument("--spa-dist-dir", type=Path)
+    parser.add_argument("--release-candidate-id")
+    parser.add_argument("--build-manifest-id")
     args = parser.parse_args()
 
     profile = DeliveryProfile(args.profile)
@@ -31,12 +33,16 @@ def main() -> None:
         profile,
         public_origin=args.public_origin,
         spa_dist_dir=args.spa_dist_dir,
+        release_candidate_id=args.release_candidate_id,
+        build_manifest_id=args.build_manifest_id,
     )
     prepared = prepare_core_journey(
         settings.state_root,
         profile,
         public_origin=settings.public_origin,
         spa_dist_dir=settings.spa_dist_dir,
+        release_candidate_id=settings.release_candidate_id,
+        build_manifest_id=settings.build_manifest_id,
     )
     print(
         "CORE_JOURNEY_PREPARED "

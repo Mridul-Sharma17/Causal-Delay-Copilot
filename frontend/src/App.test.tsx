@@ -21,6 +21,13 @@ const healthResponse = {
   liveness: { state: "live", code: "CORE_LIVE" },
   readiness: { state: "degraded", code: "CORE_READY_GEMINI_DEGRADED" },
   degraded_capabilities: ["GEMINI_DRAFTING"],
+  fresh_run: {
+    schema_version: "fresh-run-capability.v1",
+    state: "available",
+    code: "FRESH_RUN_QUALIFICATION_NOT_REQUIRED",
+    control: "enabled",
+    qualification_hash: null,
+  },
   observed_at: "2026-08-05T00:00:00Z",
 };
 

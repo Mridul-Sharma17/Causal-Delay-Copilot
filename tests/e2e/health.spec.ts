@@ -41,6 +41,7 @@ test("fails closed when no validated reference is installed", async ({ page }) =
   expect(Object.keys(health).sort()).toEqual([
     "code",
     "degraded_capabilities",
+    "fresh_run",
     "liveness",
     "observed_at",
     "readiness",

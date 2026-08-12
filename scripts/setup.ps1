@@ -88,6 +88,7 @@ try {
     }
 
     Set-LocalFallbackEnvironment -Root $root -StateRoot $stateRoot -SpaDistDir $spaDistDir
+    $env:CORE_REQUIRE_FRESH_DEMO_QUALIFICATION = "false"
     & $pythonPath -c "from backend.app.main import create_app; print('backend import smoke passed')"
     if ($LASTEXITCODE -ne 0) {
         throw "Backend import smoke failed; setup success was not recorded."
@@ -100,7 +101,7 @@ try {
     Write-LocalFallbackProcessMarker -StateRoot $stateRoot -Process $server.Process
     $null = Wait-LocalFallbackReady -Process $server.Process
     Assert-LocalFallbackSpa
-    & npm.cmd run test:e2e
+    & $playwrightCommand test tests/e2e/health.spec.ts --config playwright.config.ts --workers=1
     if ($LASTEXITCODE -ne 0) {
         throw "Packaged browser smoke failed; setup success was not recorded."
     }

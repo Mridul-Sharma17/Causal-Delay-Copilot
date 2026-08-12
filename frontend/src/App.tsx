@@ -3131,6 +3131,7 @@ function App() {
 
   const requestFreshAnalysis = useCallback(async () => {
     if (
+      health?.fresh_run.state === "unavailable" ||
       reference === null ||
       riskAttempt?.investigation_request_id === null ||
       riskAttempt?.investigation_request_id === undefined
@@ -3171,11 +3172,12 @@ function App() {
     } catch {
       setFreshOperationState("failed");
     }
-  }, [reference, riskAttempt]);
+  }, [health, reference, riskAttempt]);
 
   const requestFreshReproduction = useCallback(async () => {
     const targetRun = freshOperation?.analysis_run;
     if (
+      health?.fresh_run.state === "unavailable" ||
       freshOperation === null ||
       targetRun === null ||
       targetRun === undefined ||
@@ -3213,7 +3215,7 @@ function App() {
     } catch {
       setReproductionOperationState("failed");
     }
-  }, [freshOperation]);
+  }, [freshOperation, health]);
 
   const requestRefreshInvestigation = useCallback(async () => {
     const fixture = preferredRiskFixture(riskFixtures);
@@ -3276,6 +3278,7 @@ function App() {
         : health?.readiness.state === "degraded"
           ? "Core ready with Gemini-only drafting unavailable"
           : "Core ready";
+  const freshRunUnavailable = health?.fresh_run.state === "unavailable";
   const acceptedRiskFixture = preferredRiskFixture(riskFixtures);
   const predictiveArtifactsVerified = hasVerifiedPredictiveArtifacts(acceptedRiskFixture);
   const proactiveRequest = proactiveAttempt?.investigation_request ?? null;
@@ -3453,6 +3456,13 @@ function App() {
               </p>
             )}
 
+            {freshRunUnavailable && (
+              <p className="lineage-warning" role="status">
+                Fresh demo runs are unavailable until three consecutive verified runs finish
+                under five minutes. The validated reference remains read-only and available.
+              </p>
+            )}
+
             <p className="workspace-status" aria-live="polite">
               {workspaceState === "created" && workspace !== null
                 ? `Demo Workspace active · ${workspace.workspace_id}`
@@ -3589,6 +3599,7 @@ function App() {
                       type="button"
                       onClick={() => void requestFreshAnalysis()}
                       disabled={
+                        freshRunUnavailable ||
                         riskAttempt?.investigation_request_id === null ||
                         riskAttempt?.investigation_request_id === undefined ||
                         freshOperationState === "starting" ||
@@ -3599,7 +3610,9 @@ function App() {
                         ? "Admitting fresh analysis"
                         : freshOperationState === "polling"
                           ? "Polling fresh analysis"
-                          : "Request fresh analysis"}
+                          : freshRunUnavailable
+                            ? "Fresh run unavailable"
+                            : "Request fresh analysis"}
                     </button>
                     <button
                       className="retry-button"
@@ -3623,6 +3636,7 @@ function App() {
                       type="button"
                       onClick={() => void requestFreshReproduction()}
                       disabled={
+                        freshRunUnavailable ||
                         freshOperation?.state !== "SUCCEEDED" ||
                         reproductionOperationState === "starting" ||
                         reproductionOperationState === "polling"

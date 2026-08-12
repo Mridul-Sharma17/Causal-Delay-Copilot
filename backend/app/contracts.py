@@ -16,6 +16,31 @@ HealthCode = Literal[
 DegradedCapability = Literal["GEMINI_DRAFTING"]
 
 
+class FreshRunCapability(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["fresh-run-capability.v1"]
+    state: Literal["available", "unavailable"]
+    code: Literal[
+        "FRESH_RUN_QUALIFIED",
+        "FRESH_RUN_UNAVAILABLE",
+        "FRESH_RUN_QUALIFICATION_NOT_REQUIRED",
+    ]
+    control: Literal["enabled", "disabled"]
+    qualification_hash: str | None
+
+    @model_validator(mode="after")
+    def validate_state(self) -> FreshRunCapability:
+        expected = {
+            "FRESH_RUN_QUALIFIED": ("available", "enabled", True),
+            "FRESH_RUN_QUALIFICATION_NOT_REQUIRED": ("available", "enabled", False),
+            "FRESH_RUN_UNAVAILABLE": ("unavailable", "disabled", False),
+        }[self.code]
+        if (self.state, self.control, self.qualification_hash is not None) != expected:
+            raise ValueError("fresh run capability state is inconsistent")
+        return self
+
+
 class HealthProbe(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -32,6 +57,7 @@ class HealthResponse(BaseModel):
     liveness: HealthProbe
     readiness: HealthProbe
     degraded_capabilities: list[DegradedCapability]
+    fresh_run: FreshRunCapability
     observed_at: datetime
 
 

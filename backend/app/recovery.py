@@ -27,6 +27,12 @@ RECOVERY_ACTION = "RESTORE_CORE_STATE_AND_RETRY"
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _ACTIVE_OPERATION_STATES = frozenset({"QUEUED", "RUNNING", "CANCELLING"})
 _RECOVERY_PENDING_ARTIFACT_STATES = frozenset({"QUARANTINE_UNAVAILABLE"})
+_EPHEMERAL_STATE_FILES = frozenset(
+    {
+        "runtime/local-fallback.lock",
+        "runtime/local-fallback-process.json",
+    }
+)
 
 
 class StateRecoveryError(RuntimeError):
@@ -441,6 +447,7 @@ class StateRecovery:
                 "database_path": None,
                 "artifact_root": None,
                 "validated_reference_root": None,
+                "fresh_qualification_path": None,
             }
         )
         return Settings(**values)
@@ -696,6 +703,8 @@ class StateRecovery:
             if not path.is_file():
                 continue
             relative = path.relative_to(root).as_posix()
+            if relative in _EPHEMERAL_STATE_FILES:
+                continue
             payload = path.read_bytes()
             files.append(
                 {
