@@ -12,7 +12,11 @@ from backend.app.hosted_qualification import (
     verify_hosted_attestation,
     write_hosted_attestation,
 )
-from scripts.hosted_qualification import _disk_policy_is_safe, _write_failure_evidence
+from scripts.hosted_qualification import (
+    _disk_policy_is_safe,
+    _vercel_deployment_url,
+    _write_failure_evidence,
+)
 
 
 def _checks(*, blocked: str | None = None) -> list[dict[str, object]]:
@@ -150,6 +154,14 @@ def test_disk_policy_is_checked_against_observed_free_capacity() -> None:
         {"disk_warning_bytes": 512 * 1024 * 1024, "disk_block_bytes": 256 * 1024 * 1024},
         {"current_mb": 300.0, "limit_mb": 500.0},
     )
+
+
+def test_vercel_deployment_url_accepts_cli_nested_json_shape() -> None:
+    assert _vercel_deployment_url(
+        {"status": "ok", "deployment": {"url": "https://preview.example.com"}}
+    ) == "https://preview.example.com"
+    assert _vercel_deployment_url({"url": "preview.example.com"}) == "preview.example.com"
+    assert _vercel_deployment_url({"status": "error"}) is None
 
 
 def verify_hosted_attestation_payload(payload: dict[str, object]) -> None:

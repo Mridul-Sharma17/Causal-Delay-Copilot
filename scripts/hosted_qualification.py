@@ -914,7 +914,7 @@ class QualificationCollector:
                 timeout=180.0,
             )
             deployed_payload = _parse_json_output(deployed.stdout)
-            preview_url = deployed_payload.get("url")
+            preview_url = _vercel_deployment_url(deployed_payload)
             if not isinstance(preview_url, str) or not preview_url:
                 self._set(
                     "release_mismatch_refusal",
@@ -1250,6 +1250,18 @@ def _parse_json_output(value: str) -> Mapping[str, Any]:
         if isinstance(parsed, Mapping):
             return parsed
     return {}
+
+
+def _vercel_deployment_url(payload: Mapping[str, Any]) -> str | None:
+    direct = payload.get("url")
+    if isinstance(direct, str) and direct.strip():
+        return direct.strip()
+    deployment = payload.get("deployment")
+    if isinstance(deployment, Mapping):
+        nested = deployment.get("url")
+        if isinstance(nested, str) and nested.strip():
+            return nested.strip()
+    return None
 
 
 def _matches_identity(payload: Mapping[str, Any] | None, expected: Mapping[str, str]) -> bool:
