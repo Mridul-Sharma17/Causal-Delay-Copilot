@@ -261,6 +261,7 @@ jobs:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
           VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
           VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
         run: |
           set -euo pipefail
           DEPLOYMENT_JSON="$(npx --yes "vercel@${VERCEL_CLI_VERSION}" deploy .release/vercel --token "$VERCEL_TOKEN" --scope "$VERCEL_ORG_ID" --project "$VERCEL_PROJECT_ID" --yes --json)"
@@ -314,6 +315,7 @@ jobs:
             "${{ needs.deploy_vercel.outputs.deployment_url }}" \
             --token "$VERCEL_TOKEN" \
             --scope "$VERCEL_ORG_ID" \
+            --project "$VERCEL_PROJECT_ID" \
             --yes
 
       - name: Re-read the activated public origin and verify the release binding
@@ -321,6 +323,9 @@ jobs:
         env:
           RAILWAY_PUBLIC_ORIGIN: ${{ vars.RAILWAY_PUBLIC_ORIGIN }}
           VERCEL_PUBLIC_ORIGIN: ${{ vars.VERCEL_PUBLIC_ORIGIN }}
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_USE_CLI_CURL: "1"
         run: |
           set -euo pipefail
           python scripts/release_candidate.py verify-match \
