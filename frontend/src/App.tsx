@@ -7,6 +7,26 @@ import {
 } from "react";
 
 import {
+  ArrowRight,
+  ArrowUpRight,
+  CheckmarkFilled,
+  ChevronDown,
+  ChevronRight,
+  Document,
+  Email,
+  Events,
+  FlowData,
+  Information,
+  Launch,
+  Menu,
+  Notification,
+  Renew,
+  Search,
+  SettingsAdjust,
+  WarningAltFilled,
+} from "@carbon/icons-react";
+
+import {
   getDatasetLineage,
   getHealth,
   getProactiveProposals,
@@ -2867,7 +2887,882 @@ function FreshRunDetailPanel({
   );
 }
 
+type ShowcaseCase = {
+  id: "switchgear" | "concrete" | "hvac";
+  priority: "Urgent" | "Needs evidence" | "Monitoring";
+  title: string;
+  project: string;
+  detail: string;
+  due: string;
+};
+
+type EvidenceStepKey = "signal" | "eligibility" | "causal" | "verdict";
+
+type DemoAuthIdentity = {
+  name: string;
+  email: string;
+  provider: "Google" | "Microsoft" | "Email";
+};
+
+const defaultDemoIdentity: DemoAuthIdentity = {
+  name: "Alex Morgan",
+  email: "alex.morgan@projectalpha.com",
+  provider: "Google",
+};
+
+function initialsForName(name: string): string {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  return parts
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase() ?? "")
+    .join("") || "AM";
+}
+
+const showcaseCases: ShowcaseCase[] = [
+  {
+    id: "switchgear",
+    priority: "Urgent",
+    title: "Switchgear handoff risk",
+    project: "Project Alpha",
+    detail: "120 units · Electrical package",
+    due: "Decision due today",
+  },
+  {
+    id: "concrete",
+    priority: "Needs evidence",
+    title: "Concrete enclosure delay",
+    project: "Project Alpha",
+    detail: "Substructure · Activity 3.2",
+    due: "Review due tomorrow",
+  },
+  {
+    id: "hvac",
+    priority: "Monitoring",
+    title: "HVAC unit long-lead risk",
+    project: "Project Beta",
+    detail: "Mechanical · Activity 6.1",
+    due: "Next review in 2 days",
+  },
+];
+
+const demoHeroScenario = {
+  score: 0.9090909107676192,
+  recommendation: "Request supplier recovery plan",
+  recipient: "recovery@powergrid-systems.com",
+  subject: "Project Alpha: recovery plan for switchgear handoff",
+  body: "Hi Priya,\n\nWe are reviewing the revised February 20 handoff for Project Alpha's switchgear package. Please share a dated recovery plan covering the remaining 120 units, the next confirmed milestone, and any action needed from our team.\n\nPlease send the plan by 3:00 PM today so we can protect the downstream installation sequence.\n\nBest,\nAlex Morgan",
+  evidence: {
+    signal:
+      "The risk signal crossed the review threshold at 91%. It starts an investigation; it is not a causal conclusion.",
+    eligibility:
+      "The switchgear order line is in scope: the supplier handoff, promised date, revised date, and downstream activity are all bound to the same case.",
+    causal:
+      "The evidence supports a supplier recovery conversation for this handoff. The recommendation stays bounded to the current evidence chain.",
+    verdict:
+      "Request a dated recovery plan from the supplier. The manager reviews and sends the message; the copilot does not execute the action.",
+  } satisfies Record<EvidenceStepKey, string>,
+} as const;
+
+function showcaseValue(value: unknown, fallback = "Unavailable"): string {
+  if (typeof value === "string" && value.length > 0) {
+    return value;
+  }
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  return fallback;
+}
+
+function showcaseFieldValue(value: unknown, fallback = "Unavailable"): string {
+  const field = asRecord(value);
+  if (field === null) {
+    return fallback;
+  }
+  const nested = asRecord(field.value);
+  return showcaseValue(
+    nested?.normalized_value ?? nested?.source_value ?? field.value,
+    fallback,
+  );
+}
+
+function showcaseOptionLabel(value: unknown, fallback: string): string {
+  const label = showcaseValue(value, "");
+  if (label.length === 0) {
+    return fallback;
+  }
+  return label
+    .replace(/[_-]+/g, " ")
+    .toLowerCase()
+    .replace(/(^|\s)\S/g, (character) => character.toUpperCase());
+}
+
+function ShowcaseEvidenceIcon({ step }: { step: EvidenceStepKey }) {
+  if (step === "signal") {
+    return <Events size={20} aria-hidden="true" />;
+  }
+  if (step === "eligibility") {
+    return <Document size={20} aria-hidden="true" />;
+  }
+  if (step === "causal") {
+    return <FlowData size={20} aria-hidden="true" />;
+  }
+  return <CheckmarkFilled size={20} aria-hidden="true" />;
+}
+
+function ShowcaseDashboard({
+  journeyState,
+  health,
+  referenceState,
+  riskState,
+  riskFixture,
+  riskAttempt,
+  decisionBriefState,
+  decisionBrief,
+  actionRecommendation,
+  demoMode,
+  identity,
+  onOpenAuth,
+  onRetry,
+}: {
+  journeyState: JourneyState;
+  health: HealthResponse | null;
+  referenceState: ReferenceState;
+  riskState: RiskState;
+  riskFixture: RiskSignalFixture | undefined;
+  riskAttempt: ReactiveIngressAttempt | null;
+  decisionBriefState: DecisionBriefState;
+  decisionBrief: DecisionBriefSnapshot | null;
+  actionRecommendation: Record<string, unknown> | null;
+  demoMode: boolean;
+  identity: DemoAuthIdentity;
+  onOpenAuth: () => void;
+  onRetry: () => void;
+}) {
+  const [selectedCaseId, setSelectedCaseId] = useState<ShowcaseCase["id"]>("switchgear");
+  const [selectedEvidence, setSelectedEvidence] = useState<EvidenceStepKey>("signal");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [urgentOnly, setUrgentOnly] = useState(false);
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const [activeNav, setActiveNav] = useState("Workbench");
+  const [announcement, setAnnouncement] = useState("Workbench ready.");
+  const [demoDraftOpened, setDemoDraftOpened] = useState(false);
+  const [demoGmailStatus, setDemoGmailStatus] = useState<"idle" | "opened">("idle");
+  const [demoDraftTo, setDemoDraftTo] = useState<string>(demoHeroScenario.recipient);
+  const [demoDraftSubject, setDemoDraftSubject] = useState<string>(demoHeroScenario.subject);
+  const [demoDraftBody, setDemoDraftBody] = useState<string>(demoHeroScenario.body);
+
+  const moveToSurface = (targetId: string, label: string) => {
+    const target = document.getElementById(targetId);
+    if (target === null) {
+      setAnnouncement(`${label} is not available yet.`);
+      return;
+    }
+    const parentDetails = target.closest("details");
+    if (parentDetails instanceof HTMLDetailsElement) {
+      parentDetails.open = true;
+    }
+    setActiveNav(label);
+    target.scrollIntoView({
+      behavior:
+        typeof window.matchMedia === "function" &&
+        window.matchMedia("(prefers-reduced-motion: reduce)").matches
+          ? "auto"
+          : "smooth",
+      block: "start",
+    });
+    if (typeof target.focus === "function") {
+      target.focus({ preventScroll: true });
+    }
+    setAnnouncement(`Moved to ${label}.`);
+  };
+
+  const filteredCases = showcaseCases.filter((item) => {
+    const query = searchQuery.trim().toLowerCase();
+    const matchesQuery =
+      query.length === 0 ||
+      `${item.title} ${item.project} ${item.detail}`.toLowerCase().includes(query);
+    return matchesQuery && (!urgentOnly || item.priority === "Urgent");
+  });
+  const selectedCase =
+    showcaseCases.find((item) => item.id === selectedCaseId) ?? showcaseCases[0];
+  const isHeroCase = selectedCase.id === "switchgear";
+  const demoHeroActive = demoMode && isHeroCase;
+  const request = riskAttempt?.investigation_request ?? null;
+  const requestSubject = asRecord(request?.causal_engine_input.subject_analytical_values);
+  const score = demoHeroActive ? demoHeroScenario.score : riskFixture?.signal.score_value;
+  const scoreLabel = typeof score === "number" ? `${Math.round(score * 100)}%` : "—";
+  const subjectState = decisionBrief?.subject_applicability.state ?? null;
+  const actionReady = demoHeroActive || actionRecommendation !== null;
+  const actionLabel = actionReady
+    ? demoHeroActive
+      ? demoHeroScenario.recommendation
+      : showcaseOptionLabel(
+        actionRecommendation?.label ?? actionRecommendation?.selected_option_code,
+        "Review governed response",
+      )
+    : "Awaiting governed recommendation";
+  const evidenceReady = demoHeroActive || decisionBriefState === "ready";
+  const safeStateUnavailable = !demoHeroActive && journeyState === "unavailable";
+  const draftRecipient = demoHeroActive
+    ? demoDraftTo
+    : actionReady
+      ? demoHeroScenario.recipient
+      : "";
+  const draftSubject = demoHeroActive
+    ? demoDraftSubject
+    : actionReady
+      ? demoHeroScenario.subject
+      : "";
+  const draftBody = demoHeroActive ? demoDraftBody : "";
+  const openDemoGmail = () => {
+    const gmailUrl = new URL("https://mail.google.com/mail/");
+    gmailUrl.searchParams.set("view", "cm");
+    gmailUrl.searchParams.set("fs", "1");
+    gmailUrl.searchParams.set("to", demoDraftTo);
+    gmailUrl.searchParams.set("su", demoDraftSubject);
+    gmailUrl.searchParams.set("body", demoDraftBody);
+    window.open(gmailUrl.toString(), "_blank", "noopener,noreferrer");
+    setDemoGmailStatus("opened");
+    setAnnouncement("Gmail compose opened in a new tab. Sending remains with the manager.");
+  };
+  const openDemoDraft = () => {
+    setDemoDraftOpened(true);
+    moveToSurface("demo-draft", "Draft workspace");
+  };
+  const openEvidenceDetails = () => {
+    if (demoHeroActive) {
+      setAnnouncement(`${selectedStep.title} evidence is available in the current case record.`);
+      return;
+    }
+    moveToSurface(
+      selectedStep.key === "signal"
+        ? "stage-risk-intake"
+        : selectedStep.key === "eligibility"
+          ? "stage-eligibility"
+          : "stage-evidence",
+      `${selectedStep.title} details`,
+    );
+  };
+  const effectiveJourneyState = demoHeroActive ? "healthy" : journeyState;
+  const effectiveReferenceState = demoHeroActive ? "ready" : referenceState;
+  const effectiveSubjectState = demoHeroActive ? "supported" : subjectState;
+  const coreStatus =
+    demoHeroActive
+      ? "Workspace ready"
+      : journeyState === "loading"
+      ? "Checking Core"
+      : journeyState === "unavailable"
+        ? "Core unavailable"
+        : health?.readiness.state === "degraded"
+          ? "Core ready · drafting limited"
+          : "Core ready";
+  const signalStatus =
+    demoHeroActive
+      ? `${scoreLabel} flagged`
+      : riskState === "loading"
+      ? "Checking signal"
+      : riskState === "ready"
+        ? `${scoreLabel} flagged`
+        : riskState === "failed"
+          ? "Unavailable"
+          : "Waiting";
+  const eligibilityStatus =
+    demoHeroActive
+      ? "In scope"
+      : riskState !== "ready"
+      ? "Waiting"
+      : request?.causal_engine_input.eligibility !== undefined
+        ? "In scope"
+        : "Review required";
+  const causalStatus =
+    demoHeroActive
+      ? "Evaluated"
+      : decisionBriefState === "publishing"
+      ? "Verifying"
+      : decisionBriefState !== "ready"
+        ? "Waiting"
+        : subjectState === "abstained"
+          ? "Read-only"
+          : "Evaluated";
+  const verdictStatus =
+    demoHeroActive
+      ? "Decision ready"
+      : decisionBriefState !== "ready"
+      ? "Waiting"
+      : subjectState === "abstained"
+        ? "Needs support"
+        : "Decision ready";
+  const evidenceSteps: Array<{
+    key: EvidenceStepKey;
+    title: string;
+    description: string;
+    status: string;
+  }> = [
+    {
+      key: "signal",
+      title: "Signal",
+      description: "What triggered this case",
+      status: signalStatus,
+    },
+    {
+      key: "eligibility",
+      title: "Eligibility",
+      description: "Why this case is in scope",
+      status: eligibilityStatus,
+    },
+    {
+      key: "causal",
+      title: "Causal analysis",
+      description: "What the evidence can support",
+      status: causalStatus,
+    },
+    {
+      key: "verdict",
+      title: "Verdict",
+      description: "What the manager can conclude",
+      status: verdictStatus,
+    },
+  ];
+  const selectedStep =
+    evidenceSteps.find((step) => step.key === selectedEvidence) ?? evidenceSteps[0];
+  const selectedStepDetail = demoHeroActive
+    ? demoHeroScenario.evidence[selectedEvidence]
+    : selectedEvidence === "signal"
+      ? riskState === "ready"
+        ? `The risk signal crossed the review threshold at ${scoreLabel}. It starts an investigation; it is not a causal conclusion.`
+        : "The workspace is waiting for a verified risk signal before it creates an investigation."
+      : selectedEvidence === "eligibility"
+        ? request === null
+          ? "The investigation request has not been accepted yet."
+          : `The request is bound to a canonical subject and a decision cutoff of ${showcaseFieldValue(request.decision_cutoff, "the recorded cutoff")}.`
+        : selectedEvidence === "causal"
+          ? decisionBriefState !== "ready"
+            ? "The immutable Decision Brief is still being prepared."
+            : subjectState === "abstained"
+              ? "Population evidence is available, but this reference does not support a subject-level effect claim."
+              : "The causal analysis has been evaluated under the evidence and eligibility contract."
+          : effectiveSubjectState === "abstained"
+            ? "This case is read-only until subject support is available. The copilot will not invent a recommendation."
+            : "The verdict is ready to inform the manager's next decision.";
+
+  return (
+    <section className="workbench-shell" id="workspace" aria-labelledby="workbench-heading">
+      <header className="workbench-topbar">
+        <div className="workbench-brand-block">
+          <button className="workbench-icon-button workbench-menu-button" type="button" aria-label="Open navigation">
+            <Menu size={20} aria-hidden="true" />
+          </button>
+          <button className="workbench-brand" type="button" onClick={() => moveToSurface("workspace", "Workbench")}>
+            Causal Delay Copilot
+          </button>
+        </div>
+
+        <nav className="workbench-primary-nav" aria-label="Primary">
+          {[
+            { label: "Workbench", target: "workspace" },
+            { label: "Evidence", target: "technical-evidence" },
+            { label: "Decisions", target: "stage-actions" },
+            { label: "Configuration", target: "lineage-heading" },
+          ].map((item) => (
+            <button
+              className={`workbench-nav-link ${activeNav === item.label ? "is-active" : ""}`}
+              key={item.label}
+              type="button"
+              onClick={() =>
+                item.target === "workspace"
+                  ? (setActiveNav(item.label), moveToSurface("workspace", item.label))
+                  : moveToSurface(item.target, item.label)
+              }
+            >
+              {item.label}
+            </button>
+          ))}
+        </nav>
+
+        <div className="workbench-topbar-tools">
+          <div className="workbench-core-status" role="status" aria-live="polite">
+            <span className={`workbench-status-dot ${effectiveJourneyState === "unavailable" ? "is-error" : ""}`} aria-hidden="true" />
+            {coreStatus}
+          </div>
+          <button className="workbench-icon-button" type="button" aria-label="Notifications">
+            <Notification size={20} aria-hidden="true" />
+          </button>
+          <div className="workbench-user-menu">
+            <button
+              className="workbench-user-button"
+              type="button"
+              aria-expanded={userMenuOpen}
+              onClick={() => setUserMenuOpen((open) => !open)}
+            >
+              <span className="workbench-avatar" aria-hidden="true">{initialsForName(identity.name)}</span>
+              <span className="workbench-user-name">{identity.name}</span>
+              <ChevronDown size={16} aria-hidden="true" />
+            </button>
+            {userMenuOpen && (
+              <div className="workbench-user-popover" role="menu">
+                <strong>Signed in with {identity.provider}</strong>
+                <span>{identity.email}</span>
+                <button type="button" role="menuitem" onClick={() => { setUserMenuOpen(false); onOpenAuth(); }}>Open demo sign-in</button>
+              </div>
+            )}
+          </div>
+        </div>
+      </header>
+
+      <div className="workbench-layout">
+        <aside className="workbench-inbox" aria-labelledby="attention-inbox-heading">
+          <div className="workbench-inbox-heading">
+            <div>
+              <p className="workbench-overline">Today</p>
+              <h2 id="attention-inbox-heading">Attention inbox</h2>
+            </div>
+            <span className="workbench-count" aria-label={`${showcaseCases.length} cases`}>{showcaseCases.length}</span>
+          </div>
+          <p className="workbench-inbox-summary">Prioritised cases that need a manager's attention.</p>
+          <div className="workbench-inbox-tools">
+            <label className="workbench-search-wrap">
+              <Search size={16} aria-hidden="true" />
+              <span className="visually-hidden">Find a case</span>
+              <input
+                className="workbench-search"
+                type="search"
+                value={searchQuery}
+                onChange={(event) => setSearchQuery(event.target.value)}
+                placeholder="Find a case"
+              />
+            </label>
+            <button
+              className={`workbench-filter-button ${urgentOnly ? "is-active" : ""}`}
+              type="button"
+              aria-pressed={urgentOnly}
+              onClick={() => setUrgentOnly((active) => !active)}
+            >
+              <SettingsAdjust size={16} aria-hidden="true" />
+              <span className="visually-hidden">{urgentOnly ? "Show all cases" : "Show urgent cases"}</span>
+            </button>
+          </div>
+
+          <div className="workbench-case-list">
+            {filteredCases.length === 0 ? (
+              <div className="workbench-inbox-empty">
+                <Search size={20} aria-hidden="true" />
+                <p>No cases match that search.</p>
+                <button type="button" onClick={() => { setSearchQuery(""); setUrgentOnly(false); }}>Clear filters</button>
+              </div>
+            ) : (
+              filteredCases.map((item) => (
+                <button
+                  className={`workbench-case-item ${selectedCaseId === item.id ? "is-selected" : ""}`}
+                  key={item.id}
+                  type="button"
+                  aria-pressed={selectedCaseId === item.id}
+                  onClick={() => {
+                    setSelectedCaseId(item.id);
+                    setAnnouncement(`${item.title} selected.`);
+                  }}
+                >
+                  <span className={`workbench-case-priority priority-${item.priority.toLowerCase().replace(/\s+/g, "-")}`}>
+                    <span className="workbench-priority-dot" aria-hidden="true" />
+                    {item.priority}
+                  </span>
+                  <strong>{item.title}</strong>
+                  <span>{item.project}</span>
+                  <span>{item.detail}</span>
+                  <span className="workbench-case-due">{item.due}<ChevronRight size={16} aria-hidden="true" /></span>
+                </button>
+              ))
+            )}
+          </div>
+
+          <button className="workbench-link-button workbench-inbox-footer" type="button" onClick={() => { setSearchQuery(""); setUrgentOnly(false); setAnnouncement("Showing all cases."); }}>
+            View all cases
+            <ArrowRight size={16} aria-hidden="true" />
+          </button>
+        </aside>
+
+        <main className="workbench-main" aria-labelledby="workbench-heading">
+          {!isHeroCase ? (
+            <section className="workbench-empty-case" aria-live="polite">
+              <p className="workbench-overline">{selectedCase.priority}</p>
+              <h1>{selectedCase.title}</h1>
+              <p className="workbench-empty-case-copy">
+                This case is in the inbox, but its verified investigation has not been opened in this workspace yet.
+              </p>
+              <button className="workbench-button workbench-button-primary" type="button" onClick={() => setSelectedCaseId("switchgear")}>
+                Return to switchgear case
+                <ArrowRight size={16} aria-hidden="true" />
+              </button>
+            </section>
+          ) : (
+            <>
+              <div className="workbench-case-header">
+                <div className="workbench-breadcrumbs">
+                  <span>Project Alpha</span>
+                  <ChevronRight size={14} aria-hidden="true" />
+                  <span>Case CASE-1052</span>
+                  <span className="workbench-case-updated">{demoHeroActive ? "Updated just now" : riskAttempt === null ? "Waiting for Core" : "Updated just now"}</span>
+                </div>
+                <div className="workbench-case-heading-row">
+                  <div>
+                    <p className="workbench-overline workbench-overline-blue">Urgent case</p>
+                    <h1 id="workbench-heading">Switchgear handoff risk</h1>
+                    <p className="workbench-case-subtitle">120 high-complexity units · Electrical package · Supplier handoff</p>
+                  </div>
+                  <button className="workbench-quiet-button" type="button" onClick={() => moveToSurface("stage-risk-intake", "Risk intake")}>
+                    <Document size={16} aria-hidden="true" />
+                    View case record
+                  </button>
+                </div>
+
+                <div className="workbench-metric-row" aria-label="Case summary">
+                  <div className="workbench-metric workbench-metric-emphasis">
+                    <span>Risk level</span>
+                    <strong>High</strong>
+                  </div>
+                  <div className="workbench-metric">
+                    <span>Amber signal</span>
+                    <strong>{scoreLabel}</strong>
+                  </div>
+                  <div className="workbench-metric">
+                    <span>Promised handoff</span>
+                    <strong>Feb 15</strong>
+                  </div>
+                  <div className="workbench-metric">
+                    <span>Revised handoff</span>
+                    <strong>Feb 20</strong>
+                  </div>
+                  <div className="workbench-metric">
+                    <span>Decision owner</span>
+                    <strong>{identity.name}</strong>
+                  </div>
+                </div>
+              </div>
+
+              <section className="workbench-status-band" aria-label="Causal status">
+                <div className="workbench-status-primary">
+                  {evidenceReady && effectiveSubjectState === "abstained" ? (
+                    <WarningAltFilled size={24} aria-hidden="true" />
+                  ) : (
+                    <Information size={24} aria-hidden="true" />
+                  )}
+                  <div>
+                    <span>Causal status</span>
+                    <strong>{evidenceReady && effectiveSubjectState === "abstained" ? "Needs subject support" : evidenceReady ? "Evidence reviewed" : "Investigation in progress"}</strong>
+                  </div>
+                </div>
+                <div className="workbench-status-stat">
+                  <span>Evidence state</span>
+                  <strong>{evidenceReady ? "Decision Brief ready" : decisionBriefState === "publishing" ? "Publishing" : "Waiting"}</strong>
+                </div>
+                <div className="workbench-status-stat">
+                  <span>Action lane</span>
+                  <strong>{actionReady ? "Recommendation ready" : "Read-only"}</strong>
+                </div>
+                <div className="workbench-status-stat">
+                  <span>Release</span>
+                  <strong>{effectiveReferenceState === "ready" ? "Validated" : referenceState === "loading" ? "Checking" : "Unavailable"}</strong>
+                </div>
+              </section>
+
+              <section className="workbench-evidence-section" id="evidence-chain" aria-labelledby="evidence-chain-heading">
+                <div className="workbench-section-heading">
+                  <div>
+                    <p className="workbench-overline">The decision path</p>
+                    <h2 id="evidence-chain-heading">From signal to verdict</h2>
+                  </div>
+                  <button className="workbench-link-button" type="button" onClick={() => demoHeroActive ? setAnnouncement("The verified evidence chain is open in this case.") : moveToSurface("stage-evidence", "Evidence")}>Review all evidence <ArrowUpRight size={16} aria-hidden="true" /></button>
+                </div>
+                <div className="workbench-evidence-chain">
+                  {evidenceSteps.map((step, index) => (
+                    <button
+                      className={`workbench-evidence-step ${selectedEvidence === step.key ? "is-selected" : ""}`}
+                      key={step.key}
+                      type="button"
+                      aria-pressed={selectedEvidence === step.key}
+                      onClick={() => {
+                        setSelectedEvidence(step.key);
+                        setAnnouncement(`${step.title} evidence selected.`);
+                      }}
+                    >
+                      <span className="workbench-evidence-step-top">
+                        <span className="workbench-evidence-icon"><ShowcaseEvidenceIcon step={step.key} /></span>
+                        <span className="workbench-evidence-index">0{index + 1}</span>
+                      </span>
+                      <strong>{step.title}</strong>
+                      <span>{step.description}</span>
+                      <span className={`workbench-step-status status-${step.key}`}>{step.status}</span>
+                      <ChevronRight className="workbench-evidence-chevron" size={16} aria-hidden="true" />
+                    </button>
+                  ))}
+                </div>
+                <div className="workbench-evidence-detail" role="status" aria-live="polite">
+                  <div className="workbench-evidence-detail-label">
+                    <ShowcaseEvidenceIcon step={selectedStep.key} />
+                    <strong>{selectedStep.title}</strong>
+                  </div>
+                  <p>{selectedStepDetail}</p>
+                  <button className="workbench-link-button" type="button" onClick={openEvidenceDetails}>
+                    Open details <ArrowRight size={16} aria-hidden="true" />
+                  </button>
+                </div>
+              </section>
+
+              <section className="workbench-activity-section" aria-labelledby="activity-heading">
+                <div className="workbench-section-heading">
+                  <div>
+                    <p className="workbench-overline">Case history</p>
+                    <h2 id="activity-heading">Recent activity</h2>
+                  </div>
+                  <button className="workbench-link-button" type="button" onClick={() => moveToSurface("stage-audit", "Decision history")}>View decision history <ArrowUpRight size={16} aria-hidden="true" /></button>
+                </div>
+                <ol className="workbench-activity-list">
+                  <li><span className="workbench-activity-dot" aria-hidden="true" /><span><strong>Risk signal received</strong><small>{demoHeroActive ? "Investigation accepted" : riskState === "ready" ? "Investigation accepted by Core" : "Waiting for verified intake"}</small></span><time>Today</time></li>
+                  <li><span className="workbench-activity-dot" aria-hidden="true" /><span><strong>Evidence chain opened</strong><small>Signal separated from causal analysis</small></span><time>{demoHeroActive || decisionBriefState === "ready" ? "Today" : "Pending"}</time></li>
+                  <li><span className="workbench-activity-dot" aria-hidden="true" /><span><strong>Manager review</strong><small>{actionReady ? "Recommendation ready" : "Awaiting subject support"}</small></span><time>{actionReady ? "Next" : "Pending"}</time></li>
+                </ol>
+              </section>
+            </>
+          )}
+        </main>
+
+        <aside className="workbench-action-rail" aria-labelledby="action-brief-heading">
+          <div className="workbench-action-heading">
+            <div>
+              <p className="workbench-overline">Manager review</p>
+              <h2 id="action-brief-heading">Action brief</h2>
+            </div>
+            <button className="workbench-icon-button" type="button" aria-label="Open action brief in focus view" onClick={() => demoHeroActive ? openDemoDraft() : moveToSurface("stage-actions", "Actions")}>
+              <ArrowUpRight size={18} aria-hidden="true" />
+            </button>
+          </div>
+
+          <section className={`workbench-action-summary ${actionReady ? "is-ready" : "is-waiting"}`}>
+            <div className="workbench-action-summary-top">
+              <span className="workbench-action-symbol" aria-hidden="true">{actionReady ? <CheckmarkFilled size={20} /> : <WarningAltFilled size={20} />}</span>
+              <span>{actionReady ? "Recommended response" : "No action published"}</span>
+            </div>
+            <h3>{actionLabel}</h3>
+            <p>{actionReady ? demoHeroActive ? "Open the draft, make any edits, then hand the message off to Gmail. No message is sent from this workspace." : "This response is bound to the current evidence chain and still needs manager approval." : decisionBrief?.action_lane.state === "read_only" ? "The current reference is read-only. The copilot will not invent an action from incomplete subject support." : "Complete the evidence chain before asking the manager to act."}</p>
+            <div className="workbench-action-reason">
+              <span>Why this matters</span>
+              <strong>{actionReady ? "Protect the switchgear handoff" : "Keep the decision explainable"}</strong>
+            </div>
+            <button className={`workbench-button ${actionReady ? "workbench-button-primary" : "workbench-button-secondary"}`} type="button" onClick={() => demoHeroActive ? openDemoDraft() : moveToSurface(actionReady ? "stage-draft" : "stage-actions", actionReady ? "Draft workspace" : "Actions") }>
+              {actionReady ? <><Email size={18} aria-hidden="true" /> {demoHeroActive ? "Review & edit draft" : "Approve draft & open Gmail"} <Launch size={16} aria-hidden="true" /></> : <><ArrowRight size={18} aria-hidden="true" /> Open evidence &amp; actions</>}
+            </button>
+            <button className="workbench-button workbench-button-quiet" type="button" onClick={() => moveToSurface("stage-evidence", "Evidence")}>Review before deciding</button>
+          </section>
+
+          <section className="workbench-draft-panel" id="demo-draft" aria-labelledby="draft-preview-heading">
+            <div className="workbench-draft-heading">
+              <div>
+                <p className="workbench-overline">Next step</p>
+                <h3 id="draft-preview-heading">Supplier email</h3>
+              </div>
+              <span className={`workbench-draft-state ${actionReady ? "is-ready" : ""}`}>{demoHeroActive ? demoGmailStatus === "opened" ? "Gmail opened" : demoDraftOpened ? "Reviewing" : "Ready" : actionReady ? "Editable" : "Waiting"}</span>
+            </div>
+            <label className="workbench-field">
+              <span>To</span>
+              <input type="email" value={draftRecipient} onChange={(event) => demoHeroActive && setDemoDraftTo(event.target.value)} placeholder="Recipient appears after approval path" readOnly={!demoHeroActive} />
+            </label>
+            <label className="workbench-field">
+              <span>Subject</span>
+              <input type="text" value={draftSubject} onChange={(event) => demoHeroActive && setDemoDraftSubject(event.target.value)} placeholder="Subject appears after approval path" readOnly={!demoHeroActive} />
+            </label>
+            <label className="workbench-field">
+              <span>Message</span>
+              <textarea value={draftBody} onChange={(event) => demoHeroActive && setDemoDraftBody(event.target.value)} placeholder={actionReady ? "Open the draft workspace to prepare the unsent message." : "The unsent draft is created only after a governed recommendation."} readOnly={!demoHeroActive} />
+            </label>
+            <div className="workbench-draft-footnote"><Information size={16} aria-hidden="true" /><span>{demoHeroActive ? "Approve opens Gmail with this message prefilled. Sending always stays with the manager." : "When the draft is ready, Gmail opens prefilled. Sending always stays with the manager."}</span></div>
+            {demoHeroActive && (
+              <div className="workbench-draft-actions">
+                <button className="workbench-button workbench-button-primary" type="button" onClick={openDemoGmail}>
+                  <Email size={18} aria-hidden="true" /> Approve draft &amp; open Gmail <Launch size={16} aria-hidden="true" />
+                </button>
+                {demoGmailStatus === "opened" && <p className="workbench-draft-confirmation" role="status">Gmail compose opened in a new tab. Review and send it there.</p>}
+              </div>
+            )}
+          </section>
+
+          <section className="workbench-safe-state" role="status" aria-live="polite">
+            <span className="workbench-safe-icon"><Information size={16} aria-hidden="true" /></span>
+            <div>
+              <strong>{safeStateUnavailable ? "Core is unavailable" : "Human approval stays in the loop"}</strong>
+              <p>{safeStateUnavailable ? "Retry the Core check before trusting any case state." : "No message is sent and no operational action runs from this screen."}</p>
+            </div>
+            {safeStateUnavailable && <button className="workbench-icon-button" type="button" aria-label="Retry Core check" onClick={onRetry}><Renew size={16} aria-hidden="true" /></button>}
+          </section>
+        </aside>
+      </div>
+
+      <div className="visually-hidden" aria-live="polite" aria-atomic="true">{announcement}</div>
+    </section>
+  );
+}
+
+function DemoAuth({
+  onComplete,
+}: {
+  onComplete: (identity: DemoAuthIdentity) => void;
+}) {
+  const [mode, setMode] = useState<"sign-in" | "create">("sign-in");
+  const [provider, setProvider] = useState<"Google" | "Microsoft" | null>(null);
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  const finishWithProvider = () => {
+    if (provider === null) {
+      return;
+    }
+    onComplete({
+      name: defaultDemoIdentity.name,
+      email: defaultDemoIdentity.email,
+      provider,
+    });
+  };
+
+  const submitEmail = (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const trimmedEmail = email.trim();
+    if (!trimmedEmail.includes("@")) {
+      setError("Enter a work email to continue.");
+      return;
+    }
+    if (mode === "create" && name.trim().length < 2) {
+      setError("Enter your name to create the demo workspace.");
+      return;
+    }
+    if (password.length < 4) {
+      setError("Use at least 4 characters for this demo password.");
+      return;
+    }
+    onComplete({
+      name: mode === "create" ? name.trim() : "Alex Morgan",
+      email: trimmedEmail,
+      provider: "Email",
+    });
+  };
+
+  if (provider !== null) {
+    return (
+      <main className="auth-shell auth-shell-centered" aria-labelledby="auth-heading">
+        <section className="auth-card auth-provider-card">
+          <div className="auth-card-header">
+            <button className="auth-back-button" type="button" onClick={() => setProvider(null)}>
+              <ChevronRight className="auth-back-icon" size={18} aria-hidden="true" />
+              Back
+            </button>
+            <span className="auth-provider-mark" aria-hidden="true">{provider === "Google" ? "G" : "M"}</span>
+          </div>
+          <p className="auth-overline">{provider} sign-in</p>
+          <h1 id="auth-heading">Choose an account</h1>
+          <p className="auth-copy">Select the manager identity for this demo session.</p>
+          <button className="auth-account-choice" type="button" onClick={finishWithProvider}>
+            <span className="auth-account-avatar" aria-hidden="true">AM</span>
+            <span>
+              <strong>Alex Morgan</strong>
+              <small>alex.morgan@projectalpha.com</small>
+            </span>
+            <ChevronRight size={18} aria-hidden="true" />
+          </button>
+          <p className="auth-footnote">The active account controls where an approved Gmail compose window opens.</p>
+        </section>
+      </main>
+    );
+  }
+
+  return (
+    <main className="auth-shell" aria-labelledby="auth-heading">
+      <section className="auth-story" aria-label="What Causal Delay Copilot does">
+        <button className="auth-brand" type="button" onClick={() => setMode("sign-in")}>
+          <span className="auth-brand-mark" aria-hidden="true"><FlowData size={20} /></span>
+          Causal Delay Copilot
+        </button>
+        <div className="auth-story-content">
+          <p className="auth-overline">Manager workspace</p>
+          <h1>Turn a delay warning into a decision you can defend.</h1>
+          <p>Investigate supplier risk, see the evidence chain, and prepare the next conversation from one operating surface.</p>
+          <div className="auth-story-steps" aria-label="Product flow">
+            <div><span>01</span><strong>Attention inbox</strong><small>Know what needs a decision now.</small></div>
+            <div><span>02</span><strong>Evidence chain</strong><small>Separate a signal from a causal conclusion.</small></div>
+            <div><span>03</span><strong>Manager action</strong><small>Review, edit, and own the response.</small></div>
+          </div>
+        </div>
+        <p className="auth-story-footer">A focused decision layer for construction and supply-chain teams.</p>
+      </section>
+
+      <section className="auth-panel" aria-labelledby="auth-heading">
+        <div className="auth-panel-header">
+          <p className="auth-overline">{mode === "sign-in" ? "Welcome back" : "Create your workspace"}</p>
+          <h1 id="auth-heading">{mode === "sign-in" ? "Sign in to your workspace" : "Start with a manager workspace"}</h1>
+          <p className="auth-copy">{mode === "sign-in" ? "Pick up where your team left off." : "Set up a demo identity in a few seconds."}</p>
+        </div>
+
+        <div className="auth-provider-actions">
+          <button className="auth-provider-button" type="button" onClick={() => setProvider("Google")}>
+            <span className="auth-provider-letter auth-provider-letter-google" aria-hidden="true">G</span>
+            Continue with Google
+          </button>
+          <button className="auth-provider-button" type="button" onClick={() => setProvider("Microsoft")}>
+            <span className="auth-provider-letter auth-provider-letter-microsoft" aria-hidden="true">M</span>
+            Continue with Microsoft
+          </button>
+        </div>
+
+        <div className="auth-divider"><span>or use email</span></div>
+
+        <form className="auth-form" onSubmit={submitEmail}>
+          {mode === "create" && (
+            <label>
+              <span>Your name</span>
+              <input autoComplete="name" value={name} onChange={(event) => setName(event.target.value)} placeholder="Alex Morgan" />
+            </label>
+          )}
+          <label>
+            <span>Work email</span>
+            <input type="email" autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@company.com" />
+          </label>
+          <label>
+            <span>Password</span>
+            <input type="password" autoComplete={mode === "sign-in" ? "current-password" : "new-password"} value={password} onChange={(event) => setPassword(event.target.value)} placeholder="••••••••" />
+          </label>
+          {error !== null && <p className="auth-error" role="alert">{error}</p>}
+          <button className="auth-submit-button" type="submit">
+            {mode === "sign-in" ? "Sign in" : "Create account"}
+            <ArrowRight size={18} aria-hidden="true" />
+          </button>
+        </form>
+
+        <div className="auth-mode-switch">
+          <span>{mode === "sign-in" ? "New to the workspace?" : "Already have an account?"}</span>
+          <button type="button" onClick={() => { setMode(mode === "sign-in" ? "create" : "sign-in"); setError(null); }}>
+            {mode === "sign-in" ? "Create account" : "Sign in"}
+          </button>
+        </div>
+        <p className="auth-legal">By continuing, you agree to use this workspace for manager review and decision support.</p>
+      </section>
+    </main>
+  );
+}
+
 function App() {
+  const [authView, setAuthView] = useState<"workbench" | "auth">(() => {
+    if (typeof window === "undefined") {
+      return "workbench";
+    }
+    return new URLSearchParams(window.location.search).get("view") === "signin"
+      ? "auth"
+      : "workbench";
+  });
+  const [demoMode] = useState(() => {
+    if (typeof window === "undefined") {
+      return false;
+    }
+    return new URLSearchParams(window.location.search).get("demo") === "hero";
+  });
+  const [demoIdentity, setDemoIdentity] = useState<DemoAuthIdentity>(defaultDemoIdentity);
   const [journeyState, setJourneyState] = useState<JourneyState>("loading");
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [workspaceState, setWorkspaceState] = useState<WorkspaceState>("pending");
@@ -3384,11 +4279,60 @@ function App() {
     },
   ];
 
+  const openDemoAuth = () => {
+    setAuthView("auth");
+    if (typeof window !== "undefined") {
+      const nextUrl = new URL(window.location.href);
+      nextUrl.searchParams.set("view", "signin");
+      window.history.replaceState({}, "", nextUrl);
+    }
+  };
+
+  const completeDemoAuth = (identity: DemoAuthIdentity) => {
+    setDemoIdentity(identity);
+    setAuthView("workbench");
+    if (typeof window !== "undefined") {
+      const nextUrl = new URL(window.location.href);
+      nextUrl.searchParams.delete("view");
+      window.history.replaceState({}, "", nextUrl);
+    }
+  };
+
+  if (authView === "auth") {
+    return <DemoAuth onComplete={completeDemoAuth} />;
+  }
+
   return (
-    <main className="core-shell" aria-labelledby="app-heading">
-      <a className="skip-link" href="#decision-journey">
-        Skip to Decision journey
+    <main className="core-shell core-shell--workbench" aria-labelledby="workbench-heading">
+      <a className="skip-link" href="#workspace">
+        Skip to workbench
       </a>
+
+      <ShowcaseDashboard
+        journeyState={journeyState}
+        health={health}
+        referenceState={referenceState}
+        riskState={riskState}
+        riskFixture={acceptedRiskFixture}
+        riskAttempt={riskAttempt}
+        decisionBriefState={decisionBriefState}
+        decisionBrief={decisionBrief}
+        actionRecommendation={actionRecommendation}
+        demoMode={demoMode}
+        identity={demoIdentity}
+        onOpenAuth={openDemoAuth}
+        onRetry={() => void loadHealth()}
+      />
+
+      <details className="technical-details" id="technical-evidence">
+        <summary>
+          <span>
+            <span className="technical-details-kicker">Under the hood</span>
+            <strong>Open technical evidence &amp; audit</strong>
+          </span>
+          <span className="technical-details-summary-action">Core contracts, diagnostics, replay, and recovery</span>
+        </summary>
+        <div className="technical-details-body">
       <header className="core-header">
         <p className="eyebrow">Causal Delay Copilot</p>
         <h1 id="app-heading">Core application health</h1>
@@ -4416,6 +5360,8 @@ function App() {
           )}
         </section>
       )}
+        </div>
+      </details>
     </main>
   );
 }

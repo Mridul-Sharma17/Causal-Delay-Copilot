@@ -25,6 +25,8 @@ dist/
 coverage/
 playwright-report/
 test-results/
+.playwright-cli/
+output/
 vercel.json
 .vercel/
 .release/
