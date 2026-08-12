@@ -349,6 +349,7 @@ class LocalQualificationCollector:
                 "scripts\\start.ps1",
                 "-SmokeOnly",
                 "-NoBrowser",
+                "-QualificationRun",
                 "-StateRoot",
                 str(self.state_root),
             ],
