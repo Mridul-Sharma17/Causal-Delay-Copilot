@@ -315,7 +315,6 @@ jobs:
             "${{ needs.deploy_vercel.outputs.deployment_url }}" \
             --token "$VERCEL_TOKEN" \
             --scope "$VERCEL_ORG_ID" \
-            --project "$VERCEL_PROJECT_ID" \
             --yes
 
       - name: Re-read the activated public origin and verify the release binding
