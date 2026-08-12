@@ -71,6 +71,42 @@ The workflow sets `CORE_RELEASE_CANDIDATE_ID` and `CORE_BUILD_MANIFEST_ID` from
 the manifest for each deployment. Do not hand-edit those two values between the
 Railway and Vercel checks.
 
+## Hosted qualification
+
+After activation, run the manually dispatched
+`.github/workflows/hosted-qualification.yml` workflow against the successful
+release workflow run and its artifact, for example:
+
+```powershell
+gh workflow run hosted-qualification.yml -f release_run_id=31550053794 -f release_artifact_name=release-rc-c36a01fc9358 -f budget_alert_record_ref=<railway-alert-ref> -f budget_alert_actor=<operator> -f budget_alert_observed_at=2026-08-12T00:00:00Z
+```
+
+The workflow fetches the `source_commit` in the downloaded release manifest
+for exact deployment-configuration checks, checks only the public Vercel
+origin for browser behavior,
+and uses the pinned Railway and Vercel CLIs for platform state. The browser
+seam then exercises the real Vercel-to-Railway-to-SQLite path for the validated
+reference, typed abstention, workspace isolation, mutation/rate limits, queue
+capacity, and restart recovery. A separate immutable preview with deliberately
+mismatched release IDs must receive `RELEASE_IDENTITY_MISMATCH` before the
+release-mismatch check can pass.
+
+The browser checks intentionally create bounded workspaces, audit mutations,
+and durable operations. Run the qualification once for a release candidate;
+repeat it only when the resulting mutation and workspace consumption is
+acceptable for that hosted environment.
+
+Every run with a valid release manifest writes `hosted-delivery-attestation.json`
+and its SHA-256 sidecar, including blocked runs. An invalid invocation writes a
+typed `hosted-qualification-failure.json` artifact instead and cannot qualify.
+The attestation is `QUALIFIED` only when every required check is `VERIFIED`;
+local tests, the static reference fallback, a missing reference, or a missing
+budget-alert record remain typed blocking states. The Railway budget
+notification is recorded alert evidence only: it must identify the `$4`
+threshold, `hard_cap: false`, the operator, observation time, and the external
+record reference. Its external verification state remains `UNAVAILABLE`
+because the CLI cannot independently read billing alerts.
+
 ## Rollback
 
 Rollback is a new deployment occurrence. The workflow records an append-only

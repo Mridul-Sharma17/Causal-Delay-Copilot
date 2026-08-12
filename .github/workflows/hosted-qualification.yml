@@ -1,0 +1,184 @@
+name: Hosted Qualification
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_run_id:
+        description: "Successful release-candidate workflow run containing the immutable release artifact"
+        required: true
+        type: string
+      release_artifact_name:
+        description: "Artifact name from that run, for example release-rc-c36a01fc9358"
+        required: true
+        type: string
+      budget_alert_record_ref:
+        description: "Railway billing alert reference or URL recorded by the operator"
+        required: true
+        type: string
+      budget_alert_actor:
+        description: "Actor who recorded the Railway billing alert evidence"
+        required: true
+        type: string
+      budget_alert_observed_at:
+        description: "UTC time when the Railway billing alert evidence was recorded"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  RAILWAY_CLI_VERSION: 5.37.4
+  VERCEL_CLI_VERSION: 58.9.3
+
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    environment: production
+    steps:
+      - name: Check out qualification tooling
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 1
+
+      - name: Install the locked Python and Node dependencies
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: 0.11.8
+
+      - name: Download the immutable release artifact
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.release_run_id }}
+          name: ${{ inputs.release_artifact_name }}
+          path: .release
+
+      - name: Fetch the immutable release source for exact config checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_commit="$(python -c 'import json; print(json.load(open(".release/build-manifest.json", encoding="utf-8"))["source_commit"])')"
+          git fetch --no-tags --depth=1 origin "$source_commit"
+
+      - name: Prepare the repository-local qualification runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci --ignore-scripts --no-audit --no-fund
+          uv sync --locked
+          npx --no-install playwright install --with-deps chromium
+
+      - name: Record the Railway budget alert provenance
+        shell: bash
+        env:
+          BUDGET_ALERT_RECORD_REF: ${{ inputs.budget_alert_record_ref }}
+          BUDGET_ALERT_ACTOR: ${{ inputs.budget_alert_actor }}
+          BUDGET_ALERT_OBSERVED_AT: ${{ inputs.budget_alert_observed_at }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          record_ref = os.environ["BUDGET_ALERT_RECORD_REF"].strip()
+          actor = os.environ["BUDGET_ALERT_ACTOR"].strip()
+          observed_at = os.environ["BUDGET_ALERT_OBSERVED_AT"].strip()
+          if not record_ref or not actor or not observed_at:
+              raise SystemExit("budget alert provenance inputs are required")
+          output = Path(".release/hosted-qualification/budget-alert.json")
+          output.parent.mkdir(parents=True, exist_ok=True)
+          output.write_text(
+              json.dumps(
+                  {
+                      "state": "RECORDED",
+                      "threshold_usd": 4,
+                      "hard_cap": False,
+                      "external_verification": "UNAVAILABLE",
+                      "record_ref": record_ref,
+                      "actor": actor,
+                      "observed_at": observed_at,
+                      "source": "operator-recorded-Railway-billing-alert",
+                      "cli_gap": "Railway CLI 5.37.4 exposes no budget-alert resource",
+                  },
+                  sort_keys=True,
+                  separators=(",", ":"),
+              )
+              + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Run the non-compensatory hosted qualification protocol
+        id: qualification
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}
+          RAILWAY_SERVICE_ID: ${{ secrets.RAILWAY_SERVICE_ID }}
+          RAILWAY_ENVIRONMENT_ID: ${{ secrets.RAILWAY_ENVIRONMENT_ID }}
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+          VERCEL_PUBLIC_ORIGIN: ${{ vars.VERCEL_PUBLIC_ORIGIN }}
+          RAILWAY_PUBLIC_ORIGIN: ${{ vars.RAILWAY_PUBLIC_ORIGIN }}
+          HOSTED_BUDGET_ALERT_EVIDENCE: .release/hosted-qualification/budget-alert.json
+        run: |
+          set -euo pipefail
+          mkdir -p .release/hosted-qualification
+          uv run --locked --no-sync python scripts/hosted_qualification.py run \
+            --release-manifest .release/build-manifest.json \
+            --release-artifact-dir .release \
+            --output-dir .release/hosted-qualification \
+            --vercel-origin "$VERCEL_PUBLIC_ORIGIN" \
+            --railway-origin "$RAILWAY_PUBLIC_ORIGIN" \
+            --railway-project-id "$RAILWAY_PROJECT_ID" \
+            --railway-service-id "$RAILWAY_SERVICE_ID" \
+            --railway-environment-id "$RAILWAY_ENVIRONMENT_ID" \
+            --vercel-token "$VERCEL_TOKEN" \
+            --vercel-org-id "$VERCEL_ORG_ID" \
+            --vercel-project-id "$VERCEL_PROJECT_ID"
+
+      - name: Publish the immutable hosted-delivery attestation, including blocked runs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hosted-delivery-attestation-${{ github.run_id }}
+          path: .release/hosted-qualification
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 365
+
+      - name: Add the redacted qualification result to the job summary
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -f .release/hosted-qualification/hosted-delivery-attestation.json ]]; then
+            echo '## Hosted qualification' >> "$GITHUB_STEP_SUMMARY"
+            python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+
+          payload = json.loads(
+              Path(".release/hosted-qualification/hosted-delivery-attestation.json")
+              .read_text(encoding="utf-8")
+          )
+          print(f"- Status: `{payload['qualification_status']}`")
+          print(f"- Release: `{payload['release_candidate_id']}`")
+          print(f"- Build: `{payload['build_manifest_id']}`")
+          print(f"- Content hash: `{payload['content_hash']}`")
+          for check in payload["checks"]:
+              print(f"- `{check['check_id']}`: `{check['status']}` ({check['code']})")
+          PY
+          else
+            echo 'Hosted qualification did not produce an attestation; inspect typed failure evidence.' >> "$GITHUB_STEP_SUMMARY"
+            if [[ -f .release/hosted-qualification/hosted-qualification-failure.json ]]; then
+              cat .release/hosted-qualification/hosted-qualification-failure.json >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
