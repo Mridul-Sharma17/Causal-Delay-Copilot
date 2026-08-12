@@ -3402,7 +3402,7 @@ function ShowcaseDashboard({
               <div className="workbench-user-popover" role="menu">
                 <strong>Signed in with {identity.provider}</strong>
                 <span>{identity.email}</span>
-                <button type="button" role="menuitem" onClick={() => { setUserMenuOpen(false); onOpenAuth(); }}>Open demo sign-in</button>
+                <button type="button" role="menuitem" onClick={() => { setUserMenuOpen(false); onOpenAuth(); }}>Switch account</button>
               </div>
             )}
           </div>
@@ -3769,6 +3769,100 @@ function ShowcaseDashboard({
   );
 }
 
+function CausalMark({ size = 22 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 32 32" fill="none" aria-hidden="true">
+      <rect x="2" y="2" width="28" height="28" stroke="currentColor" strokeWidth="2" />
+      <path d="M8 10H15M8 16H22M8 22H15" stroke="currentColor" strokeWidth="2" strokeLinecap="square" />
+      <circle cx="23" cy="10" r="3" fill="currentColor" />
+      <circle cx="23" cy="22" r="3" fill="currentColor" />
+    </svg>
+  );
+}
+
+function GoogleMark() {
+  return (
+    <svg className="auth-provider-logo" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path fill="#4285F4" d="M21.35 12.27c0-.78-.07-1.54-.22-2.27H12v4.3h5.24a4.48 4.48 0 0 1-1.94 2.94v2.45h3.14c1.84-1.69 2.91-4.18 2.91-7.42Z" />
+      <path fill="#34A853" d="M12 21.75c2.63 0 4.84-.87 6.45-2.36l-3.14-2.45c-.87.58-1.98.92-3.31.92-2.54 0-4.7-1.72-5.47-4.03H3.28v2.53A9.75 9.75 0 0 0 12 21.75Z" />
+      <path fill="#FBBC05" d="M6.53 13.83a5.86 5.86 0 0 1 0-3.66V7.64H3.28a9.75 9.75 0 0 0 0 8.72l3.25-2.53Z" />
+      <path fill="#EA4335" d="M12 6.14c1.43 0 2.71.49 3.72 1.45l2.79-2.79C16.84 3.23 14.63 2.25 12 2.25a9.75 9.75 0 0 0-8.72 5.39l3.25 2.53C7.3 7.86 9.46 6.14 12 6.14Z" />
+    </svg>
+  );
+}
+
+function MicrosoftMark() {
+  return (
+    <svg className="auth-provider-logo auth-provider-logo-microsoft" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path fill="#F25022" d="M2.5 2.5h9.1v9.1H2.5z" />
+      <path fill="#7FBA00" d="M12.4 2.5h9.1v9.1h-9.1z" />
+      <path fill="#00A4EF" d="M2.5 12.4h9.1v9.1H2.5z" />
+      <path fill="#FFB900" d="M12.4 12.4h9.1v9.1h-9.1z" />
+    </svg>
+  );
+}
+
+function AuthStory({ onResetMode }: { onResetMode: () => void }) {
+  return (
+    <section className="auth-story" aria-label="What Causal Delay Copilot does">
+      <div className="auth-story-header">
+        <button className="auth-brand" type="button" onClick={onResetMode}>
+          <span className="auth-brand-mark" aria-hidden="true"><CausalMark size={22} /></span>
+          <span className="auth-brand-lockup">
+            <strong>Causal Delay</strong>
+            <small>Copilot</small>
+          </span>
+        </button>
+        <span className="auth-story-tag">Manager workspace</span>
+      </div>
+
+      <div className="auth-story-content">
+        <p className="auth-overline">Supply-chain decision support</p>
+        <h1>Make the next move before a delay becomes a domino effect.</h1>
+        <p>Bring risk signals, evidence, and manager action into one focused operating surface.</p>
+
+        <div className="auth-product-preview" aria-label="Product flow preview">
+          <div className="auth-preview-header">
+            <span>Case preview</span>
+            <span className="auth-preview-status"><span aria-hidden="true" />Review ready</span>
+          </div>
+          <div className="auth-preview-case">
+            <div className="auth-preview-case-heading">
+              <span className="auth-preview-case-icon" aria-hidden="true"><WarningAltFilled size={18} /></span>
+              <span>
+                <strong>Switchgear handoff risk</strong>
+                <small>Project Alpha · Electrical package</small>
+              </span>
+              <span className="auth-preview-priority">Urgent</span>
+            </div>
+            <div className="auth-preview-track" aria-label="Signal to action flow">
+              <span className="is-complete"><i>1</i>Signal</span>
+              <span className="is-complete"><i>2</i>Evidence</span>
+              <span className="is-current"><i>3</i>Action</span>
+            </div>
+            <div className="auth-preview-callout">
+              <span><CheckmarkFilled size={16} aria-hidden="true" /></span>
+              <p>120 units at risk. A recovery-plan draft is ready for manager review.</p>
+              <ArrowRight size={16} aria-hidden="true" />
+            </div>
+          </div>
+        </div>
+
+        <div className="auth-story-steps" aria-label="Product flow">
+          <div><span>01</span><strong>Detect</strong><small>Surface the cases that need attention.</small></div>
+          <div><span>02</span><strong>Explain</strong><small>Make the evidence chain easy to inspect.</small></div>
+          <div><span>03</span><strong>Act</strong><small>Prepare the next move without losing control.</small></div>
+        </div>
+      </div>
+
+      <div className="auth-story-footer">
+        <span>Built for project delivery teams</span>
+        <span className="auth-story-footer-mark"><CausalMark size={14} /> Evidence-led decisions</span>
+      </div>
+    </section>
+  );
+}
+
 function DemoAuth({
   onComplete,
 }: {
@@ -3800,11 +3894,11 @@ function DemoAuth({
       return;
     }
     if (mode === "create" && name.trim().length < 2) {
-      setError("Enter your name to create the demo workspace.");
+      setError("Enter your name to create a workspace.");
       return;
     }
     if (password.length < 4) {
-      setError("Use at least 4 characters for this demo password.");
+      setError("Use at least 4 characters for your password.");
       return;
     }
     onComplete({
@@ -3814,20 +3908,24 @@ function DemoAuth({
     });
   };
 
-  if (provider !== null) {
-    return (
-      <main className="auth-shell auth-shell-centered" aria-labelledby="auth-heading">
-        <section className="auth-card auth-provider-card">
-          <div className="auth-card-header">
+  return (
+    <main className="auth-shell" aria-labelledby="auth-heading">
+      <AuthStory onResetMode={() => { setMode("sign-in"); setProvider(null); setError(null); }} />
+
+      {provider !== null ? (
+        <section className="auth-panel auth-provider-panel" aria-labelledby="auth-heading">
+          <div className="auth-provider-panel-topline">
             <button className="auth-back-button" type="button" onClick={() => setProvider(null)}>
               <ChevronRight className="auth-back-icon" size={18} aria-hidden="true" />
-              Back
+              Back to sign in
             </button>
-            <span className="auth-provider-mark" aria-hidden="true">{provider === "Google" ? "G" : "M"}</span>
+            <span className="auth-provider-mark" aria-hidden="true">{provider === "Google" ? <GoogleMark /> : <MicrosoftMark />}</span>
           </div>
-          <p className="auth-overline">{provider} sign-in</p>
-          <h1 id="auth-heading">Choose an account</h1>
-          <p className="auth-copy">Select the manager identity for this demo session.</p>
+          <div className="auth-panel-header">
+            <p className="auth-overline">Continue with {provider}</p>
+            <h1 id="auth-heading">Choose an account</h1>
+            <p className="auth-copy">Select the manager identity you want to use for this workspace.</p>
+          </div>
           <button className="auth-account-choice" type="button" onClick={finishWithProvider}>
             <span className="auth-account-avatar" aria-hidden="true">AM</span>
             <span>
@@ -3836,82 +3934,65 @@ function DemoAuth({
             </span>
             <ChevronRight size={18} aria-hidden="true" />
           </button>
-          <p className="auth-footnote">The active account controls where an approved Gmail compose window opens.</p>
-        </section>
-      </main>
-    );
-  }
-
-  return (
-    <main className="auth-shell" aria-labelledby="auth-heading">
-      <section className="auth-story" aria-label="What Causal Delay Copilot does">
-        <button className="auth-brand" type="button" onClick={() => setMode("sign-in")}>
-          <span className="auth-brand-mark" aria-hidden="true"><FlowData size={20} /></span>
-          Causal Delay Copilot
-        </button>
-        <div className="auth-story-content">
-          <p className="auth-overline">Manager workspace</p>
-          <h1>Turn a delay warning into a decision you can defend.</h1>
-          <p>Investigate supplier risk, see the evidence chain, and prepare the next conversation from one operating surface.</p>
-          <div className="auth-story-steps" aria-label="Product flow">
-            <div><span>01</span><strong>Attention inbox</strong><small>Know what needs a decision now.</small></div>
-            <div><span>02</span><strong>Evidence chain</strong><small>Separate a signal from a causal conclusion.</small></div>
-            <div><span>03</span><strong>Manager action</strong><small>Review, edit, and own the response.</small></div>
+          <div className="auth-provider-note">
+            <Information size={16} aria-hidden="true" />
+            <p>The selected account will be used for the manager review workspace and approved email handoff.</p>
           </div>
-        </div>
-        <p className="auth-story-footer">A focused decision layer for construction and supply-chain teams.</p>
-      </section>
+        </section>
+      ) : (
+        <section className="auth-panel" aria-labelledby="auth-heading">
+          <div className="auth-panel-inner">
+            <div className="auth-panel-header">
+              <p className="auth-overline">{mode === "sign-in" ? "Welcome back" : "Create your workspace"}</p>
+              <h1 id="auth-heading">{mode === "sign-in" ? "Sign in to your workspace" : "Start with a manager workspace"}</h1>
+              <p className="auth-copy">{mode === "sign-in" ? "Pick up where your team left off." : "Set up your workspace and bring the next decision into focus."}</p>
+            </div>
 
-      <section className="auth-panel" aria-labelledby="auth-heading">
-        <div className="auth-panel-header">
-          <p className="auth-overline">{mode === "sign-in" ? "Welcome back" : "Create your workspace"}</p>
-          <h1 id="auth-heading">{mode === "sign-in" ? "Sign in to your workspace" : "Start with a manager workspace"}</h1>
-          <p className="auth-copy">{mode === "sign-in" ? "Pick up where your team left off." : "Set up a demo identity in a few seconds."}</p>
-        </div>
+            <form className="auth-form" onSubmit={submitEmail}>
+              {mode === "create" && (
+                <label>
+                  <span>Your name</span>
+                  <input autoComplete="name" value={name} onChange={(event) => setName(event.target.value)} placeholder="Alex Morgan" />
+                </label>
+              )}
+              <label>
+                <span>Work email</span>
+                <input type="email" autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@company.com" />
+              </label>
+              <label>
+                <span>Password</span>
+                <input type="password" autoComplete={mode === "sign-in" ? "current-password" : "new-password"} value={password} onChange={(event) => setPassword(event.target.value)} placeholder="Enter your password" />
+              </label>
+              {error !== null && <p className="auth-error" role="alert">{error}</p>}
+              <button className="auth-submit-button" type="submit">
+                {mode === "sign-in" ? "Sign in" : "Create account"}
+                <ArrowRight size={18} aria-hidden="true" />
+              </button>
+            </form>
 
-        <div className="auth-provider-actions">
-          <button className="auth-provider-button" type="button" onClick={() => setProvider("Google")}>
-            <span className="auth-provider-letter auth-provider-letter-google" aria-hidden="true">G</span>
-            Continue with Google
-          </button>
-          <button className="auth-provider-button" type="button" onClick={() => setProvider("Microsoft")}>
-            <span className="auth-provider-letter auth-provider-letter-microsoft" aria-hidden="true">M</span>
-            Continue with Microsoft
-          </button>
-        </div>
+            <div className="auth-divider"><span>or continue with</span></div>
 
-        <div className="auth-divider"><span>or use email</span></div>
+            <div className="auth-provider-actions">
+              <button className="auth-provider-button" type="button" onClick={() => setProvider("Google")}>
+                <GoogleMark />
+                <span>Google</span>
+              </button>
+              <button className="auth-provider-button" type="button" onClick={() => setProvider("Microsoft")}>
+                <MicrosoftMark />
+                <span>Microsoft</span>
+              </button>
+            </div>
 
-        <form className="auth-form" onSubmit={submitEmail}>
-          {mode === "create" && (
-            <label>
-              <span>Your name</span>
-              <input autoComplete="name" value={name} onChange={(event) => setName(event.target.value)} placeholder="Alex Morgan" />
-            </label>
-          )}
-          <label>
-            <span>Work email</span>
-            <input type="email" autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@company.com" />
-          </label>
-          <label>
-            <span>Password</span>
-            <input type="password" autoComplete={mode === "sign-in" ? "current-password" : "new-password"} value={password} onChange={(event) => setPassword(event.target.value)} placeholder="••••••••" />
-          </label>
-          {error !== null && <p className="auth-error" role="alert">{error}</p>}
-          <button className="auth-submit-button" type="submit">
-            {mode === "sign-in" ? "Sign in" : "Create account"}
-            <ArrowRight size={18} aria-hidden="true" />
-          </button>
-        </form>
-
-        <div className="auth-mode-switch">
-          <span>{mode === "sign-in" ? "New to the workspace?" : "Already have an account?"}</span>
-          <button type="button" onClick={() => { setMode(mode === "sign-in" ? "create" : "sign-in"); setError(null); }}>
-            {mode === "sign-in" ? "Create account" : "Sign in"}
-          </button>
-        </div>
-        <p className="auth-legal">By continuing, you agree to use this workspace for manager review and decision support.</p>
-      </section>
+            <div className="auth-mode-switch">
+              <span>{mode === "sign-in" ? "New to the workspace?" : "Already have an account?"}</span>
+              <button type="button" onClick={() => { setMode(mode === "sign-in" ? "create" : "sign-in"); setError(null); }}>
+                {mode === "sign-in" ? "Create account" : "Sign in"}
+              </button>
+            </div>
+            <p className="auth-legal">By continuing, you agree to use this workspace for manager review and decision support.</p>
+          </div>
+        </section>
+      )}
     </main>
   );
 }
@@ -4331,8 +4412,11 @@ function App() {
   }, [riskAttempt, riskFixtures]);
 
   useEffect(() => {
+    if (authView === "auth") {
+      return;
+    }
     void loadHealth();
-  }, [loadHealth]);
+  }, [authView, loadHealth]);
 
   const statusMessage =
     journeyState === "loading"
