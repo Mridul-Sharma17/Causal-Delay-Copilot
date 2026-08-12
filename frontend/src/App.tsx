@@ -2948,6 +2948,25 @@ const showcaseCases: ShowcaseCase[] = [
 const demoHeroScenario = {
   score: 0.9090909107676192,
   recommendation: "Request supplier recovery plan",
+  inputs: {
+    source: "Amber risk signal",
+    supplier: "PowerGrid Systems",
+    order: "120 high-complexity switchgear units",
+    package: "Project Alpha · Electrical package",
+    promise: "Feb 15, 2026",
+    revision: "Feb 20, 2026",
+    exposure: "$185,000 order exposure",
+  },
+  analysis: {
+    headline: "The supplier handoff is the decision point.",
+    language:
+      "High-load exposure is estimated to increase Supplier Milestone Slippage by 1.5 calendar days (95% interval 0.2 to 2.8), under the stated assumptions.",
+    scope: "Subject-level support available",
+    effect: "1.5 calendar days",
+    interval: "0.2 – 2.8 days · 95% interval",
+    robustness: "Moderate robustness",
+    nextStep: "Request a dated supplier recovery plan",
+  },
   recipient: "recovery@powergrid-systems.com",
   subject: "Project Alpha: recovery plan for switchgear handoff",
   body: "Hi Priya,\n\nWe are reviewing the revised February 20 handoff for Project Alpha's switchgear package. Please share a dated recovery plan covering the remaining 120 units, the next confirmed milestone, and any action needed from our team.\n\nPlease send the plan by 3:00 PM today so we can protect the downstream installation sequence.\n\nBest,\nAlex Morgan",
@@ -2962,6 +2981,42 @@ const demoHeroScenario = {
       "Request a dated recovery plan from the supplier. The manager reviews and sends the message; the copilot does not execute the action.",
   } satisfies Record<EvidenceStepKey, string>,
 } as const;
+
+type DemoActionChoice = "recovery" | "monitor" | "escalate";
+
+const demoResponseOptions: Array<{
+  id: DemoActionChoice;
+  label: string;
+  rationale: string;
+  subject: string;
+  body: string;
+  recommended: boolean;
+}> = [
+  {
+    id: "recovery",
+    label: "Request supplier recovery plan",
+    rationale: "Protect the switchgear handoff with a dated supplier commitment.",
+    subject: demoHeroScenario.subject,
+    body: demoHeroScenario.body,
+    recommended: true,
+  },
+  {
+    id: "monitor",
+    label: "Accept and monitor",
+    rationale: "Keep the case open and verify the next supplier milestone before escalating.",
+    subject: "Project Alpha: monitor switchgear handoff",
+    body: "Hi Priya,\n\nPlease confirm the next production milestone for Project Alpha's switchgear handoff and let us know if the February 20 date is still achievable. We will keep the case under review and follow up at the next checkpoint.\n\nBest,\nAlex Morgan",
+    recommended: false,
+  },
+  {
+    id: "escalate",
+    label: "Escalate to project controls",
+    rationale: "Bring the schedule owner into the decision before the downstream sequence is affected.",
+    subject: "Project Alpha: switchgear handoff needs schedule review",
+    body: "Hi team,\n\nThe Project Alpha switchgear handoff has moved from February 15 to February 20. Please review the downstream installation sequence and confirm the mitigation path for the 120-unit package.\n\nBest,\nAlex Morgan",
+    recommended: false,
+  },
+];
 
 function showcaseValue(value: unknown, fallback = "Unavailable"): string {
   if (typeof value === "string" && value.length > 0) {
@@ -3047,6 +3102,7 @@ function ShowcaseDashboard({
   const [announcement, setAnnouncement] = useState("Workbench ready.");
   const [demoDraftOpened, setDemoDraftOpened] = useState(false);
   const [demoGmailStatus, setDemoGmailStatus] = useState<"idle" | "opened">("idle");
+  const [demoActionChoice, setDemoActionChoice] = useState<DemoActionChoice>("recovery");
   const [demoDraftTo, setDemoDraftTo] = useState<string>(demoHeroScenario.recipient);
   const [demoDraftSubject, setDemoDraftSubject] = useState<string>(demoHeroScenario.subject);
   const [demoDraftBody, setDemoDraftBody] = useState<string>(demoHeroScenario.body);
@@ -3087,6 +3143,9 @@ function ShowcaseDashboard({
     showcaseCases.find((item) => item.id === selectedCaseId) ?? showcaseCases[0];
   const isHeroCase = selectedCase.id === "switchgear";
   const demoHeroActive = demoMode && isHeroCase;
+  const selectedDemoAction =
+    demoResponseOptions.find((option) => option.id === demoActionChoice) ??
+    demoResponseOptions[0];
   const request = riskAttempt?.investigation_request ?? null;
   const requestSubject = asRecord(request?.causal_engine_input.subject_analytical_values);
   const score = demoHeroActive ? demoHeroScenario.score : riskFixture?.signal.score_value;
@@ -3095,7 +3154,7 @@ function ShowcaseDashboard({
   const actionReady = demoHeroActive || actionRecommendation !== null;
   const actionLabel = actionReady
     ? demoHeroActive
-      ? demoHeroScenario.recommendation
+      ? selectedDemoAction.label
       : showcaseOptionLabel(
         actionRecommendation?.label ?? actionRecommendation?.selected_option_code,
         "Review governed response",
@@ -3129,6 +3188,17 @@ function ShowcaseDashboard({
     setDemoDraftOpened(true);
     moveToSurface("demo-draft", "Draft workspace");
   };
+  const chooseDemoAction = (choice: DemoActionChoice) => {
+    const option = demoResponseOptions.find((candidate) => candidate.id === choice);
+    setDemoActionChoice(choice);
+    if (demoHeroActive && option !== undefined) {
+      setDemoDraftSubject(option.subject);
+      setDemoDraftBody(option.body);
+      setDemoDraftOpened(false);
+      setDemoGmailStatus("idle");
+      setAnnouncement(`${option.label} selected. Review the draft before handing it to Gmail.`);
+    }
+  };
   const openEvidenceDetails = () => {
     if (demoHeroActive) {
       setAnnouncement(`${selectedStep.title} evidence is available in the current case record.`);
@@ -3146,6 +3216,36 @@ function ShowcaseDashboard({
   const effectiveJourneyState = demoHeroActive ? "healthy" : journeyState;
   const effectiveReferenceState = demoHeroActive ? "ready" : referenceState;
   const effectiveSubjectState = demoHeroActive ? "supported" : subjectState;
+  const renderedVerdict = asRecord(decisionBrief?.rendered_subject_verdict);
+  const analysisLanguage = demoHeroActive
+    ? demoHeroScenario.analysis.language
+    : decisionBrief?.subject_applicability.state === "abstained"
+      ? "Population evidence is available, but this case does not support a subject-level effect claim."
+      : showcaseValue(
+          renderedVerdict?.language,
+          decisionBriefState === "ready"
+            ? "Decision Brief published. Open the evidence record for the rendered conclusion."
+            : "The analysis conclusion will appear after the evidence chain is ready.",
+        );
+  const analysisScope = demoHeroActive
+    ? demoHeroScenario.analysis.scope
+    : decisionBrief?.subject_applicability.state === "applicable"
+      ? "Subject-level support available"
+      : decisionBrief?.subject_applicability.state === "population_limited"
+        ? "Population-level evidence only"
+        : "Support unavailable";
+  const analysisEffect = demoHeroActive ? demoHeroScenario.analysis.effect : "See Decision Brief";
+  const analysisInterval = demoHeroActive
+    ? demoHeroScenario.analysis.interval
+    : "Bound to the published evidence verdict";
+  const analysisRobustness = demoHeroActive
+    ? demoHeroScenario.analysis.robustness
+    : decisionBriefState === "ready"
+      ? "Published with diagnostics"
+      : "Not evaluated";
+  const analysisNextStep = actionReady
+    ? actionLabel
+    : "No manager action is published yet";
   const coreStatus =
     demoHeroActive
       ? "Workspace ready"
@@ -3438,6 +3538,26 @@ function ShowcaseDashboard({
                 </div>
               </div>
 
+              <section className="workbench-case-input" aria-labelledby="case-input-heading">
+                <div className="workbench-case-input-heading">
+                  <div>
+                    <p className="workbench-overline">What came in</p>
+                    <h2 id="case-input-heading">Amber flagged a supplier handoff risk</h2>
+                    <p>These are the frozen inputs the Copilot uses before it makes any causal or action claim.</p>
+                  </div>
+                  <button className="workbench-link-button" type="button" onClick={() => { setSelectedEvidence("signal"); setAnnouncement("Showing the upstream Amber signal inputs."); }}>
+                    Inspect source signal <ArrowUpRight size={16} aria-hidden="true" />
+                  </button>
+                </div>
+                <dl className="workbench-input-facts">
+                  <div><dt>Source</dt><dd>{demoHeroScenario.inputs.source}</dd></div>
+                  <div><dt>Supplier</dt><dd>{demoHeroScenario.inputs.supplier}</dd></div>
+                  <div><dt>Order line</dt><dd>{demoHeroScenario.inputs.order}</dd></div>
+                  <div><dt>Milestone</dt><dd>{demoHeroScenario.inputs.promise} → {demoHeroScenario.inputs.revision}</dd></div>
+                  <div><dt>Project value</dt><dd>{demoHeroScenario.inputs.exposure}</dd></div>
+                </dl>
+              </section>
+
               <section className="workbench-status-band" aria-label="Causal status">
                 <div className="workbench-status-primary">
                   {evidenceReady && effectiveSubjectState === "abstained" ? (
@@ -3505,6 +3625,24 @@ function ShowcaseDashboard({
                     Open details <ArrowRight size={16} aria-hidden="true" />
                   </button>
                 </div>
+                <section className="workbench-analysis-readout" aria-labelledby="analysis-readout-heading">
+                  <div className="workbench-analysis-copy">
+                    <p className="workbench-overline">What the evidence says</p>
+                    <h2 id="analysis-readout-heading">{demoHeroActive ? demoHeroScenario.analysis.headline : "The analysis conclusion"}</h2>
+                    <p>{analysisLanguage}</p>
+                  </div>
+                  <dl className="workbench-analysis-facts">
+                    <div><dt>Claim scope</dt><dd>{analysisScope}</dd></div>
+                    <div><dt>Estimated effect</dt><dd>{analysisEffect}</dd></div>
+                    <div><dt>Uncertainty</dt><dd>{analysisInterval}</dd></div>
+                    <div><dt>Evidence quality</dt><dd>{analysisRobustness}</dd></div>
+                  </dl>
+                  <div className="workbench-analysis-next">
+                    <span>Next permitted step</span>
+                    <strong>{analysisNextStep}</strong>
+                    <small>The manager chooses and owns the response. The Copilot does not execute it.</small>
+                  </div>
+                </section>
               </section>
 
               <section className="workbench-activity-section" aria-labelledby="activity-heading">
@@ -3539,19 +3677,50 @@ function ShowcaseDashboard({
           <section className={`workbench-action-summary ${actionReady ? "is-ready" : "is-waiting"}`}>
             <div className="workbench-action-summary-top">
               <span className="workbench-action-symbol" aria-hidden="true">{actionReady ? <CheckmarkFilled size={20} /> : <WarningAltFilled size={20} />}</span>
-              <span>{actionReady ? "Recommended response" : "No action published"}</span>
+              <span>{actionReady ? demoHeroActive && !selectedDemoAction.recommended ? "Selected response" : "Recommended response" : "No action published"}</span>
             </div>
             <h3>{actionLabel}</h3>
             <p>{actionReady ? demoHeroActive ? "Open the draft, make any edits, then hand the message off to Gmail. No message is sent from this workspace." : "This response is bound to the current evidence chain and still needs manager approval." : decisionBrief?.action_lane.state === "read_only" ? "The current reference is read-only. The copilot will not invent an action from incomplete subject support." : "Complete the evidence chain before asking the manager to act."}</p>
             <div className="workbench-action-reason">
               <span>Why this matters</span>
-              <strong>{actionReady ? "Protect the switchgear handoff" : "Keep the decision explainable"}</strong>
+              <strong>{actionReady ? demoHeroActive ? selectedDemoAction.rationale : "Protect the switchgear handoff" : "Keep the decision explainable"}</strong>
             </div>
             <button className={`workbench-button ${actionReady ? "workbench-button-primary" : "workbench-button-secondary"}`} type="button" onClick={() => demoHeroActive ? openDemoDraft() : moveToSurface(actionReady ? "stage-draft" : "stage-actions", actionReady ? "Draft workspace" : "Actions") }>
               {actionReady ? <><Email size={18} aria-hidden="true" /> {demoHeroActive ? "Review & edit draft" : "Approve draft & open Gmail"} <Launch size={16} aria-hidden="true" /></> : <><ArrowRight size={18} aria-hidden="true" /> Open evidence &amp; actions</>}
             </button>
             <button className="workbench-button workbench-button-quiet" type="button" onClick={() => moveToSurface("stage-evidence", "Evidence")}>Review before deciding</button>
           </section>
+
+          {demoHeroActive && (
+            <section className="workbench-response-options" aria-labelledby="response-options-heading">
+              <div className="workbench-draft-heading">
+                <div>
+                  <p className="workbench-overline">Manager input</p>
+                  <h3 id="response-options-heading">Choose the next conversation</h3>
+                </div>
+                <span className="workbench-draft-state is-ready">1 selected</span>
+              </div>
+              <p className="workbench-response-copy">The evidence informs the choice; it does not make the choice for you.</p>
+              <div className="workbench-response-list" role="group" aria-label="Response options">
+                {demoResponseOptions.map((option) => (
+                  <button
+                    className={`workbench-response-option ${demoActionChoice === option.id ? "is-selected" : ""}`}
+                    key={option.id}
+                    type="button"
+                    aria-pressed={demoActionChoice === option.id}
+                    onClick={() => chooseDemoAction(option.id)}
+                  >
+                    <span className="workbench-response-option-marker" aria-hidden="true" />
+                    <span>
+                      <strong>{option.label}</strong>
+                      <small>{option.rationale}</small>
+                    </span>
+                    {option.recommended && <em>Recommended</em>}
+                  </button>
+                ))}
+              </div>
+            </section>
+          )}
 
           <section className="workbench-draft-panel" id="demo-draft" aria-labelledby="draft-preview-heading">
             <div className="workbench-draft-heading">
