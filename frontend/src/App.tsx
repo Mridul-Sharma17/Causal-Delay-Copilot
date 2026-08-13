@@ -2899,6 +2899,12 @@ type ShowcaseCase = {
 type EvidenceStepKey = "signal" | "eligibility" | "causal" | "verdict";
 type ShowcaseView = "Workbench" | "Evidence" | "Decisions" | "Configuration";
 
+const showcaseNavigationItems: Array<{ view: Exclude<ShowcaseView, "Configuration">; label: string }> = [
+  { view: "Workbench", label: "Inbox" },
+  { view: "Evidence", label: "Evidence" },
+  { view: "Decisions", label: "Decision" },
+];
+
 type DemoAuthIdentity = {
   name: string;
   email: string;
@@ -3440,14 +3446,14 @@ function ShowcaseDashboard({
         </div>
 
         <nav className="workbench-primary-nav" aria-label="Primary">
-          {(["Workbench", "Evidence", "Decisions", "Configuration"] as ShowcaseView[]).map((item) => (
+          {showcaseNavigationItems.map((item) => (
             <button
-              className={`workbench-nav-link ${activeNav === item ? "is-active" : ""}`}
-              key={item}
+              className={`workbench-nav-link ${activeNav === item.view ? "is-active" : ""}`}
+              key={item.view}
               type="button"
-              onClick={() => openShowcaseView(item)}
+              onClick={() => openShowcaseView(item.view)}
             >
-              {item}
+              {item.label}
             </button>
           ))}
         </nav>
@@ -3475,6 +3481,7 @@ function ShowcaseDashboard({
               <div className="workbench-user-popover" role="menu">
                 <strong>Signed in with {identity.provider}</strong>
                 <span>{identity.email}</span>
+                <button type="button" role="menuitem" onClick={() => { setUserMenuOpen(false); openShowcaseView("Configuration"); }}>Workspace settings</button>
                 <button type="button" role="menuitem" onClick={() => { setUserMenuOpen(false); onOpenAuth(); }}>Switch account</button>
               </div>
             )}
@@ -3483,15 +3490,15 @@ function ShowcaseDashboard({
       </header>
 
       {mobileNavOpen && (
-        <nav className="workbench-mobile-nav" id="mobile-primary-navigation" aria-label="Primary">
-          {(["Workbench", "Evidence", "Decisions", "Configuration"] as ShowcaseView[]).map((item) => (
+        <nav className="workbench-mobile-nav" id="mobile-primary-navigation" aria-label="Case review stages">
+          {showcaseNavigationItems.map((item) => (
             <button
-              className={`workbench-mobile-nav-link ${activeNav === item ? "is-active" : ""}`}
-              key={item}
+              className={`workbench-mobile-nav-link ${activeNav === item.view ? "is-active" : ""}`}
+              key={item.view}
               type="button"
-              onClick={() => openShowcaseView(item)}
+              onClick={() => openShowcaseView(item.view)}
             >
-              {item}
+              {item.label}
             </button>
           ))}
         </nav>
@@ -3614,7 +3621,7 @@ function ShowcaseDashboard({
                   </div>
                   <button className="workbench-quiet-button" type="button" onClick={() => openShowcaseView("Evidence")}>
                     <Document size={16} aria-hidden="true" />
-                    View case record
+                    Review evidence
                   </button>
                 </div>
 
@@ -3641,6 +3648,37 @@ function ShowcaseDashboard({
                   </div>
                 </div>
               </div>
+
+              <section className="workbench-overview-card" aria-labelledby="overview-answer-heading">
+                <div className="workbench-overview-answer">
+                  <div>
+                    <p className="workbench-overline workbench-overline-blue">Manager view</p>
+                    <h2 id="overview-answer-heading">{demoHeroActive ? "High risk, with a five-day handoff slip." : "Verify the signal before acting."}</h2>
+                    <p>{demoHeroActive ? "Amber flagged the supplier handoff. The Copilot is ready to check whether supplier load is supported as a driver before anyone acts." : safeStateUnavailable ? "Core must verify this case before a manager can act." : "The selected case is ready for the next permitted review step."}</p>
+                  </div>
+                  <dl className="workbench-overview-metrics">
+                    <div><dt>Risk signal</dt><dd>{scoreLabel}</dd></div>
+                    <div><dt>Handoff shift</dt><dd>{demoHeroActive ? "+5 days" : "Not verified"}</dd></div>
+                    <div><dt>Decision due</dt><dd>{demoHeroActive ? "Today" : "Pending"}</dd></div>
+                  </dl>
+                </div>
+
+                <ol className="workbench-stage-strip" aria-label="Case review stages">
+                  <li className={demoHeroActive ? "is-complete" : ""}><span>01</span><strong>Signal</strong><small>{demoHeroActive ? `${scoreLabel} flagged` : signalStatus}</small></li>
+                  <li className={demoHeroActive || evidenceReady ? "is-current" : ""}><span>02</span><strong>Evidence</strong><small>{demoHeroActive || evidenceReady ? "Ready to review" : "Awaiting evidence"}</small></li>
+                  <li><span>03</span><strong>Decision</strong><small>{demoHeroActive || actionReady ? "Manager-owned" : "Not available"}</small></li>
+                </ol>
+
+                <div className="workbench-overview-action">
+                  <div>
+                    <span>Next permitted step</span>
+                    <strong>{demoHeroActive || evidenceReady ? "Review the evidence chain" : "Wait for Core verification"}</strong>
+                  </div>
+                  <button className="workbench-button workbench-button-primary" type="button" onClick={() => openShowcaseView("Evidence")}>
+                    Review evidence <ArrowRight size={16} aria-hidden="true" />
+                  </button>
+                </div>
+              </section>
 
               <section className="workbench-case-input" aria-labelledby="case-input-heading">
                 <div className="workbench-case-input-heading">
@@ -3902,6 +3940,15 @@ function ShowcaseDashboard({
 
           {activeNav === "Evidence" && (
             <>
+              <section className="workbench-method-strip" aria-label="How the evidence result is built">
+                <span>How this result is built</span>
+                <ol>
+                  <li><strong>Context freeze</strong><small>Use facts available at the signal</small></li>
+                  <li><strong>Eligibility gate</strong><small>Check scope, timing, and overlap</small></li>
+                  <li><strong>DoubleML estimate</strong><small>Estimate supplier-load effect</small></li>
+                  <li><strong>Diagnostics</strong><small>Challenge robustness before action</small></li>
+                </ol>
+              </section>
               <div className="workbench-view-grid">
                 <section className="workbench-view-card workbench-view-card-wide" aria-labelledby="evidence-view-chain-heading">
                   <div className="workbench-view-card-heading">
@@ -4196,91 +4243,93 @@ function DemoAuth({
   return (
     <main className="auth-shell" aria-labelledby="auth-heading">
       <div className="auth-wallpaper" aria-hidden="true" />
-      <AuthStory onResetMode={() => { setMode("sign-in"); setProvider(null); setError(null); }} />
+      <div className="auth-stage">
+        <AuthStory onResetMode={() => { setMode("sign-in"); setProvider(null); setError(null); }} />
 
-      {provider !== null ? (
-        <section className="auth-panel auth-provider-panel" aria-labelledby="auth-heading">
-          <div className="auth-panel-inner">
-            <div className="auth-provider-panel-topline">
-              <button className="auth-back-button" type="button" onClick={() => setProvider(null)}>
-                <ChevronRight className="auth-back-icon" size={18} aria-hidden="true" />
-                Back to sign in
+        {provider !== null ? (
+          <section className="auth-panel auth-provider-panel" aria-labelledby="auth-heading">
+            <div className="auth-panel-inner">
+              <div className="auth-provider-panel-topline">
+                <button className="auth-back-button" type="button" onClick={() => setProvider(null)}>
+                  <ChevronRight className="auth-back-icon" size={18} aria-hidden="true" />
+                  Back to sign in
+                </button>
+                <span className="auth-provider-mark" aria-hidden="true">{provider === "Google" ? <GoogleMark /> : <MicrosoftMark />}</span>
+              </div>
+              <div className="auth-panel-header">
+                <p className="auth-overline">Continue with {provider}</p>
+                <h1 id="auth-heading">Choose an account</h1>
+                <p className="auth-copy">Select the manager identity you want to use for this workspace.</p>
+              </div>
+              <button className="auth-account-choice" type="button" onClick={finishWithProvider}>
+                <span className="auth-account-avatar" aria-hidden="true">AM</span>
+                <span>
+                  <strong>Alex Morgan</strong>
+                  <small>alex.morgan@projectalpha.com</small>
+                </span>
+                <ChevronRight size={18} aria-hidden="true" />
               </button>
-              <span className="auth-provider-mark" aria-hidden="true">{provider === "Google" ? <GoogleMark /> : <MicrosoftMark />}</span>
+              <div className="auth-provider-note">
+                <Information size={16} aria-hidden="true" />
+                <p>The selected account will be used for the manager review workspace and approved email handoff.</p>
+              </div>
             </div>
-            <div className="auth-panel-header">
-              <p className="auth-overline">Continue with {provider}</p>
-              <h1 id="auth-heading">Choose an account</h1>
-              <p className="auth-copy">Select the manager identity you want to use for this workspace.</p>
-            </div>
-            <button className="auth-account-choice" type="button" onClick={finishWithProvider}>
-              <span className="auth-account-avatar" aria-hidden="true">AM</span>
-              <span>
-                <strong>Alex Morgan</strong>
-                <small>alex.morgan@projectalpha.com</small>
-              </span>
-              <ChevronRight size={18} aria-hidden="true" />
-            </button>
-            <div className="auth-provider-note">
-              <Information size={16} aria-hidden="true" />
-              <p>The selected account will be used for the manager review workspace and approved email handoff.</p>
-            </div>
-          </div>
-        </section>
-      ) : (
-        <section className="auth-panel" aria-labelledby="auth-heading">
-          <div className="auth-panel-inner">
-            <div className="auth-panel-header">
-              <p className="auth-overline">{mode === "sign-in" ? "Welcome back" : "Create your workspace"}</p>
-              <h1 id="auth-heading">{mode === "sign-in" ? "Sign in to your workspace" : "Start with a manager workspace"}</h1>
-              <p className="auth-copy">{mode === "sign-in" ? "Pick up where your team left off." : "Set up your workspace and bring the next decision into focus."}</p>
-            </div>
+          </section>
+        ) : (
+          <section className="auth-panel" aria-labelledby="auth-heading">
+            <div className="auth-panel-inner">
+              <div className="auth-panel-header">
+                <p className="auth-overline">{mode === "sign-in" ? "Welcome back" : "Create your workspace"}</p>
+                <h1 id="auth-heading">{mode === "sign-in" ? "Sign in to your workspace" : "Start with a manager workspace"}</h1>
+                <p className="auth-copy">{mode === "sign-in" ? "Pick up where your team left off." : "Set up your workspace and bring the next decision into focus."}</p>
+              </div>
 
-            <form className="auth-form" onSubmit={submitEmail}>
-              {mode === "create" && (
+              <form className="auth-form" onSubmit={submitEmail}>
+                {mode === "create" && (
+                  <label>
+                    <span>Your name</span>
+                    <input autoComplete="name" value={name} onChange={(event) => setName(event.target.value)} placeholder="Alex Morgan" />
+                  </label>
+                )}
                 <label>
-                  <span>Your name</span>
-                  <input autoComplete="name" value={name} onChange={(event) => setName(event.target.value)} placeholder="Alex Morgan" />
+                  <span>Work email</span>
+                  <input type="email" autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@company.com" />
                 </label>
-              )}
-              <label>
-                <span>Work email</span>
-                <input type="email" autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@company.com" />
-              </label>
-              <label>
-                <span>Password</span>
-                <input type="password" autoComplete={mode === "sign-in" ? "current-password" : "new-password"} value={password} onChange={(event) => setPassword(event.target.value)} placeholder="Enter your password" />
-              </label>
-              {error !== null && <p className="auth-error" role="alert">{error}</p>}
-              <button className="auth-submit-button" type="submit">
-                {mode === "sign-in" ? "Sign in" : "Create account"}
-                <ArrowRight size={18} aria-hidden="true" />
-              </button>
-            </form>
+                <label>
+                  <span>Password</span>
+                  <input type="password" autoComplete={mode === "sign-in" ? "current-password" : "new-password"} value={password} onChange={(event) => setPassword(event.target.value)} placeholder="Enter your password" />
+                </label>
+                {error !== null && <p className="auth-error" role="alert">{error}</p>}
+                <button className="auth-submit-button" type="submit">
+                  {mode === "sign-in" ? "Sign in" : "Create account"}
+                  <ArrowRight size={18} aria-hidden="true" />
+                </button>
+              </form>
 
-            <div className="auth-divider"><span>or continue with</span></div>
+              <div className="auth-divider"><span>or continue with</span></div>
 
-            <div className="auth-provider-actions">
-              <button className="auth-provider-button" type="button" onClick={() => setProvider("Google")}>
-                <GoogleMark />
-                <span>Google</span>
-              </button>
-              <button className="auth-provider-button" type="button" onClick={() => setProvider("Microsoft")}>
-                <MicrosoftMark />
-                <span>Microsoft</span>
-              </button>
+              <div className="auth-provider-actions">
+                <button className="auth-provider-button" type="button" onClick={() => setProvider("Google")}>
+                  <GoogleMark />
+                  <span>Google</span>
+                </button>
+                <button className="auth-provider-button" type="button" onClick={() => setProvider("Microsoft")}>
+                  <MicrosoftMark />
+                  <span>Microsoft</span>
+                </button>
+              </div>
+
+              <div className="auth-mode-switch">
+                <span>{mode === "sign-in" ? "New to the workspace?" : "Already have an account?"}</span>
+                <button type="button" onClick={() => { setMode(mode === "sign-in" ? "create" : "sign-in"); setError(null); }}>
+                  {mode === "sign-in" ? "Create account" : "Sign in"}
+                </button>
+              </div>
+              <p className="auth-legal">By continuing, you agree to use this workspace for manager review and decision support.</p>
             </div>
-
-            <div className="auth-mode-switch">
-              <span>{mode === "sign-in" ? "New to the workspace?" : "Already have an account?"}</span>
-              <button type="button" onClick={() => { setMode(mode === "sign-in" ? "create" : "sign-in"); setError(null); }}>
-                {mode === "sign-in" ? "Create account" : "Sign in"}
-              </button>
-            </div>
-            <p className="auth-legal">By continuing, you agree to use this workspace for manager review and decision support.</p>
-          </div>
-        </section>
-      )}
+          </section>
+        )}
+      </div>
     </main>
   );
 }
