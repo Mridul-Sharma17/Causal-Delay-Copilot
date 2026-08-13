@@ -2897,6 +2897,7 @@ type ShowcaseCase = {
 };
 
 type EvidenceStepKey = "signal" | "eligibility" | "causal" | "verdict";
+type ShowcaseView = "Workbench" | "Evidence" | "Decisions" | "Configuration";
 
 type DemoAuthIdentity = {
   name: string;
@@ -3093,12 +3094,33 @@ function ShowcaseDashboard({
   onOpenAuth: () => void;
   onRetry: () => void;
 }) {
-  const [selectedCaseId, setSelectedCaseId] = useState<ShowcaseCase["id"]>("switchgear");
+  const [selectedCaseId, setSelectedCaseId] = useState<ShowcaseCase["id"]>(() => {
+    if (typeof window === "undefined") {
+      return "switchgear";
+    }
+    const value = new URLSearchParams(window.location.search).get("case");
+    return showcaseCases.some((item) => item.id === value)
+      ? (value as ShowcaseCase["id"])
+      : "switchgear";
+  });
   const [selectedEvidence, setSelectedEvidence] = useState<EvidenceStepKey>("signal");
   const [searchQuery, setSearchQuery] = useState("");
   const [urgentOnly, setUrgentOnly] = useState(false);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
-  const [activeNav, setActiveNav] = useState("Workbench");
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [activeNav, setActiveNav] = useState<ShowcaseView>(() => {
+    if (typeof window === "undefined") {
+      return "Workbench";
+    }
+    const value = new URLSearchParams(window.location.search).get("view");
+    return value === "evidence"
+      ? "Evidence"
+      : value === "decisions"
+        ? "Decisions"
+        : value === "configuration"
+          ? "Configuration"
+          : "Workbench";
+  });
   const [announcement, setAnnouncement] = useState("Workbench ready.");
   const [demoDraftOpened, setDemoDraftOpened] = useState(false);
   const [demoGmailStatus, setDemoGmailStatus] = useState<"idle" | "opened">("idle");
@@ -3106,6 +3128,9 @@ function ShowcaseDashboard({
   const [demoDraftTo, setDemoDraftTo] = useState<string>(demoHeroScenario.recipient);
   const [demoDraftSubject, setDemoDraftSubject] = useState<string>(demoHeroScenario.subject);
   const [demoDraftBody, setDemoDraftBody] = useState<string>(demoHeroScenario.body);
+  const [reviewScheduled, setReviewScheduled] = useState(false);
+  const [configNotifications, setConfigNotifications] = useState(true);
+  const [configAutoRefresh, setConfigAutoRefresh] = useState(true);
 
   const moveToSurface = (targetId: string, label: string) => {
     const target = document.getElementById(targetId);
@@ -3117,7 +3142,6 @@ function ShowcaseDashboard({
     if (parentDetails instanceof HTMLDetailsElement) {
       parentDetails.open = true;
     }
-    setActiveNav(label);
     target.scrollIntoView({
       behavior:
         typeof window.matchMedia === "function" &&
@@ -3130,6 +3154,40 @@ function ShowcaseDashboard({
       target.focus({ preventScroll: true });
     }
     setAnnouncement(`Moved to ${label}.`);
+  };
+
+  const updateShowcaseUrl = (view: ShowcaseView, caseId: ShowcaseCase["id"]) => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    const nextUrl = new URL(window.location.href);
+    if (view === "Workbench") {
+      nextUrl.searchParams.delete("view");
+    } else {
+      nextUrl.searchParams.set("view", view.toLowerCase());
+    }
+    nextUrl.searchParams.set("case", caseId);
+    window.history.replaceState({}, "", nextUrl);
+  };
+
+  const openShowcaseView = (view: ShowcaseView) => {
+    setMobileNavOpen(false);
+    setActiveNav(view);
+    updateShowcaseUrl(view, selectedCaseId);
+    setAnnouncement(`${view} view opened.`);
+  };
+
+  const openEvidenceView = (step: EvidenceStepKey = selectedEvidence) => {
+    setSelectedEvidence(step);
+    openShowcaseView("Evidence");
+  };
+
+  const selectShowcaseCase = (caseId: ShowcaseCase["id"]) => {
+    setSelectedCaseId(caseId);
+    setSelectedEvidence("signal");
+    updateShowcaseUrl(activeNav, caseId);
+    const nextCase = showcaseCases.find((item) => item.id === caseId);
+    setAnnouncement(`${nextCase?.title ?? "Case"} selected.`);
   };
 
   const filteredCases = showcaseCases.filter((item) => {
@@ -3186,7 +3244,7 @@ function ShowcaseDashboard({
   };
   const openDemoDraft = () => {
     setDemoDraftOpened(true);
-    moveToSurface("demo-draft", "Draft workspace");
+    openShowcaseView("Decisions");
   };
   const chooseDemoAction = (choice: DemoActionChoice) => {
     const option = demoResponseOptions.find((candidate) => candidate.id === choice);
@@ -3200,18 +3258,7 @@ function ShowcaseDashboard({
     }
   };
   const openEvidenceDetails = () => {
-    if (demoHeroActive) {
-      setAnnouncement(`${selectedStep.title} evidence is available in the current case record.`);
-      return;
-    }
-    moveToSurface(
-      selectedStep.key === "signal"
-        ? "stage-risk-intake"
-        : selectedStep.key === "eligibility"
-          ? "stage-eligibility"
-          : "stage-evidence",
-      `${selectedStep.title} details`,
-    );
+    openEvidenceView(selectedStep.key);
   };
   const effectiveJourneyState = demoHeroActive ? "healthy" : journeyState;
   const effectiveReferenceState = demoHeroActive ? "ready" : referenceState;
@@ -3344,37 +3391,63 @@ function ShowcaseDashboard({
           : effectiveSubjectState === "abstained"
             ? "This case is read-only until subject support is available. The copilot will not invent a recommendation."
             : "The verdict is ready to inform the manager's next decision.";
+  const caseEvidenceSteps: typeof evidenceSteps = isHeroCase
+    ? evidenceSteps
+    : selectedCase.id === "concrete"
+      ? [
+          { key: "signal", title: "Signal", description: "What triggered this case", status: "Needs evidence" },
+          { key: "eligibility", title: "Eligibility", description: "Why this case is in scope", status: "Not opened" },
+          { key: "causal", title: "Causal analysis", description: "What the evidence can support", status: "Not run" },
+          { key: "verdict", title: "Verdict", description: "What the manager can conclude", status: "No action" },
+        ]
+      : [
+          { key: "signal", title: "Signal", description: "What triggered this case", status: "Monitoring" },
+          { key: "eligibility", title: "Eligibility", description: "Why this case is in scope", status: "In scope" },
+          { key: "causal", title: "Causal analysis", description: "What the evidence can support", status: "Monitor" },
+          { key: "verdict", title: "Verdict", description: "What the manager can conclude", status: "No action due" },
+        ];
+  const caseEvidenceDetail = isHeroCase
+    ? selectedStepDetail
+    : selectedCase.id === "concrete"
+      ? "This delay is visible in the attention inbox, but the workspace has not opened a verified investigation for it yet. Start with the missing source evidence before asking for a causal explanation."
+      : "The HVAC case is being monitored against its next supplier milestone. No escalation is due yet; the manager can schedule the next review and keep the case visible.";
+  const caseNextStep = isHeroCase
+    ? actionLabel
+    : selectedCase.id === "concrete"
+      ? "Collect source evidence"
+      : reviewScheduled
+        ? "Review scheduled"
+        : "Schedule next review";
+  const handleSelectedCasePrimary = () => {
+    if (selectedCase.id === "concrete") {
+      openShowcaseView("Evidence");
+      return;
+    }
+    setReviewScheduled(true);
+    setAnnouncement("Next review scheduled for the HVAC case.");
+  };
 
   return (
     <section className="workbench-shell" id="workspace" aria-labelledby="workbench-heading">
       <header className="workbench-topbar">
         <div className="workbench-brand-block">
-          <button className="workbench-icon-button workbench-menu-button" type="button" aria-label="Open navigation">
+          <button className="workbench-icon-button workbench-menu-button" type="button" aria-label="Open navigation" aria-expanded={mobileNavOpen} aria-controls="mobile-primary-navigation" onClick={() => setMobileNavOpen((open) => !open)}>
             <Menu size={20} aria-hidden="true" />
           </button>
-          <button className="workbench-brand" type="button" onClick={() => moveToSurface("workspace", "Workbench")}>
+          <button className="workbench-brand" type="button" onClick={() => openShowcaseView("Workbench")}>
             Causal Delay Copilot
           </button>
         </div>
 
         <nav className="workbench-primary-nav" aria-label="Primary">
-          {[
-            { label: "Workbench", target: "workspace" },
-            { label: "Evidence", target: "technical-evidence" },
-            { label: "Decisions", target: "stage-actions" },
-            { label: "Configuration", target: "lineage-heading" },
-          ].map((item) => (
+          {(["Workbench", "Evidence", "Decisions", "Configuration"] as ShowcaseView[]).map((item) => (
             <button
-              className={`workbench-nav-link ${activeNav === item.label ? "is-active" : ""}`}
-              key={item.label}
+              className={`workbench-nav-link ${activeNav === item ? "is-active" : ""}`}
+              key={item}
               type="button"
-              onClick={() =>
-                item.target === "workspace"
-                  ? (setActiveNav(item.label), moveToSurface("workspace", item.label))
-                  : moveToSurface(item.target, item.label)
-              }
+              onClick={() => openShowcaseView(item)}
             >
-              {item.label}
+              {item}
             </button>
           ))}
         </nav>
@@ -3384,7 +3457,7 @@ function ShowcaseDashboard({
             <span className={`workbench-status-dot ${effectiveJourneyState === "unavailable" ? "is-error" : ""}`} aria-hidden="true" />
             {coreStatus}
           </div>
-          <button className="workbench-icon-button" type="button" aria-label="Notifications">
+          <button className="workbench-icon-button" type="button" aria-label="Notifications" onClick={() => setAnnouncement(configNotifications ? "No new notifications." : "Attention notifications are paused.")}>
             <Notification size={20} aria-hidden="true" />
           </button>
           <div className="workbench-user-menu">
@@ -3409,7 +3482,22 @@ function ShowcaseDashboard({
         </div>
       </header>
 
-      <div className="workbench-layout">
+      {mobileNavOpen && (
+        <nav className="workbench-mobile-nav" id="mobile-primary-navigation" aria-label="Primary">
+          {(["Workbench", "Evidence", "Decisions", "Configuration"] as ShowcaseView[]).map((item) => (
+            <button
+              className={`workbench-mobile-nav-link ${activeNav === item ? "is-active" : ""}`}
+              key={item}
+              type="button"
+              onClick={() => openShowcaseView(item)}
+            >
+              {item}
+            </button>
+          ))}
+        </nav>
+      )}
+
+      <div className={`workbench-layout ${activeNav === "Workbench" ? "" : "is-view-hidden"}`}>
         <aside className="workbench-inbox" aria-labelledby="attention-inbox-heading">
           <div className="workbench-inbox-heading">
             <div>
@@ -3456,10 +3544,7 @@ function ShowcaseDashboard({
                   key={item.id}
                   type="button"
                   aria-pressed={selectedCaseId === item.id}
-                  onClick={() => {
-                    setSelectedCaseId(item.id);
-                    setAnnouncement(`${item.title} selected.`);
-                  }}
+                  onClick={() => selectShowcaseCase(item.id)}
                 >
                   <span className={`workbench-case-priority priority-${item.priority.toLowerCase().replace(/\s+/g, "-")}`}>
                     <span className="workbench-priority-dot" aria-hidden="true" />
@@ -3482,16 +3567,35 @@ function ShowcaseDashboard({
 
         <main className="workbench-main" aria-labelledby="workbench-heading">
           {!isHeroCase ? (
-            <section className="workbench-empty-case" aria-live="polite">
-              <p className="workbench-overline">{selectedCase.priority}</p>
+            <section className="workbench-empty-case workbench-case-preview" aria-live="polite">
+              <div className="workbench-case-preview-topline">
+                <p className="workbench-overline">{selectedCase.priority}</p>
+                <span className={`workbench-case-priority priority-${selectedCase.priority.toLowerCase().replace(/\s+/g, "-")}`}>
+                  <span className="workbench-priority-dot" aria-hidden="true" />
+                  {selectedCase.priority}
+                </span>
+              </div>
               <h1>{selectedCase.title}</h1>
               <p className="workbench-empty-case-copy">
-                This case is in the inbox, but its verified investigation has not been opened in this workspace yet.
+                {selectedCase.id === "concrete"
+                  ? "The inbox has surfaced this case, but the evidence needed to open a governed investigation is still missing."
+                  : "This case is being watched against its next supplier milestone. No escalation is due yet."}
               </p>
-              <button className="workbench-button workbench-button-primary" type="button" onClick={() => setSelectedCaseId("switchgear")}>
-                Return to switchgear case
-                <ArrowRight size={16} aria-hidden="true" />
-              </button>
+              <dl className="workbench-case-preview-facts">
+                <div><dt>Project</dt><dd>{selectedCase.project}</dd></div>
+                <div><dt>Scope</dt><dd>{selectedCase.detail}</dd></div>
+                <div><dt>Next checkpoint</dt><dd>{selectedCase.due}</dd></div>
+              </dl>
+              <div className="workbench-case-preview-action">
+                <div>
+                  <span>Next permitted step</span>
+                  <strong>{caseNextStep}</strong>
+                </div>
+                <button className="workbench-button workbench-button-primary" type="button" onClick={handleSelectedCasePrimary}>
+                  {selectedCase.id === "concrete" ? "Open evidence view" : reviewScheduled ? "Review scheduled" : "Schedule next review"}
+                  <ArrowRight size={16} aria-hidden="true" />
+                </button>
+              </div>
             </section>
           ) : (
             <>
@@ -3508,7 +3612,7 @@ function ShowcaseDashboard({
                     <h1 id="workbench-heading">Switchgear handoff risk</h1>
                     <p className="workbench-case-subtitle">120 high-complexity units · Electrical package · Supplier handoff</p>
                   </div>
-                  <button className="workbench-quiet-button" type="button" onClick={() => moveToSurface("stage-risk-intake", "Risk intake")}>
+                  <button className="workbench-quiet-button" type="button" onClick={() => openShowcaseView("Evidence")}>
                     <Document size={16} aria-hidden="true" />
                     View case record
                   </button>
@@ -3545,7 +3649,7 @@ function ShowcaseDashboard({
                     <h2 id="case-input-heading">Amber flagged a supplier handoff risk</h2>
                     <p>These are the frozen inputs the Copilot uses before it makes any causal or action claim.</p>
                   </div>
-                  <button className="workbench-link-button" type="button" onClick={() => { setSelectedEvidence("signal"); setAnnouncement("Showing the upstream Amber signal inputs."); }}>
+                  <button className="workbench-link-button" type="button" onClick={() => { setSelectedEvidence("signal"); openShowcaseView("Evidence"); }}>
                     Inspect source signal <ArrowUpRight size={16} aria-hidden="true" />
                   </button>
                 </div>
@@ -3590,7 +3694,7 @@ function ShowcaseDashboard({
                     <p className="workbench-overline">The decision path</p>
                     <h2 id="evidence-chain-heading">From signal to verdict</h2>
                   </div>
-                  <button className="workbench-link-button" type="button" onClick={() => demoHeroActive ? setAnnouncement("The verified evidence chain is open in this case.") : moveToSurface("stage-evidence", "Evidence")}>Review all evidence <ArrowUpRight size={16} aria-hidden="true" /></button>
+                  <button className="workbench-link-button" type="button" onClick={() => openShowcaseView("Evidence")}>Review all evidence <ArrowUpRight size={16} aria-hidden="true" /></button>
                 </div>
                 <div className="workbench-evidence-chain">
                   {evidenceSteps.map((step, index) => (
@@ -3651,7 +3755,7 @@ function ShowcaseDashboard({
                     <p className="workbench-overline">Case history</p>
                     <h2 id="activity-heading">Recent activity</h2>
                   </div>
-                  <button className="workbench-link-button" type="button" onClick={() => moveToSurface("stage-audit", "Decision history")}>View decision history <ArrowUpRight size={16} aria-hidden="true" /></button>
+                  <button className="workbench-link-button" type="button" onClick={() => openShowcaseView("Decisions")}>View decision history <ArrowUpRight size={16} aria-hidden="true" /></button>
                 </div>
                 <ol className="workbench-activity-list">
                   <li><span className="workbench-activity-dot" aria-hidden="true" /><span><strong>Risk signal received</strong><small>{demoHeroActive ? "Investigation accepted" : riskState === "ready" ? "Investigation accepted by Core" : "Waiting for verified intake"}</small></span><time>Today</time></li>
@@ -3669,7 +3773,7 @@ function ShowcaseDashboard({
               <p className="workbench-overline">Manager review</p>
               <h2 id="action-brief-heading">Action brief</h2>
             </div>
-            <button className="workbench-icon-button" type="button" aria-label="Open action brief in focus view" onClick={() => demoHeroActive ? openDemoDraft() : moveToSurface("stage-actions", "Actions")}>
+            <button className="workbench-icon-button" type="button" aria-label="Open action brief in focus view" onClick={() => demoHeroActive ? openDemoDraft() : openShowcaseView(actionReady ? "Decisions" : "Evidence")}>
               <ArrowUpRight size={18} aria-hidden="true" />
             </button>
           </div>
@@ -3685,10 +3789,10 @@ function ShowcaseDashboard({
               <span>Why this matters</span>
               <strong>{actionReady ? demoHeroActive ? selectedDemoAction.rationale : "Protect the switchgear handoff" : "Keep the decision explainable"}</strong>
             </div>
-            <button className={`workbench-button ${actionReady ? "workbench-button-primary" : "workbench-button-secondary"}`} type="button" onClick={() => demoHeroActive ? openDemoDraft() : moveToSurface(actionReady ? "stage-draft" : "stage-actions", actionReady ? "Draft workspace" : "Actions") }>
+            <button className={`workbench-button ${actionReady ? "workbench-button-primary" : "workbench-button-secondary"}`} type="button" onClick={() => demoHeroActive ? openDemoDraft() : openShowcaseView(actionReady ? "Decisions" : "Evidence") }>
               {actionReady ? <><Email size={18} aria-hidden="true" /> {demoHeroActive ? "Review & edit draft" : "Approve draft & open Gmail"} <Launch size={16} aria-hidden="true" /></> : <><ArrowRight size={18} aria-hidden="true" /> Open evidence &amp; actions</>}
             </button>
-            <button className="workbench-button workbench-button-quiet" type="button" onClick={() => moveToSurface("stage-evidence", "Evidence")}>Review before deciding</button>
+            <button className="workbench-button workbench-button-quiet" type="button" onClick={() => openShowcaseView("Evidence")}>Review before deciding</button>
           </section>
 
           {demoHeroActive && (
@@ -3764,6 +3868,224 @@ function ShowcaseDashboard({
         </aside>
       </div>
 
+      {activeNav !== "Workbench" && (
+        <main className="workbench-view-panel" aria-labelledby="showcase-view-heading">
+          <header className="workbench-view-header">
+            <div>
+              <p className="workbench-overline">{activeNav}</p>
+              <h1 id="showcase-view-heading">
+                {activeNav === "Evidence"
+                  ? "Trace the case before you act."
+                  : activeNav === "Decisions"
+                    ? "Turn the verdict into the next move."
+                    : "Keep the workspace ready for review."}
+              </h1>
+              <p>
+                {activeNav === "Evidence"
+                  ? "Inspect the signal, scope, causal support, and manager-facing conclusion in one place."
+                  : activeNav === "Decisions"
+                    ? "Choose a response, review the draft, and keep the final action with the manager."
+                    : "Set the review defaults and understand which workspace connections are available."}
+              </p>
+            </div>
+            <div className="workbench-view-header-actions">
+              <div className="workbench-view-context">
+                <span>Selected case</span>
+                <strong>{selectedCase.title}</strong>
+                <small>{selectedCase.project} - {selectedCase.priority}</small>
+              </div>
+              <button className="workbench-link-button" type="button" onClick={() => openShowcaseView("Workbench")}>
+                Back to workbench <ArrowRight size={16} aria-hidden="true" />
+              </button>
+            </div>
+          </header>
+
+          {activeNav === "Evidence" && (
+            <>
+              <div className="workbench-view-grid">
+                <section className="workbench-view-card workbench-view-card-wide" aria-labelledby="evidence-view-chain-heading">
+                  <div className="workbench-view-card-heading">
+                    <div>
+                      <p className="workbench-overline">Case record</p>
+                      <h2 id="evidence-view-chain-heading">Evidence chain</h2>
+                    </div>
+                    <span className={`workbench-view-state ${isHeroCase ? "is-ready" : "is-muted"}`}>
+                      {isHeroCase ? "Decision ready" : selectedCase.priority}
+                    </span>
+                  </div>
+                  <div className="workbench-view-evidence-list">
+                    {caseEvidenceSteps.map((step, index) => (
+                      <button
+                        className={`workbench-view-evidence-item ${selectedEvidence === step.key ? "is-selected" : ""}`}
+                        key={step.key}
+                        type="button"
+                        aria-pressed={selectedEvidence === step.key}
+                        onClick={() => {
+                          setSelectedEvidence(step.key);
+                          setAnnouncement(`${step.title} evidence selected.`);
+                        }}
+                      >
+                        <span className="workbench-view-evidence-number">0{index + 1}</span>
+                        <span className="workbench-view-evidence-icon"><ShowcaseEvidenceIcon step={step.key} /></span>
+                        <span>
+                          <strong>{step.title}</strong>
+                          <small>{step.description}</small>
+                        </span>
+                        <em>{step.status}</em>
+                        <ChevronRight size={16} aria-hidden="true" />
+                      </button>
+                    ))}
+                  </div>
+                </section>
+
+                <section className="workbench-view-card" aria-labelledby="selected-evidence-heading">
+                  <div className="workbench-view-card-heading">
+                    <div>
+                      <p className="workbench-overline">Selected evidence</p>
+                      <h2 id="selected-evidence-heading">{selectedStep.title}</h2>
+                    </div>
+                    <ShowcaseEvidenceIcon step={selectedStep.key} />
+                  </div>
+                  <p className="workbench-view-card-copy">{caseEvidenceDetail}</p>
+                  <div className="workbench-view-callout">
+                    <strong>{isHeroCase ? "Bounded conclusion" : "Current state"}</strong>
+                    <span>{isHeroCase ? demoHeroScenario.analysis.scope : selectedCase.priority}</span>
+                  </div>
+                  <button className="workbench-button workbench-button-primary" type="button" onClick={() => openShowcaseView(isHeroCase ? "Decisions" : "Workbench")}>
+                    {isHeroCase ? "Continue to decision" : "Return to case overview"}
+                    <ArrowRight size={16} aria-hidden="true" />
+                  </button>
+                </section>
+              </div>
+
+              <section className="workbench-view-card workbench-view-verdict" aria-labelledby="evidence-conclusion-heading">
+                <div>
+                  <p className="workbench-overline">Manager takeaway</p>
+                  <h2 id="evidence-conclusion-heading">
+                    {isHeroCase ? demoHeroScenario.analysis.headline : selectedCase.id === "concrete" ? "Evidence is the next decision." : "Monitoring is the right decision for now."}
+                  </h2>
+                  <p>{isHeroCase ? analysisLanguage : caseEvidenceDetail}</p>
+                </div>
+                <dl className="workbench-view-facts">
+                  <div><dt>Claim scope</dt><dd>{isHeroCase ? analysisScope : "Not yet published"}</dd></div>
+                  <div><dt>Next step</dt><dd>{caseNextStep}</dd></div>
+                  <div><dt>Manager control</dt><dd>Required</dd></div>
+                </dl>
+              </section>
+            </>
+          )}
+
+          {activeNav === "Decisions" && (
+            <div className="workbench-view-grid workbench-decision-view">
+              <section className="workbench-view-card workbench-view-card-wide" aria-labelledby="decision-choice-heading">
+                <div className="workbench-view-card-heading">
+                  <div>
+                    <p className="workbench-overline">Manager input</p>
+                    <h2 id="decision-choice-heading">Choose the next conversation</h2>
+                  </div>
+                  <span className={`workbench-view-state ${isHeroCase ? "is-ready" : "is-muted"}`}>{isHeroCase ? "1 selected" : "No action published"}</span>
+                </div>
+                {isHeroCase ? (
+                  <div className="workbench-view-choice-list" role="group" aria-label="Response options">
+                    {demoResponseOptions.map((option) => (
+                      <button
+                        className={`workbench-view-choice ${demoActionChoice === option.id ? "is-selected" : ""}`}
+                        key={option.id}
+                        type="button"
+                        aria-pressed={demoActionChoice === option.id}
+                        onClick={() => chooseDemoAction(option.id)}
+                      >
+                        <span className="workbench-view-choice-marker" aria-hidden="true" />
+                        <span><strong>{option.label}</strong><small>{option.rationale}</small></span>
+                        {option.recommended && <em>Recommended</em>}
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="workbench-view-empty-state">
+                    <WarningAltFilled size={22} aria-hidden="true" />
+                    <div>
+                      <strong>{selectedCase.id === "concrete" ? "Evidence is required before a response can be proposed." : "No escalation is due for this case."}</strong>
+                      <p>{selectedCase.id === "concrete" ? "Open the Evidence view to see what is missing." : "Schedule the next review and keep the case visible in the inbox."}</p>
+                    </div>
+                  </div>
+                )}
+              </section>
+
+              <section className="workbench-view-card workbench-view-draft" aria-labelledby="decision-draft-heading">
+                {isHeroCase ? (
+                  <>
+                    <div className="workbench-view-card-heading">
+                      <div>
+                        <p className="workbench-overline">Unsent preview</p>
+                        <h2 id="decision-draft-heading">Supplier email</h2>
+                      </div>
+                      <span className="workbench-view-state is-ready">Editable</span>
+                    </div>
+                    <label className="workbench-field"><span>To</span><input type="email" value={demoDraftTo} onChange={(event) => setDemoDraftTo(event.target.value)} /></label>
+                    <label className="workbench-field"><span>Subject</span><input type="text" value={demoDraftSubject} onChange={(event) => setDemoDraftSubject(event.target.value)} /></label>
+                    <label className="workbench-field"><span>Message</span><textarea value={demoDraftBody} onChange={(event) => setDemoDraftBody(event.target.value)} /></label>
+                    <button className="workbench-button workbench-button-primary" type="button" onClick={openDemoGmail}>
+                      <Email size={18} aria-hidden="true" /> Approve draft &amp; open Gmail <Launch size={16} aria-hidden="true" />
+                    </button>
+                    {demoGmailStatus === "opened" && <p className="workbench-draft-confirmation" role="status">Gmail compose opened in a new tab. Review and send it there.</p>}
+                  </>
+                ) : (
+                  <>
+                    <p className="workbench-overline">Next permitted step</p>
+                    <h2 id="decision-draft-heading">{caseNextStep}</h2>
+                    <p className="workbench-view-card-copy">{selectedCase.id === "concrete" ? "A manager action will appear after the evidence gate is satisfied." : "The manager can keep this case on the review calendar without escalating it."}</p>
+                    <button className="workbench-button workbench-button-primary" type="button" onClick={handleSelectedCasePrimary}>
+                      {selectedCase.id === "concrete" ? "Open evidence view" : reviewScheduled ? "Review scheduled" : "Schedule next review"}
+                      <ArrowRight size={16} aria-hidden="true" />
+                    </button>
+                  </>
+                )}
+              </section>
+            </div>
+          )}
+
+          {activeNav === "Configuration" && (
+            <div className="workbench-view-grid workbench-configuration-view">
+              <section className="workbench-view-card workbench-view-card-wide" aria-labelledby="configuration-defaults-heading">
+                <div className="workbench-view-card-heading">
+                  <div>
+                    <p className="workbench-overline">Workspace defaults</p>
+                    <h2 id="configuration-defaults-heading">How this workspace keeps managers in control</h2>
+                  </div>
+                  <span className="workbench-view-state is-ready">Ready</span>
+                </div>
+                <div className="workbench-toggle-list">
+                  <label className="workbench-toggle-row">
+                    <span><strong>Attention notifications</strong><small>Keep urgent cases visible in the manager inbox.</small></span>
+                    <input type="checkbox" checked={configNotifications} onChange={(event) => { setConfigNotifications(event.target.checked); setAnnouncement(`Attention notifications ${event.target.checked ? "enabled" : "paused"}.`); }} />
+                  </label>
+                  <label className="workbench-toggle-row">
+                    <span><strong>Refresh verified signals</strong><small>Recheck the workspace when a new signal enters the queue.</small></span>
+                    <input type="checkbox" checked={configAutoRefresh} onChange={(event) => { setConfigAutoRefresh(event.target.checked); setAnnouncement(`Verified signal refresh ${event.target.checked ? "enabled" : "paused"}.`); }} />
+                  </label>
+                </div>
+              </section>
+
+              <section className="workbench-view-card" aria-labelledby="configuration-status-heading">
+                <div className="workbench-view-card-heading">
+                  <div>
+                    <p className="workbench-overline">Workspace status</p>
+                    <h2 id="configuration-status-heading">Connections &amp; policy</h2>
+                  </div>
+                </div>
+                <dl className="workbench-configuration-status">
+                  <div><dt>Core workspace</dt><dd>{coreStatus}</dd></div>
+                  <div><dt>Signal intake</dt><dd>Configured</dd></div>
+                  <div><dt>Release identity</dt><dd>{effectiveReferenceState === "ready" ? "Validated" : "Checking"}</dd></div>
+                  <div><dt>Manager approval</dt><dd>Always required</dd></div>
+                </dl>
+              </section>
+            </div>
+          )}
+        </main>
+      )}
+
       <div className="visually-hidden" aria-live="polite" aria-atomic="true">{announcement}</div>
     </section>
   );
@@ -3813,52 +4135,15 @@ function AuthStory({ onResetMode }: { onResetMode: () => void }) {
             <small>Copilot</small>
           </span>
         </button>
-        <span className="auth-story-tag">Manager workspace</span>
       </div>
 
       <div className="auth-story-content">
-        <p className="auth-overline">Supply-chain decision support</p>
-        <h1>Make the next move before a delay becomes a domino effect.</h1>
-        <p>Bring risk signals, evidence, and manager action into one focused operating surface.</p>
-
-        <div className="auth-product-preview" aria-label="Product flow preview">
-          <div className="auth-preview-header">
-            <span>Case preview</span>
-            <span className="auth-preview-status"><span aria-hidden="true" />Review ready</span>
-          </div>
-          <div className="auth-preview-case">
-            <div className="auth-preview-case-heading">
-              <span className="auth-preview-case-icon" aria-hidden="true"><WarningAltFilled size={18} /></span>
-              <span>
-                <strong>Switchgear handoff risk</strong>
-                <small>Project Alpha · Electrical package</small>
-              </span>
-              <span className="auth-preview-priority">Urgent</span>
-            </div>
-            <div className="auth-preview-track" aria-label="Signal to action flow">
-              <span className="is-complete"><i>1</i>Signal</span>
-              <span className="is-complete"><i>2</i>Evidence</span>
-              <span className="is-current"><i>3</i>Action</span>
-            </div>
-            <div className="auth-preview-callout">
-              <span><CheckmarkFilled size={16} aria-hidden="true" /></span>
-              <p>120 units at risk. A recovery-plan draft is ready for manager review.</p>
-              <ArrowRight size={16} aria-hidden="true" />
-            </div>
-          </div>
-        </div>
-
-        <div className="auth-story-steps" aria-label="Product flow">
-          <div><span>01</span><strong>Detect</strong><small>Surface the cases that need attention.</small></div>
-          <div><span>02</span><strong>Explain</strong><small>Make the evidence chain easy to inspect.</small></div>
-          <div><span>03</span><strong>Act</strong><small>Prepare the next move without losing control.</small></div>
-        </div>
+        <p className="auth-overline">Decision support for project delivery</p>
+        <h1>See the delay. Make the call.</h1>
+        <p>One focused workspace for risk signals, evidence, and the manager's next move.</p>
       </div>
 
-      <div className="auth-story-footer">
-        <span>Built for project delivery teams</span>
-        <span className="auth-story-footer-mark"><CausalMark size={14} /> Evidence-led decisions</span>
-      </div>
+      <p className="auth-story-footer">Evidence-led decisions for supply-chain teams.</p>
     </section>
   );
 }
@@ -3910,33 +4195,36 @@ function DemoAuth({
 
   return (
     <main className="auth-shell" aria-labelledby="auth-heading">
+      <div className="auth-wallpaper" aria-hidden="true" />
       <AuthStory onResetMode={() => { setMode("sign-in"); setProvider(null); setError(null); }} />
 
       {provider !== null ? (
         <section className="auth-panel auth-provider-panel" aria-labelledby="auth-heading">
-          <div className="auth-provider-panel-topline">
-            <button className="auth-back-button" type="button" onClick={() => setProvider(null)}>
-              <ChevronRight className="auth-back-icon" size={18} aria-hidden="true" />
-              Back to sign in
+          <div className="auth-panel-inner">
+            <div className="auth-provider-panel-topline">
+              <button className="auth-back-button" type="button" onClick={() => setProvider(null)}>
+                <ChevronRight className="auth-back-icon" size={18} aria-hidden="true" />
+                Back to sign in
+              </button>
+              <span className="auth-provider-mark" aria-hidden="true">{provider === "Google" ? <GoogleMark /> : <MicrosoftMark />}</span>
+            </div>
+            <div className="auth-panel-header">
+              <p className="auth-overline">Continue with {provider}</p>
+              <h1 id="auth-heading">Choose an account</h1>
+              <p className="auth-copy">Select the manager identity you want to use for this workspace.</p>
+            </div>
+            <button className="auth-account-choice" type="button" onClick={finishWithProvider}>
+              <span className="auth-account-avatar" aria-hidden="true">AM</span>
+              <span>
+                <strong>Alex Morgan</strong>
+                <small>alex.morgan@projectalpha.com</small>
+              </span>
+              <ChevronRight size={18} aria-hidden="true" />
             </button>
-            <span className="auth-provider-mark" aria-hidden="true">{provider === "Google" ? <GoogleMark /> : <MicrosoftMark />}</span>
-          </div>
-          <div className="auth-panel-header">
-            <p className="auth-overline">Continue with {provider}</p>
-            <h1 id="auth-heading">Choose an account</h1>
-            <p className="auth-copy">Select the manager identity you want to use for this workspace.</p>
-          </div>
-          <button className="auth-account-choice" type="button" onClick={finishWithProvider}>
-            <span className="auth-account-avatar" aria-hidden="true">AM</span>
-            <span>
-              <strong>Alex Morgan</strong>
-              <small>alex.morgan@projectalpha.com</small>
-            </span>
-            <ChevronRight size={18} aria-hidden="true" />
-          </button>
-          <div className="auth-provider-note">
-            <Information size={16} aria-hidden="true" />
-            <p>The selected account will be used for the manager review workspace and approved email handoff.</p>
+            <div className="auth-provider-note">
+              <Information size={16} aria-hidden="true" />
+              <p>The selected account will be used for the manager review workspace and approved email handoff.</p>
+            </div>
           </div>
         </section>
       ) : (
