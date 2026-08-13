@@ -4822,8 +4822,9 @@ summary {
   width: min(100%, 1180px);
   min-block-size: 100svh;
   grid-template-columns: minmax(0, 1fr) minmax(380px, 420px);
-  gap: 48px;
+  gap: 24px;
   margin: 0 auto;
+  padding-inline: 0 48px;
 }
 
 .auth-stage > .auth-story {
@@ -4834,7 +4835,7 @@ summary {
 
 .auth-stage > .auth-story .auth-story-content {
   width: min(100%, 520px);
-  margin-inline: auto 0;
+  margin-inline: 0;
 }
 
 .auth-stage > .auth-panel {
@@ -4861,6 +4862,7 @@ summary {
     min-block-size: auto;
     grid-template-columns: 1fr;
     gap: 0;
+    padding-inline: 0;
   }
 
   .auth-stage > .auth-story {
@@ -4967,4 +4969,132 @@ summary {
   .auth-stage > .auth-panel .auth-panel-inner {
     padding: 18px;
   }
+}
+
+/* Product mode keeps the technical contract report available only by explicit route. */
+.technical-details--product-hidden {
+  display: none;
+}
+
+.workbench-notifications {
+  position: relative;
+}
+
+.workbench-notifications-button {
+  position: relative;
+}
+
+.workbench-notification-badge {
+  position: absolute;
+  inset-block-start: 8px;
+  inset-inline-end: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-inline-size: 16px;
+  block-size: 16px;
+  padding-inline: 3px;
+  color: #ffffff;
+  background: #da1e28;
+  border-radius: 50%;
+  font-size: 0.625rem;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.workbench-notifications-popover {
+  position: absolute;
+  z-index: 35;
+  inset-block-start: calc(100% + 8px);
+  inset-inline-end: 0;
+  display: grid;
+  width: min(340px, calc(100vw - 32px));
+  gap: 16px;
+  padding: 20px;
+  background: #ffffff;
+  border: 1px solid #8d8d8d;
+  box-shadow: 0 4px 12px rgb(22 22 22 / 12%);
+}
+
+.workbench-notifications-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding-block-end: 12px;
+  border-block-end: 1px solid #e0e0e0;
+}
+
+.workbench-notifications-heading .workbench-overline {
+  margin-block-end: 4px;
+}
+
+.workbench-notifications-heading strong {
+  color: #161616;
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+.workbench-notifications-count {
+  display: inline-flex;
+  min-inline-size: 24px;
+  block-size: 24px;
+  align-items: center;
+  justify-content: center;
+  color: #ffffff;
+  background: #0f62fe;
+  font-size: 0.6875rem;
+  font-weight: 600;
+}
+
+.workbench-notification-item {
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+}
+
+.workbench-notification-item-dot {
+  inline-size: 8px;
+  block-size: 8px;
+  margin-block-start: 5px;
+  background: #da1e28;
+  border-radius: 50%;
+}
+
+.workbench-notification-item div {
+  display: grid;
+  gap: 4px;
+}
+
+.workbench-notification-item strong {
+  color: #161616;
+  font-size: 0.8125rem;
+  font-weight: 600;
+}
+
+.workbench-notification-item small {
+  color: #525252;
+  font-size: 0.75rem;
+  line-height: 1.4;
+}
+
+.workbench-notification-action {
+  display: inline-flex;
+  min-block-size: 40px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-inline: 12px;
+  color: #0f62fe;
+  background: #edf5ff;
+  border: 1px solid #0f62fe;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  text-align: start;
+}
+
+.workbench-notification-action:hover:not(:disabled) {
+  color: #ffffff;
+  background: #0f62fe;
 }

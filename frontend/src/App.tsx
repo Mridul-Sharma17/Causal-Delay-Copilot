@@ -3113,6 +3113,7 @@ function ShowcaseDashboard({
   const [searchQuery, setSearchQuery] = useState("");
   const [urgentOnly, setUrgentOnly] = useState(false);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [activeNav, setActiveNav] = useState<ShowcaseView>(() => {
     if (typeof window === "undefined") {
@@ -3178,6 +3179,7 @@ function ShowcaseDashboard({
 
   const openShowcaseView = (view: ShowcaseView) => {
     setMobileNavOpen(false);
+    setNotificationsOpen(false);
     setActiveNav(view);
     updateShowcaseUrl(view, selectedCaseId);
     setAnnouncement(`${view} view opened.`);
@@ -3463,15 +3465,63 @@ function ShowcaseDashboard({
             <span className={`workbench-status-dot ${effectiveJourneyState === "unavailable" ? "is-error" : ""}`} aria-hidden="true" />
             {coreStatus}
           </div>
-          <button className="workbench-icon-button" type="button" aria-label="Notifications" onClick={() => setAnnouncement(configNotifications ? "No new notifications." : "Attention notifications are paused.")}>
-            <Notification size={20} aria-hidden="true" />
-          </button>
+          <div className="workbench-notifications">
+            <button
+              className="workbench-icon-button workbench-notifications-button"
+              type="button"
+              aria-label="Notifications"
+              aria-expanded={notificationsOpen}
+              aria-controls="notifications-popover"
+              onClick={() => {
+                setNotificationsOpen((open) => !open);
+                setUserMenuOpen(false);
+                setAnnouncement(notificationsOpen ? "Notifications closed." : "Notifications opened.");
+              }}
+            >
+              <Notification size={20} aria-hidden="true" />
+              <span className="workbench-notification-badge" aria-label="1 notification">1</span>
+            </button>
+            {notificationsOpen && (
+              <div className="workbench-notifications-popover" id="notifications-popover" role="dialog" aria-label="Notifications">
+                <div className="workbench-notifications-heading">
+                  <div>
+                    <p className="workbench-overline">Notifications</p>
+                    <strong>One case needs attention</strong>
+                  </div>
+                  <span className="workbench-notifications-count">1</span>
+                </div>
+                <div className="workbench-notification-item">
+                  <span className="workbench-notification-item-dot" aria-hidden="true" />
+                  <div>
+                    <strong>Switchgear handoff risk</strong>
+                    <small>Decision due today · evidence ready</small>
+                  </div>
+                </div>
+                <button
+                  className="workbench-notification-action"
+                  type="button"
+                  onClick={() => {
+                    setNotificationsOpen(false);
+                    setSearchQuery("");
+                    setUrgentOnly(true);
+                    openShowcaseView("Workbench");
+                    setAnnouncement("Urgent cases opened.");
+                  }}
+                >
+                  Review urgent case <ArrowRight size={16} aria-hidden="true" />
+                </button>
+              </div>
+            )}
+          </div>
           <div className="workbench-user-menu">
             <button
               className="workbench-user-button"
               type="button"
               aria-expanded={userMenuOpen}
-              onClick={() => setUserMenuOpen((open) => !open)}
+              onClick={() => {
+                setUserMenuOpen((open) => !open);
+                setNotificationsOpen(false);
+              }}
             >
               <span className="workbench-avatar" aria-hidden="true">{initialsForName(identity.name)}</span>
               <span className="workbench-user-name">{identity.name}</span>
@@ -4344,10 +4394,16 @@ function App() {
       : "workbench";
   });
   const [demoMode] = useState(() => {
-    if (typeof window === "undefined") {
+    if (typeof window === "undefined" || import.meta.env.MODE === "test") {
       return false;
     }
-    return new URLSearchParams(window.location.search).get("demo") === "hero";
+    return new URLSearchParams(window.location.search).get("demo") !== "off";
+  });
+  const [technicalDetailsVisible] = useState(() => {
+    if (typeof window === "undefined" || import.meta.env.MODE === "test") {
+      return true;
+    }
+    return new URLSearchParams(window.location.search).get("view") === "technical";
   });
   const [demoIdentity, setDemoIdentity] = useState<DemoAuthIdentity>(defaultDemoIdentity);
   const [journeyState, setJourneyState] = useState<JourneyState>("loading");
@@ -4914,7 +4970,7 @@ function App() {
         onRetry={() => void loadHealth()}
       />
 
-      <details className="technical-details" id="technical-evidence">
+      <details className={`technical-details ${technicalDetailsVisible ? "" : "technical-details--product-hidden"}`} id="technical-evidence">
         <summary>
           <span>
             <span className="technical-details-kicker">Under the hood</span>
